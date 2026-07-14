@@ -67,7 +67,7 @@ No scope match → ask which exec agent owns the change.
 `/build` maps plan tasks' affected files to exec agents. Run `pyproject.toml` to confirm Python version and deps before implementing.
 
 Stack defaults (2026, override if repo says otherwise):
-- Python 3.13 · FastAPI 0.136 · Pydantic v2 · SQLAlchemy 2.0 async · asyncpg · Alembic · uv · httpx · pytest + anyio
+- Python 3.13 · FastAPI 0.136 · Pydantic v2 · SQLAlchemy 2.0 async · asyncpg · Alembic · poetry · httpx · pytest + anyio
 - No sync DB calls, no blocking I/O in async path
 - Separate ORM models from Pydantic schemas
 - Config via `pydantic-settings BaseSettings`, `@lru_cache`
