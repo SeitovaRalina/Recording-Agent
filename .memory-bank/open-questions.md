@@ -31,10 +31,22 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 **Action:** Call Notion API: `GET /v1/databases/{database_id}` → get property IDs.
 **Status:** Open — need database_ids from recruiter
 
-## Q6: calink.ru calendar event markers [BLOCKER for matching.py interview detection]
-**Question:** Do CalDAV events created via calink.ru have a recognizable marker (PRODID, organizer format, custom property) we can use for filtering?
-**Action:** Export a real calink.ru-created event as `.ics` and inspect all fields.
-**Status:** Open
+## Q6: calink.ru calendar event markers ✅ CLOSED
+**Answer (from Yandex Calendar screenshot, 2026-07-14):**
+calink.ru events in CalDAV have two **guaranteed** markers visible in the event detail:
+1. **DESCRIPTION contains `https://calink.ru/{recruiter-slug}/{type}/{id}?code=...`** — reliable HIGH-confidence signal that meeting was booked via calink scheduling link.
+2. **DESCRIPTION contains `https://telemost.360.yandex.ru/j/{id}`** — confirms this is a Telemost video meeting.
+3. **SUMMARY pattern**: `"Встреча на N минут (Кандидат Имя)"` — candidate name in parentheses at end of title. First name guaranteed; last name present in the example but may be absent.
+4. **ATTENDEE**: email present (`strokan-dima@mail.ru`) but **unreliable for Notion matching** — may differ from Notion DB email. Treat as LOW signal.
+5. **ORGANIZER**: recruiter account ("Я") — already assumed.
+**PRODID/custom CalDAV properties**: not needed — calink.ru URL in DESCRIPTION is sufficient marker.
+
+**Consequences for matching.py:**
+- `has_calink_url(description)` → `re.search(r'https://calink\.ru/', description)` — HIGH weight
+- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — HIGH weight
+- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — returns name string
+- Attendee email → LOW signal only; never block match on email mismatch
+- No PRODID inspection needed
 
 ## Q7: Multiple Яндекс accounts ✅ CLOSED
 **Answer:** All recruiters are in the same Яндекс 360 org — corporate accounts `@effective.band`.
@@ -53,7 +65,16 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 **Strategy:** Design Backend as standard HTTP endpoints first. Adapt tool descriptions to OpenClaw format after confirming. Backend design is independent of registration format.
 **Status:** Open — check OpenClaw docs/source
 
-## Q9: Recording retention policy on Яндекс.Диск
-**Question:** After successful transfer to Synology: delete immediately, or move to `/processed/` archive folder, or keep?
-**Per TOR:** Delete if all steps successful. But what is the grace period?
-**Status:** Open — decision from client needed
+## Q9: Recording retention policy on Яндекс.Диск ✅ CLOSED
+**Answer (2026-07-14):** Two-stage retention:
+1. On successful Synology upload: set custom property `app:recording_agent:processed=true` via `PATCH /disk/resources` (Yandex Disk custom_properties).
+2. DiskScanner skips files with this property → no double processing.
+3. Separate cleanup cron (daily): delete files where `processed=true` AND `processed_at` older than 7 days → `DELETE /disk/resources` (to Trash) then `DELETE /disk/trash/resources` to permanent delete.
+
+**Consequences for disk.py:**
+- `DiskScanner.list()` filters out items with `custom_properties.processed == "true"`.
+- `DiskScanner.mark_processed(path)` → PATCH custom_properties: `{"processed": "true", "processed_at": "<ISO8601>"}`.
+- `DiskScanner.delete_expired()` → list processed items, check processed_at age, delete those ≥7 days.
+- `DELETE /disk/resources` moves to Trash; `DELETE /disk/trash/resources` permanently removes. Implement both steps. Ask before permanent delete per AGENTS.md destructive-ops rule.
+
+**Note:** custom_properties reads require extra API call per file (not returned in folder listing by default). Batch by reading only after scanner confirms file is candidate for processing — not on every scan.

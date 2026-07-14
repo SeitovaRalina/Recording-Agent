@@ -92,14 +92,15 @@ HAPPY PATH (Backend executes on OpenClaw tool call):
 Agent must distinguish interview recordings from team meetings.
 Confidence increases with each positive signal:
 
-| Signal | Weight |
-|--------|--------|
-| Recording owner is a known recruiter | high |
-| Matching CalDAV event has Telemost link | high |
-| CalDAV event created via calink.ru (check PRODID or organizer) | high |
-| Event title contains interview keywords (собеседование, интервью, interview, candidate) | medium |
-| Candidate name found in event title | medium |
-| Recording in designated Disk folder (if configured) | medium |
+| Signal | Weight | Detection |
+|--------|--------|-----------|
+| Recording owner is a known recruiter | high | `disk_owner_email` in `recruiter_config` |
+| CalDAV event DESCRIPTION contains `calink.ru` URL | high | `re.search(r'https://calink\.ru/', description)` |
+| CalDAV event DESCRIPTION contains Telemost URL | high | `re.search(r'https://telemost\.360\.yandex\.ru/', description)` |
+| Candidate name extracted from SUMMARY `(...)`  | medium | `re.search(r'\(([^)]+)\)$', summary)` — first name guaranteed, last name may be absent |
+| Event title contains interview keywords | medium | `собеседование\|интервью\|interview\|candidate` in SUMMARY |
+| Recording in designated Disk folder | medium | path starts with `/Записи Телемоста/` (confirmed Q4) |
+| ATTENDEE email matches Notion card email | low | unreliable — candidate may use personal email (Q6 closed) |
 
 If total confidence < threshold → status `manual_review_required`, not `ignored`.
 Only explicit recruiter "ignore" command → status `ignored`.
