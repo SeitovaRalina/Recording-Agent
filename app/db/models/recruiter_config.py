@@ -17,6 +17,7 @@ class RecruiterConfig(Base):
     synology_base_folder: Mapped[str] = mapped_column(Text, nullable=False)
     mattermost_user_id: Mapped[str | None] = mapped_column(Text)
     mattermost_dm_channel: Mapped[str | None] = mapped_column(Text)
+    caldav_calendar_url: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )

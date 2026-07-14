@@ -17,3 +17,16 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.storage_provider == "minio"
     assert settings.confidence_threshold == 0.7
     get_settings.cache_clear()
+
+
+def test_phase_two_settings_parse_json_maps() -> None:
+    settings = get_settings().model_copy(
+        update={
+            "yandex_refresh_tokens": {"a@example.com": "refresh"},
+            "yandex_caldav_passwords": {"a@example.com": "password"},
+        }
+    )
+
+    assert settings.scan_hour == 2
+    assert settings.caldav_base_url == "https://caldav.yandex.ru"
+    assert settings.yandex_refresh_tokens["a@example.com"] == "refresh"
