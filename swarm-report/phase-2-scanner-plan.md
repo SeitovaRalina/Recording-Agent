@@ -3,7 +3,8 @@
 ## TL;DR
 
 Implement five components that turn the agent from a skeleton into a working scanner:
-`DiskScanner` lists `/Записи Телемоста/` per recruiter and marks files processed;
+`DiskScanner` lists `/Записи Телемоста/` per recruiter, skips custom-property-marked files,
+marks successful sources with custom properties, and performs gated seven-day cleanup;
 `CalDAVClient` queries **Yandex Calendar via CalDAV** ±2h from recording time and parses
 VEVENTs — **CalDAV is the source of truth for interview events, not any booking service**;
 `InterviewMatcher` scores 6 signals (Telemost URL + time proximity + candidate name primary;
@@ -26,11 +27,26 @@ Observable, checkable "done" conditions — `/review` verifies these:
    statuses excluded, not just "processed").
 2. `DiskScanner.get_metadata(path, recruiter_email)` returns dict with all `recordings`
    Disk-section fields from `docs/data-model.md`.
-3. `DiskScanner.mark_processed(path, filename, recruiter_email)` moves file to
-   `disk:/Записи Телемоста/processed/<filename>`; handles 201 sync and 202 async
-   (polls `/disk/operations/{id}`, hard cap 60 × 2s = 120s; raises `TimeoutError` on cap).
+3. Disk retention follows closed Memory Bank Q9 exactly:
+   - `list_new()` reads candidate metadata after path/media filtering and excludes
+     `custom_properties.processed == "true"`. If `processed_at` is missing or invalid, it
+     repairs it to current UTC and still excludes the source so it cannot be processed twice.
+   - `mark_processed()` PATCHes `processed="true"` and UTC ISO 8601 `processed_at` without
+     moving or renaming the source.
+   - Scheduled `delete_expired()` selects only marked files at least seven days old and moves
+     them to Trash with `DELETE /disk/resources`; if it encounters `processed=true` with
+     missing/invalid `processed_at`, it repairs the timestamp and does not delete that resource
+     in the current run. Cron has no permanent-delete authority.
+   - Separate `purge_expired_from_trash()` enumerates actual Trash resources and deletes their
+     `trash:/...` paths only with a fresh per-run `PermanentDeleteApproval` containing a named
+     operator, timezone-aware timestamp no more than five minutes old, and non-empty unique nonce.
+     Freshness uses a trusted injected aware UTC clock; callers cannot pass `now`. Approval is
+     consumed before any request and cannot be reused after success or failure. A failed/partial
+     purge is resumable only with a newly issued approval.
 4. `CalDAVClient.find_events(recruiter_email, window_start, window_end)` returns
-   `list[ParsedVEVENT]` with server out-of-range items filtered client-side in Python.
+   `list[ParsedVEVENT]` with server out-of-range items filtered client-side in Python. When no
+   URL is configured, discovery enumerates `calendar-home-set`, selects an actual calendar
+   collection, caches that collection URL, and REPORTs the collection rather than its container.
 5. `CalDAVClient` parses SUMMARY, DTSTART (→ UTC), DTEND, DESCRIPTION, ORGANIZER, ATTENDEE,
    UID; handles `TZID=Europe/Moscow` via `icalendar` `.decoded()`; handles Windows-1251
    fallback via `charset-normalizer`.
@@ -50,11 +66,20 @@ Observable, checkable "done" conditions — `/review` verifies these:
 12. `YandexTokenManager.refresh_token(recruiter_email)` POSTs to
     `https://oauth.yandex.ru/token`; acquires `SELECT FOR UPDATE` on `yandex_tokens` row
     before HTTP call; upserts `access_token + expires_at`; returns fresh token.
-13. On 401 from Disk or CalDAV API: refresh token → retry exactly once → propagate if
-    second attempt also fails.
+13. On a Disk API 401, refresh the OAuth token and retry exactly once; propagate a second 401.
+    CalDAV uses an app password, so a CalDAV 401 raises `CalDAVAuthError` immediately without
+    OAuth refresh or retry.
 14. `yandex_tokens` table already exists (Phase 1 migration `20260714_0001`). No new
     migration needed for this table.
-15. Unit tests pass for all components (mock httpx via `respx`, mock DB).
+15. Unit tests pass for all components (mock httpx via `respx`, mock DB), including Q9
+    marking/filtering/repair, exact retention boundary, async deletion and recovery, Trash-path
+    enumeration, fresh approval validation, scheduler isolation/no standing purge authority,
+    terminal `found` transitions, and exact CalDAV collection discovery.
+16. Refresh tokens and CalDAV passwords use `SecretStr` values in settings mappings and are
+    unwrapped only at outbound HTTP authentication boundaries; settings repr/dumps do not expose
+    credential values.
+17. Persisted `found` rows remain resumable after a transient CalDAV/matching failure, or are
+    transitioned explicitly after retry exhaustion; scanner idempotency cannot strand them.
 
 ---
 
@@ -105,11 +130,11 @@ files. Running `ast-index rebuild` after checkout gives exact symbol list.
 | `app/db/models.py` | **Extend** — add `caldav_calendar_url TEXT` column to `RecruiterConfig` model |
 | `alembic/versions/20260714_1000_add_caldav_calendar_url.py` | **New migration** — `ALTER TABLE recruiter_config ADD COLUMN caldav_calendar_url TEXT` |
 | `app/services/yandex_token_manager.py` | **Extend** — implement real `refresh_token()` body (was stub); add `get_access_token()` |
-| `app/tools/disk.py` | **New** — `DiskScanner` |
+| `app/tools/disk.py` | **New** — `DiskScanner`, custom-property marking/filtering, gated retention cleanup |
 | `app/tools/calendar.py` | **New** — `CalDAVClient`, `ParsedVEVENT` |
 | `app/services/matching.py` | **New** — `InterviewMatcher`, `MatchResult` |
 | `app/scheduler/__init__.py` | **New** — empty |
-| `app/scheduler/cron.py` | **New** — `scan_all_recruiters()`, `register_jobs()` |
+| `app/scheduler/cron.py` | **New** — `scan_all_recruiters()`, retention cleanup, `register_jobs()` |
 | `app/main.py` | **Extend** — add scheduler init + `register_jobs()` call to existing lifespan |
 | `tests/test_disk_scanner.py` | **New** |
 | `tests/test_calendar.py` | **New** |
@@ -138,12 +163,14 @@ Do NOT change existing Poetry sections or deps.
 
 Add fields to existing `Settings` class:
 - `CALDAV_BASE_URL: str = "https://caldav.yandex.ru"` — override for tests
-- `YANDEX_CALDAV_PASSWORDS: dict[str, str] = {}` — JSON env var; key = recruiter email
+- `YANDEX_CALDAV_PASSWORDS: dict[str, SecretStr] = {}` — JSON env var; key = recruiter email
 - `SCAN_HOUR: int = 2` — UTC hour for daily cron
 - `SCAN_MINUTE: int = 0`
 - `CONFIDENCE_THRESHOLD: float = 0.7`
 
 Use `@field_validator(..., mode='before') + json.loads()` for `YANDEX_CALDAV_PASSWORDS`.
+`YANDEX_REFRESH_TOKENS` must likewise be `dict[str, SecretStr]`; unwrap values only where the
+HTTP client constructs an authentication request.
 
 **Step 3 — `app/db/models.py` + migration (Extend)**
 
@@ -180,18 +207,39 @@ class DiskScanner:
     list_new(recruiter_email) → list[dict]
         # paginate GET /disk/resources/files?media_type=video&limit=100&offset=N
         # filter: item.path.startswith("disk:/Записи Телемоста/")
-        #         AND NOT under /processed/
+        # fetch GET /disk/resources metadata only for path/media candidates
+        # exclude metadata.custom_properties.processed == "true"
+        # if processed=true and processed_at is missing/invalid: repair to now UTC, then exclude
         # batch-check disk_file_id NOT IN recordings via SELECT ... WHERE = ANY($1)
         # idempotent: exclude ALL statuses (not just completed)
 
     get_metadata(path, recruiter_email) → dict
         # GET /disk/resources?path=<path>
 
-    mark_processed(path, filename, recruiter_email) → None
-        # POST /disk/resources/move?from=<path>&path=disk:/Записи Телемоста/processed/<filename>
-        # 201 → done. 202 → poll GET /disk/operations/{id}
-        # cap: 60 × asyncio.sleep(2); raise TimeoutError at cap
+    mark_processed(path, recruiter_email) → None
+        # PATCH /disk/resources?path=<path>
+        # JSON custom_properties: processed="true", processed_at=<UTC ISO 8601>
+        # source remains at its original path
+        # read existing properties and repair either incomplete half of the marker pair
+
+    delete_expired(recruiter_email) → list[str]
+        # inspect processed custom properties and select processed_at age >= 7 days
+        # malformed/missing processed_at: repair to now UTC and skip deletion for this run
+        # DELETE /disk/resources?path=<path> moves source to Trash
+        # soft delete only; safe for daily cron; never accepts permanent-delete authority
+
+    purge_expired_from_trash(recruiter_email, approval: PermanentDeleteApproval) → list[str]
+        # validate named operator + aware approved_at <=5 minutes old + non-empty unique nonce
+        # use injected/trusted aware UTC clock; caller cannot provide now
+        # consume approval before the first HTTP request; reuse fails after success or failure
+        # enumerate GET /disk/trash/resources and inspect origin_path/custom properties
+        # DELETE /disk/trash/resources?path=<actual trash:/... path>
+        # retry/recovery requires a newly issued approval and then re-enumerates Trash
 ```
+
+`PermanentDeleteApproval` is an immutable per-invocation value object with `approved_by: str`
+`approved_at: datetime`, and `nonce: str`. It is not loaded from settings or environment
+variables. Nonces are single-use within the purge authority and are consumed before I/O.
 
 **Step 6 — `app/tools/calendar.py` (New)**
 
@@ -209,8 +257,9 @@ class ParsedVEVENT:
 ```
 
 `find_events(recruiter_email, window_start, window_end) → list[ParsedVEVENT]`:
-1. Get `calendar_url` from `recruiter_config.caldav_calendar_url`; if null →
-   PROPFIND principal discovery fallback.
+1. Get `calendar_url` from `recruiter_config.caldav_calendar_url`; if null, PROPFIND the
+   principal for `calendar-home-set`, then PROPFIND that container to enumerate resources,
+   select an actual calendar collection, and cache the collection URL (never the home container).
 2. `httpx.AsyncClient` with `BasicAuth(email, caldav_password from settings)`.
 3. REPORT calendar-query XML time range `[window_start, window_end]` UTC
    (+15min buffer each side to account for Yandex server-side timezone bug).
@@ -287,6 +336,15 @@ Per-recruiter flow inside `scan_recruiter`:
 5. `matcher.score()` → `UPDATE recordings SET status=..., calendar_event_uid=..., calendar_dtstart=...`.
 6. Commit per recording (not per batch) to avoid partial failures.
 
+Persisted `found` rows are resumable: a later scan must load and continue incomplete `found`
+rows rather than excluding them forever. If CalDAV or matching fails transiently after insert,
+the row remains eligible for retry; permanent/exhausted failures transition explicitly to
+`failed` with the error recorded.
+
+The separate daily cleanup job calls only `delete_expired()` after scanning. It has soft-delete
+authority only. Permanent purge is invoked separately and is never registered with APScheduler;
+every invocation requires a newly constructed `PermanentDeleteApproval` for that run.
+
 **Step 9 — `app/main.py` (Extend)**
 
 Add to existing `lifespan` context manager (do NOT replace — extend):
@@ -314,14 +372,24 @@ Write `tests/test_disk_scanner.py`, `tests/test_calendar.py`, `tests/test_matchi
 | `DiskScanner.list_new` skips existing `disk_file_id` | `respx` mock 2 pages; mock DB returns 1 existing ID; assert only new returned |
 | `DiskScanner.list_new` pagination | 2 pages (100 + 30 items); assert 130 total checked |
 | `DiskScanner.list_new` filters non-Телемост paths | Include item with `disk:/Photos/...`; assert not returned |
-| `DiskScanner.mark_processed` sync 201 | Mock POST → 201; assert no polling |
-| `DiskScanner.mark_processed` async 202 + poll | Mock POST → 202; mock operations → pending→success; assert completes |
-| `DiskScanner.mark_processed` poll timeout | Mock operations always `in-progress`; assert `TimeoutError` at cap |
+| `DiskScanner.list_new` repairs malformed marked source | `processed="true"` with missing/invalid `processed_at` is repaired to current UTC and excluded before DB insertion |
+| `DiskScanner.mark_processed` custom properties | Assert PATCH sets `processed="true"` and UTC `processed_at`; assert no move request |
+| `DiskScanner.delete_expired` age boundary | Files younger than 7 days are untouched; exactly 7 days and older are eligible |
+| `DiskScanner.delete_expired` marker fallback | Missing/invalid `processed_at` is repaired to current UTC and the source is not deleted in that run |
+| `DiskScanner.delete_expired` Trash stage | Assert eligible file receives `DELETE /disk/resources` before any permanent delete |
+| `DiskScanner.purge_expired_from_trash` fresh approval | Reject empty operator/nonce, naive/future timestamp, and approval older than 5 minutes using the trusted injected UTC clock |
+| `DiskScanner.purge_expired_from_trash` single use | Consume nonce before any request; reject reuse after either successful or failed purge; retry requires a new approval |
+| `DiskScanner.purge_expired_from_trash` actual paths | Enumerate Trash; correlate `origin_path`; permanently delete the returned `trash:/...` path, never the original Disk path |
+| `DiskScanner.purge_expired_from_trash` recovery | First permanent delete fails; freshly approved rerun re-enumerates Trash and completes |
+| Processed-marker repair | Existing `processed` without `processed_at`, or vice versa, is repaired by `mark_processed` |
+| Async deletion operations | Poll 202 through success; surface failed operation and timeout |
 | `DiskScanner._request` 401 retry | First call → 401; mock `refresh_token`; second → 200; assert refresh called once |
 | `CalDAVClient.parse_vevent` full fixture | VEVENT with Telemost URL + SUMMARY `(Иван Иванов)` → all fields populated |
 | `CalDAVClient.parse_vevent` TZID→UTC | `DTSTART;TZID=Europe/Moscow:20260714T120000` → `2026-07-14T09:00:00Z` |
 | `CalDAVClient.find_events` out-of-range filter | Server returns 3 events (1 in range, 2 outside); assert returns 1 |
 | `CalDAVClient` Windows-1251 decode | Bytes in windows-1251 → correct Cyrillic summary |
+| `CalDAVClient` collection discovery | PROPFIND calendar-home-set container, enumerate child resources, select/cache actual calendar collection, then REPORT that URL |
+| `CalDAVClient` app-password 401 | Assert `CalDAVAuthError` and no OAuth refresh/retry |
 | `InterviewMatcher` telemost + time + name → auto-match | Score = 0.85 ≥ 0.7; `manual_review_required=False` |
 | `InterviewMatcher` telemost + time only → auto-match | Score = 0.65; with booking_source_marker = 0.70 ≥ 0.7 (optional bonus) |
 | `InterviewMatcher` no calink URL → still matches | Fixture with no calink/booking URL; telemost + time + name = 0.85; assert auto-match |
@@ -333,6 +401,9 @@ Write `tests/test_disk_scanner.py`, `tests/test_calendar.py`, `tests/test_matchi
 | `YandexTokenManager.refresh_token` correct POST body | Assert `grant_type=refresh_token`, `client_id`, `client_secret`, `refresh_token` in form body |
 | `YandexTokenManager.refresh_token` DB upsert | Assert `yandex_tokens` row updated with new `access_token` and correct `expires_at` |
 | `YandexTokenManager.refresh_token` race condition | Two concurrent calls; `SELECT FOR UPDATE` ensures one HTTP POST; second reads updated row |
+| Scheduler registration/concurrency | Assert daily scanner and soft-delete-only cleanup registration, recruiter/cleanup isolation, and no standing permanent-delete authority |
+| Persisted `found` retry | Simulate transient CalDAV failure after insert; next scan resumes and matches the existing row |
+| Terminal `found` transition | CalDAV auth, missing config, and invalid payload move `found` to `failed` with error diagnostics |
 
 ---
 
@@ -345,7 +416,8 @@ Hardcoding `/calendars/<email>/` may return 404 for some accounts.
 
 **Resolution:** Add `caldav_calendar_url TEXT` to `recruiter_config` (included in affected
 files above). Operator fills on onboarding. `CalDAVClient.find_events()` reads from DB;
-if null → PROPFIND discovery + cache to DB.
+if null → discover and enumerate `calendar-home-set`, select an actual calendar collection,
+then cache that collection URL to DB.
 **MVP decision:** operator-provided URL is acceptable for MVP.
 
 ---
@@ -357,7 +429,6 @@ if null → PROPFIND discovery + cache to DB.
 - Mattermost bot integration and recruiter notifications (Phase 4)
 - OpenClaw event push / `openclaw.py` service (Phase 5)
 - Audio file handling (only `video` `media_type` scanned)
-- Disk file deletion / retention cleanup (Q9: `mark_processed` done; 7-day delete deferred)
 - Manual review resolution flow
 - `/recordings` command handlers
 - One-time OAuth setup script
@@ -384,4 +455,4 @@ if null → PROPFIND discovery + cache to DB.
   timezone database on Windows.
 - `apscheduler>=3.10,<4.0` — APScheduler 4.x has incompatible API, not on PyPI.
 - `CONFIDENCE_THRESHOLD = 0.7` (configurable via `settings`).
-- Poetry used for all dep management — no uv references.
+- Poetry is the exclusive dependency and environment manager for this project.

@@ -63,10 +63,10 @@ class CalDAVClient:
         recruiter_email: str,
         **kwargs: Any,
     ) -> httpx.Response:
-        password = self._settings.yandex_caldav_passwords.get(recruiter_email)
-        if not password:
+        password_secret = self._settings.yandex_caldav_passwords.get(recruiter_email)
+        if password_secret is None:
             raise KeyError(f"No CalDAV password configured for {recruiter_email}")
-        auth = httpx.BasicAuth(recruiter_email, password)
+        auth = httpx.BasicAuth(recruiter_email, password_secret.get_secret_value())
         if self._http_client is None:
             async with httpx.AsyncClient(auth=auth) as client:
                 response = await client.request(method, url, **kwargs)
@@ -121,9 +121,27 @@ class CalDAVClient:
             if recruiter.caldav_calendar_url:
                 return recruiter.caldav_calendar_url
 
-            response = await self._request(
+            principal_response = await self._request(
                 "PROPFIND",
                 self._settings.caldav_base_url,
+                recruiter_email,
+                content=(
+                    '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                    "<d:prop><d:current-user-principal/></d:prop></d:propfind>"
+                ),
+                headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+            )
+            principal_root = ElementTree.fromstring(self._xml_bytes(principal_response.content))
+            principal_href = principal_root.findtext(
+                ".//d:current-user-principal/d:href", namespaces=CALDAV_NS
+            )
+            if not principal_href:
+                raise ValueError("CalDAV discovery returned no current-user-principal")
+            principal_url = urljoin(self._settings.caldav_base_url, cast(str, principal_href))
+
+            home_response = await self._request(
+                "PROPFIND",
+                principal_url,
                 recruiter_email,
                 content=(
                     '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
@@ -131,11 +149,33 @@ class CalDAVClient:
                 ),
                 headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
             )
-            root = ElementTree.fromstring(self._xml_bytes(response.content))
-            href = root.findtext(".//c:calendar-home-set/d:href", namespaces=CALDAV_NS)
-            if not href:
+            home_root = ElementTree.fromstring(self._xml_bytes(home_response.content))
+            home_href = home_root.findtext(".//c:calendar-home-set/d:href", namespaces=CALDAV_NS)
+            if not home_href:
                 raise ValueError("CalDAV discovery returned no calendar-home-set")
-            calendar_url = urljoin(self._settings.caldav_base_url, cast(str, href))
+            home_url = urljoin(self._settings.caldav_base_url, cast(str, home_href))
+
+            collections_response = await self._request(
+                "PROPFIND",
+                home_url,
+                recruiter_email,
+                content=(
+                    '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                    "<d:prop><d:resourcetype/></d:prop></d:propfind>"
+                ),
+                headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+            )
+            collections_root = ElementTree.fromstring(self._xml_bytes(collections_response.content))
+            calendar_href: str | None = None
+            for response_element in collections_root.findall(".//d:response", CALDAV_NS):
+                if response_element.find(".//d:resourcetype/c:calendar", CALDAV_NS) is None:
+                    continue
+                calendar_href = response_element.findtext("d:href", namespaces=CALDAV_NS)
+                if calendar_href:
+                    break
+            if not calendar_href:
+                raise ValueError("CalDAV discovery returned no calendar collection")
+            calendar_url = urljoin(home_url, calendar_href)
             recruiter.caldav_calendar_url = calendar_url
             await session.commit()
             return calendar_url

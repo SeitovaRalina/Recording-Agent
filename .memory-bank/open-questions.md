@@ -72,12 +72,29 @@ calink.ru events in CalDAV have two **guaranteed** markers visible in the event 
 **Answer (2026-07-14):** Two-stage retention:
 1. On successful Synology upload: set custom property `app:recording_agent:processed=true` via `PATCH /disk/resources` (Yandex Disk custom_properties).
 2. DiskScanner skips files with this property → no double processing.
-3. Separate cleanup cron (daily): delete files where `processed=true` AND `processed_at` older than 7 days → `DELETE /disk/resources` (to Trash) then `DELETE /disk/trash/resources` to permanent delete.
+3. Separate daily cleanup cron: for files where `processed=true` and `processed_at` is at least
+   7 days old, call `DELETE /disk/resources` to move them to Trash. This cron is soft-delete-only.
+4. Permanent deletion is a separate, never-scheduled operation. Every run requires a new
+   `PermanentDeleteApproval` with a non-empty operator identity, timezone-aware timestamp no
+   more than 5 minutes old, and non-empty unique nonce. Freshness uses an injected/trusted aware
+   UTC clock; callers cannot provide `now`. The nonce is consumed before any request and cannot
+   be reused after success or failure. The purge enumerates real Trash resources and deletes
+   their actual `trash:/...` paths. No environment/configuration boolean may grant standing
+   authority.
 
 **Consequences for disk.py:**
-- `DiskScanner.list()` filters out items with `custom_properties.processed == "true"`.
+- `DiskScanner.list()` filters out items with `custom_properties.processed == "true"`. If
+  `processed_at` is missing or invalid, it repairs the timestamp to current UTC and still
+  excludes the item, preventing duplicate processing.
 - `DiskScanner.mark_processed(path)` → PATCH custom_properties: `{"processed": "true", "processed_at": "<ISO8601>"}`.
-- `DiskScanner.delete_expired()` → list processed items, check processed_at age, delete those ≥7 days.
-- `DELETE /disk/resources` moves to Trash; `DELETE /disk/trash/resources` permanently removes. Implement both steps. Ask before permanent delete per AGENTS.md destructive-ops rule.
+- `DiskScanner.delete_expired()` → list processed items, check `processed_at` age, and move those
+  aged at least 7 days to Trash. If a processed item has missing/invalid `processed_at`, repair
+  it to current UTC and do not delete it during that run. It never permanently deletes.
+- `DiskScanner.purge_expired_from_trash(approval)` → validate fresh per-run approval, enumerate
+  Trash, correlate `origin_path`, validate markers/age, and permanently delete actual Trash paths.
+- A partial purge is resumable: a later run requires fresh approval and re-enumerates remaining
+  Trash resources. The prior nonce remains consumed even when the purge failed, so retry requires
+  a newly issued approval. Ask before every purge run per the `AGENTS.md` destructive-operations
+  rule.
 
 **Note:** custom_properties reads require extra API call per file (not returned in folder listing by default). Batch by reading only after scanner confirms file is candidate for processing — not on every scan.

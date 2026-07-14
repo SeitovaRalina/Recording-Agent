@@ -48,7 +48,9 @@
 ```
 TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │
-├─ Backend: disk.list_new() → recordings with no processed marker
+├─ Backend: disk.list_new() → recordings absent from PostgreSQL and without
+│  custom_properties.processed == "true"
+│  (processed=true + missing/invalid processed_at is repaired to now UTC and still skipped)
 │
 ├─ For each new recording:
 │   ├─ disk.get_metadata(file_id) → name, datetime, owner, url
@@ -80,12 +82,34 @@ HAPPY PATH (Backend executes on OpenClaw tool call):
     db.set_status("synology_link_created")
     notion.update_card(card_id, field="General Interview recording", value=url)
     db.set_status("notion_updated")
-    disk.mark_processed(file_id)
+    disk.mark_processed(file_id)  # PATCH processed=true + processed_at=<UTC ISO 8601>
     db.set_status("source_marked_processed")
-    [optional] disk.delete(file_id) — per retention policy
-    db.set_status("completed")
     → Backend notifies OpenClaw → OpenClaw sends recruiter confirmation
+
+DAILY RETENTION CRON (soft delete only; separate from the happy path):
+    disk.delete_expired() selects files with processed=true and processed_at >= 7 days old
+    missing/invalid processed_at is repaired to now UTC; source is not deleted in that run
+    DELETE /disk/resources moves each eligible source to Trash
+
+SEPARATE PERMANENT PURGE (never scheduled):
+    operator gives fresh per-run PermanentDeleteApproval(approved_by, approved_at, nonce)
+    identity/unique nonce must be non-empty; timestamp must be aware and <=5 minutes old
+    validate with trusted injected UTC clock; caller cannot provide now
+    consume nonce before any request; approval cannot be reused after success/failure
+    disk.purge_expired_from_trash() enumerates current Trash resources
+    validate origin_path, processed markers, and >=7-day age
+    DELETE /disk/trash/resources uses each actual trash:/... path
+    db.set_status("source_deleted") after both deletion stages succeed
+    db.set_status("completed")
 ```
+
+The source file remains in its original folder during the seven-day retention window. The
+scanner skips it by reading its custom properties. The cron job cannot permanently delete.
+Permanent deletion is destructive and must never run without the explicit approval required by
+`AGENTS.md`; approval is valid only for one invocation and cannot be stored in configuration.
+If a purge partially fails, a later run requires newly issued approval with a new nonce and
+resumes by enumerating the
+remaining real Trash resources rather than reconstructing paths from their original locations.
 
 ## Interview detection logic
 

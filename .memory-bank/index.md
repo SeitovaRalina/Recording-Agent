@@ -7,7 +7,7 @@
 
 - **What:** OpenClaw agent that automates interview recording processing. Detects new recordings on Яндекс.Диск, matches them to calendar events + Notion candidate cards, transfers to Synology, updates Notion with Synology link, notifies recruiter via Mattermost.
 - **Goal:** Zero-touch archival. Recruiter conducts interview → recording appears in Synology + Notion card within 24h (or immediately on `/recordings check`).
-- **Stack:** Python 3.13 + FastAPI · PostgreSQL · OpenClaw (agent framework) · httpx · SQLAlchemy 2.0 async + asyncpg · Alembic · uv · Pydantic v2
+- **Stack:** Python 3.13 + FastAPI · PostgreSQL · OpenClaw (agent framework) · httpx · SQLAlchemy 2.0 async + asyncpg · Alembic · Poetry · Pydantic v2
 
 ## Integrations
 

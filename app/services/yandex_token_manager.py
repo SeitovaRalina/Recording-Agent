@@ -104,7 +104,12 @@ class YandexTokenManager:
         self, recruiter_email: str, stale_access_token: str | None
     ) -> str:
         async with self._session_scope() as session:
-            configured_refresh_token = self._settings.yandex_refresh_tokens.get(recruiter_email)
+            configured_refresh_secret = self._settings.yandex_refresh_tokens.get(recruiter_email)
+            configured_refresh_token = (
+                configured_refresh_secret.get_secret_value()
+                if configured_refresh_secret is not None
+                else None
+            )
             if configured_refresh_token:
                 await self._seed_token_row(session, recruiter_email, configured_refresh_token)
             async with session.begin_nested():
@@ -122,9 +127,7 @@ class YandexTokenManager:
                     return token.access_token
 
                 refresh_token = (
-                    token.refresh_token
-                    if token is not None
-                    else self._settings.yandex_refresh_tokens.get(recruiter_email)
+                    token.refresh_token if token is not None else configured_refresh_token
                 )
                 if not refresh_token:
                     raise KeyError(f"No Yandex refresh token configured for {recruiter_email}")

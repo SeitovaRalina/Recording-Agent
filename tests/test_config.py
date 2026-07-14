@@ -1,6 +1,6 @@
 from pydantic import SecretStr
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 
 def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -20,13 +20,12 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
 
 
 def test_phase_two_settings_parse_json_maps() -> None:
-    settings = get_settings().model_copy(
-        update={
-            "yandex_refresh_tokens": {"a@example.com": "refresh"},
-            "yandex_caldav_passwords": {"a@example.com": "password"},
-        }
+    settings = Settings(
+        YANDEX_REFRESH_TOKENS='{"a@example.com":"refresh"}',
+        YANDEX_CALDAV_PASSWORDS='{"a@example.com":"password"}',
     )
 
     assert settings.scan_hour == 2
     assert settings.caldav_base_url == "https://caldav.yandex.ru"
-    assert settings.yandex_refresh_tokens["a@example.com"] == "refresh"
+    assert isinstance(settings.yandex_refresh_tokens["a@example.com"], SecretStr)
+    assert isinstance(settings.yandex_caldav_passwords["a@example.com"], SecretStr)

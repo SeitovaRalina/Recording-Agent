@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         validation_alias=AliasChoices("yandex_client_secret", "YANDEX_CLIENT_SECRET"),
     )
-    yandex_refresh_tokens: dict[str, str] = Field(
+    yandex_refresh_tokens: dict[str, SecretStr] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("yandex_refresh_tokens", "YANDEX_REFRESH_TOKENS"),
     )
@@ -29,12 +29,15 @@ class Settings(BaseSettings):
         default="https://caldav.yandex.ru",
         validation_alias=AliasChoices("caldav_base_url", "CALDAV_BASE_URL"),
     )
-    yandex_caldav_passwords: dict[str, str] = Field(
+    yandex_caldav_passwords: dict[str, SecretStr] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("yandex_caldav_passwords", "YANDEX_CALDAV_PASSWORDS"),
     )
     scan_hour: int = Field(default=2, validation_alias=AliasChoices("scan_hour", "SCAN_HOUR"))
     scan_minute: int = Field(default=0, validation_alias=AliasChoices("scan_minute", "SCAN_MINUTE"))
+    disk_cleanup_hour: int = 3
+    disk_cleanup_minute: int = 0
+    disk_retention_days: int = 7
     notion_token: SecretStr = SecretStr("")
     synology_base_url: str = ""
     synology_api_key: SecretStr = SecretStr("")

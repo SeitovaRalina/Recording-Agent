@@ -47,7 +47,7 @@ sources:
   source_marked_processed
           │
           ▼
-  source_deleted (опционально, по retention policy)
+  source_deleted (after soft-delete cron + separately approved permanent purge)
           │
           ▼
        completed
@@ -162,19 +162,40 @@ sources:
 
 ### 9. `source_marked_processed`
 
-**Когда устанавливается:** файл перемещён в `/processed/` на Яндекс.Диске (POST /disk/resources/move).
+**Set when:** after Synology upload and the downstream update succeed, PATCH
+`/disk/resources` stores `custom_properties.processed="true"` and a UTC ISO 8601
+`custom_properties.processed_at` value on the source file.
 
-**Что следует:** опционально — удалить файл с Диска (зависит от retention policy — Q9 из open-questions.md).
+**Semantics:** the source remains at its original path. Scanner discovery skips it by reading
+the custom property, independently of the PostgreSQL idempotency check. If `processed=true` but
+`processed_at` is missing or invalid, discovery repairs it to current UTC and still excludes the
+source. The cleanup fallback performs the same repair but does not delete the source in that run.
+
+**Next:** remain in this state until a separate daily cleanup considers the source after
+`processed_at` is at least seven days old.
 
 ---
 
 ### 10. `source_deleted`
 
-**Когда устанавливается:** исходный файл удалён с Яндекс.Диска (`permanently=true`).
+**Set when:** the daily soft-delete cron previously moved the eligible source to Trash with
+`DELETE /disk/resources`, and a separate explicitly approved purge permanently deleted the
+actual `trash:/...` resource with `DELETE /disk/trash/resources`.
 
-**Условие:** только если все шаги 1-9 завершились успешно.
+**Preconditions:** `source_marked_processed` succeeded, `processed_at` is at least seven days
+old, and an operator explicitly approved this purge invocation. Approval contains a non-empty
+operator identity, timezone-aware timestamp no more than five minutes old, and non-empty unique
+nonce. Freshness uses a trusted injected aware UTC clock; callers cannot supply `now`. The nonce
+is consumed before any request and cannot be reused after success or failure. Approval cannot
+come from a standing environment/configuration value; age, scheduler execution, and prior
+processing success never grant permanent-delete authority.
 
-**Что следует:** → `completed`.
+**Resumability:** the purge enumerates current Trash resources and uses their actual paths,
+correlating them through `origin_path`. A partial failure leaves remaining resources discoverable;
+a later retry requires newly issued approval with a new nonce and re-enumerates Trash. A 404 is success only when
+retained state proves that deletion was already requested/completed.
+
+**Next:** → `completed`.
 
 ---
 
@@ -239,7 +260,14 @@ sources:
 1. **`found`** — перед добавлением записи проверить `disk_file_id` в PostgreSQL. Если уже есть — пропустить.
 2. **`transfer_started`** — перед upload проверить что файл не существует в Synology по имени/пути.
 3. **`notion_updated`** — перед PATCH проверить текущее значение поля. Если уже заполнено нашим URL — пропустить.
-4. **`source_deleted`** — проверить что `source_marked_processed` завершён. Если файл уже удалён (404) — считать успехом.
+4. **`source_marked_processed`** — read the existing custom properties before PATCH; an
+   existing valid `processed=true` and `processed_at` is success. A missing/invalid timestamp on
+   a processed source is repaired to current UTC; discovery excludes it, and cleanup skips
+   deletion for that repair run.
+5. **`source_deleted`** — the scheduled stage is soft-delete-only. A separate purge verifies
+   the seven-day boundary and a fresh named per-run approval, enumerates real Trash paths, and
+   can resume after partial failure. Treat 404 as success only for a stage previously recorded
+   as requested/completed.
 
 ---
 
@@ -266,4 +294,4 @@ Threshold определяется при настройке. Начать с 0.
 - [[architecture]] → data flow happy path
 - [[mattermost]] → disambiguation flow
 - [[yandex-disk]] → операции mark_processed, delete
-- open-questions: Q9 (retention policy — нужно ли `source_deleted`)
+- open-questions: Q9 (closed two-stage retention policy)
