@@ -29,6 +29,12 @@ Test-gate hook blocks "done" until `pytest` runs and output is cited.
 | reviewer | `.claude/agents/reviewer.md` | `/review` |
 | debugger | `.claude/agents/debugger.md` | `/debug` |
 
+### Utility skills (no agent — run in main loop)
+| Skill | Purpose |
+|-------|---------|
+| `/migrate` | Alembic migrations: `generate "<msg>"`, `upgrade`, `downgrade`, `history`, `check` |
+| `/seed` | Load/clean/status dev fixture data. Never runs against production DATABASE_URL. |
+
 ### Executing (write code — matched by file scope)
 Match order: specific first, fallback last.
 

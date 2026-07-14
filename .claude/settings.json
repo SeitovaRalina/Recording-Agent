@@ -6,10 +6,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/test-gate.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/test-gate.sh\""
           }
         ]
       }
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "ast-index": {
+      "source": {
+        "source": "github",
+        "repo": "defendend/Claude-ast-index-search"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "ast-index@ast-index": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ya tool ast-index *)",
+      "Bash(ast-index *)"
     ]
   }
 }
