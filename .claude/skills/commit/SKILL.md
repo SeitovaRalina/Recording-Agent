@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Create detailed local Git commits that follow Conventional Commits 1.0.0. Use when Codex must turn staged changes into a commit message, validate type/scope/breaking-change syntax, commit without pushing, or report commit contents and verification.
+description: Create appropriately sized local Git commits that follow Conventional Commits 1.0.0. Use when Codex must turn staged changes into a commit message, validate type/scope/breaking-change syntax, commit without pushing, or report commit contents and verification.
 ---
 
 # Skill: /commit
@@ -36,7 +36,11 @@ ORCHESTRATOR. Generates and creates local Conventional Commits. Never pushes.
    <type>[optional(scope)][!]: <imperative description>
    ```
 
-6. For non-trivial work, add a detailed body after one blank line. Explain what changed, why, compatibility or operational impact, and verification commands with real results.
+6. Calibrate message length to the diff:
+   - one or two small, related files with obvious intent: header only;
+   - several files or a meaningful behavior change: header plus a short body;
+   - broad, multi-layer, risky, or breaking change: detailed body with what changed, why, compatibility/operational impact, and real verification commands.
+   Do not add boilerplate body text to small commits.
 7. Mark breaking changes with `!` in the header and/or a footer:
 
    ```text
@@ -54,7 +58,7 @@ ORCHESTRATOR. Generates and creates local Conventional Commits. Never pushes.
 - One logical change per commit. Split unrelated changes when possible.
 - Do not claim tests passed unless command was actually run; quote real output.
 - Preserve existing staged and unstaged work; never silently stage, discard, or rewrite it.
-- Commit body may be multiline and detailed; Conventional Commits allows body and footers.
+- Commit body is optional; use it when file count, risk, or cross-layer impact justifies explanation.
 - Push requires a separate explicit user request and is outside this skill.
 
 ## Examples
