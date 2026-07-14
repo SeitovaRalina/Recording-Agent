@@ -42,10 +42,13 @@ calink.ru events in CalDAV have two **guaranteed** markers visible in the event 
 **PRODID/custom CalDAV properties**: not needed — calink.ru URL in DESCRIPTION is sufficient marker.
 
 **Consequences for matching.py:**
-- `has_calink_url(description)` → `re.search(r'https://calink\.ru/', description)` — HIGH weight
-- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — HIGH weight
-- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — returns name string
-- Attendee email → LOW signal only; never block match on email mismatch
+- Source of truth is Yandex Calendar via CalDAV — matcher works regardless of booking service.
+- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — **HIGH weight (0.35)**
+- `time_overlap` — recording time within [dtstart-15min, dtend+15min] — **HIGH weight (0.30)**
+- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — **HIGH weight (0.20)**
+- `booking_source_marker` — any scheduling URL (calink.ru, calendly, etc.) in DESCRIPTION — **LOW weight (0.05), OPTIONAL** — absence never blocks match
+- calink.ru URL is NOT a required or HIGH signal; it is one of many possible booking sources
+- Attendee email → **LOW (0.05), STUBBED Phase 2**; never block match on email mismatch
 - No PRODID inspection needed
 
 ## Q7: Multiple Яндекс accounts ✅ CLOSED
