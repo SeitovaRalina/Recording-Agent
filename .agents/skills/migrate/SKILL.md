@@ -21,7 +21,7 @@ ORCHESTRATOR. Manages Alembic migrations for the PostgreSQL schema.
 ### generate "<message>"
 1. Verify `alembic.ini` and `alembic/env.py` exist. Missing → abort: "Run `/plan \"Alembic baseline\"`."
 2. Confirm all ORM models imported in `alembic/env.py` `target_metadata`. If new model added in this phase and not yet imported → warn and ask.
-3. Run: `uv run alembic revision --autogenerate -m "<message>"`
+3. Run: `docker compose run --rm migrate poetry run alembic revision --autogenerate -m "<message>"`
 4. Read generated file (`alembic/versions/<hash>_<message>.py`). Check:
    - `upgrade()` and `downgrade()` both present and non-empty.
    - No `drop_table` or `drop_column` on tables that look production-critical without explicit user confirmation.
@@ -29,19 +29,19 @@ ORCHESTRATOR. Manages Alembic migrations for the PostgreSQL schema.
 5. Report: path to file + diff summary. Offer to spawn python-fastapi agent if complex transforms needed.
 
 ### upgrade
-1. Run: `uv run alembic upgrade head`
+1. Run: `docker compose run --rm migrate poetry run alembic upgrade head`
 2. Quote output. Any `ERROR` → stop, quote verbatim, do not retry.
 
 ### downgrade
 1. Confirm with user: "This rolls back one revision. Irreversible if data was written. Proceed?"
-2. Run: `uv run alembic downgrade -1`
+2. Run: `docker compose run --rm migrate poetry run alembic downgrade -1`
 3. Quote output.
 
 ### history
-Run: `uv run alembic history --verbose`
+Run: `docker compose run --rm migrate poetry run alembic history --verbose`
 
 ### check
-Run: `uv run alembic check`
+Run: `docker compose run --rm migrate poetry run alembic check`
 Exit 0 = clean. Non-zero → list pending revisions.
 
 ## Rules

@@ -148,11 +148,15 @@ class Recording(Base):
 
     def transition_to(self, new_status: RecordingStatus | str) -> None:
         try:
-            target = RecordingStatus(new_status)
-        except ValueError as error:
-            raise ValueError(f"Invalid transition {self.status.value} → {new_status}") from error
+            current = RecordingStatus(self.status or RecordingStatus.FOUND)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid current recording status {self.status!r}") from error
 
-        current = RecordingStatus(self.status or RecordingStatus.FOUND)
+        try:
+            target = RecordingStatus(new_status)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid transition {current.value} → {new_status}") from error
+
         if target not in self.TRANSITIONS[current]:
             raise ValueError(f"Invalid transition {current.value} → {target.value}")
         self.status = target

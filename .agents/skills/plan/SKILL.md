@@ -21,8 +21,8 @@ and merge their output. No code edits here.
    `subagent_type: general-purpose`. Prefix EACH prompt with:
    > Answer TERSE: terse, drop filler, keep all technical substance.
 
-   - **planner** — "Read `.Codex/agents/planner.md` and follow it exactly. Feature: <verbatim>."
-   - **skeptic** — "Read `.Codex/agents/skeptic.md` and follow it exactly. Feature: <verbatim>."
+   - **planner** — "Read `.claude/agents/planner.md` and follow it exactly. Feature: <verbatim>."
+   - **skeptic** — "Read `.claude/agents/skeptic.md` and follow it exactly. Feature: <verbatim>."
 
    (Sharper, slightly pricier variant: run planner first, then pass its YAML into the
    skeptic prompt so it critiques the concrete plan. One extra round-trip. Use it when

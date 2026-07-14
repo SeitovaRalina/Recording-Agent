@@ -52,6 +52,21 @@ def test_transition_guard() -> None:
 
 
 @pytest.mark.anyio
+async def test_transition_guard_after_database_load(session: AsyncSession) -> None:
+    item = recording()
+    session.add(item)
+    await session.commit()
+    session.expunge_all()
+
+    loaded = await session.scalar(select(Recording).where(Recording.disk_file_id == "file-1"))
+
+    assert loaded is not None
+    assert type(loaded.status) is str
+    with pytest.raises(ValueError, match="Invalid transition found → invalid_target"):
+        loaded.transition_to("invalid_target")
+
+
+@pytest.mark.anyio
 async def test_yandex_token_upsert(session: AsyncSession) -> None:
     manager = YandexTokenManager(session)
     expires_at = datetime.now(UTC) + timedelta(hours=1)
