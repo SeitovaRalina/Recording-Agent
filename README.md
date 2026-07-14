@@ -14,7 +14,7 @@ Automates interview recording pipeline for recruiting teams.
 | Migrations | Alembic |
 | HTTP client | httpx (async) |
 | Validation | Pydantic v2 |
-| Package mgr | uv |
+| Package mgr | poetry |
 | Tests | pytest + anyio |
 | Storage (dev) | MinIO (S3-compatible, replaces Synology locally) |
 | Agent layer | OpenClaw (reasoning + recruiter dialog) |
@@ -24,27 +24,36 @@ Automates interview recording pipeline for recruiting teams.
 
 ```bash
 # 1. Clone and install
-uv sync
+poetry install
 
 # 2. Copy env template
 cp .env.example .env
 # Fill in: YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET, NOTION_TOKEN,
 #          MATTERMOST_BOT_TOKEN, DATABASE_URL, MINIO_* vars
 
-# 3. Start local services
-docker compose up -d   # PostgreSQL + MinIO
+# 3. Start the full local stack
+# PostgreSQL, MinIO, automatic migration, and FastAPI app
+docker compose up --build -d --wait
 
-# 4. Run migrations
-alembic upgrade head
+# 4. Open API documentation
+# Swagger UI: http://localhost:8000/docs
+# ReDoc:      http://localhost:8000/redoc
+# Health:     http://localhost:8000/health
 
-# 5. Authorize Yandex per recruiter (one-time)
-python tools/setup/yandex_oauth.py --recruiter anton@effective.band
+# 5. Check migration drift (runs through the app image)
+docker compose run --rm migrate poetry run alembic check
 
-# 6. Start backend
-uvicorn app.main:app --reload
+# 6. Generate a migration after ORM model changes
+docker compose run --rm migrate poetry run alembic revision --autogenerate -m "describe change"
 
-# 7. Run tests
-pytest
+# 7. Apply migration explicitly when needed
+docker compose run --rm migrate poetry run alembic upgrade head
+
+# 8. Authorize Yandex per recruiter (one-time, Phase 2)
+poetry run python tools/setup/yandex_oauth.py --recruiter anton@effective.band
+
+# 9. Run tests outside Docker
+poetry run pytest
 ```
 
 ## Branch strategy

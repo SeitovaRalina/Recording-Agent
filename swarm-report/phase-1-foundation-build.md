@@ -1,0 +1,87 @@
+# Build Report: Phase 1 Foundation
+
+## Status
+
+Complete. Python/FastAPI and DevOps scopes implemented. Local PostgreSQL and MinIO containers are running and healthy.
+
+## Python/FastAPI scope
+
+Changed files:
+
+- `pyproject.toml`, `poetry.lock`
+- `app/` configuration, async database setup, five ORM models, token manager, routers, and FastAPI entrypoint
+- `alembic.ini`, async Alembic environment, and baseline revision `20260714_0001`
+- `tests/` baseline configuration, model, token-manager, health, and event-auth tests
+
+API contracts:
+
+- `GET /health` returns HTTP 200 with `{"status":"ok"}`.
+- `POST /events` with a valid `X-OpenClaw-Secret` returns HTTP 202 with `{"accepted":true}`.
+- Missing or invalid event secret returns HTTP 401.
+
+Agent verification:
+
+- `poetry install`: passed; 60 packages installed and lock file generated.
+- `poetry run ruff check app tests alembic`: `All checks passed!`
+- `poetry run ruff format --check app tests alembic`: `24 files already formatted`
+- `poetry run mypy app`: `Success: no issues found in 17 source files`
+- `poetry run pytest -v`: `12 passed in 0.36s`
+- `poetry run alembic upgrade head --sql`: PostgreSQL SQL compiled successfully.
+
+Root verification:
+
+- `poetry run pytest -v`: `12 passed, 1 warning in 0.43s`
+- Warning: pytest could not create `.pytest_cache` because the managed workspace denied that cache write; tests were unaffected.
+- `poetry run ruff check app tests alembic`: `All checks passed!`
+- `poetry run ruff format --check app tests alembic`: `24 files already formatted`
+- `poetry run mypy app`: `Success: no issues found in 17 source files`
+- Uvicorn smoke test: `GET http://127.0.0.1:8765/health` returned `STATUS=200 BODY={"status":"ok"}`.
+
+## DevOps scope
+
+Changed files:
+
+- `docker-compose.yml`
+- `.env.example`
+- `.gitignore`
+
+Verification:
+
+- `docker compose --env-file .env.example config`: passed, exit code 0.
+- `docker compose --env-file .env.example up -d --wait`: passed; PostgreSQL and MinIO reported healthy.
+- `.env` is ignored; `poetry.lock` is not ignored.
+
+## Database verification
+
+The managed Windows host reset `asyncpg` connections to the published Docker port before they reached PostgreSQL (`WinError 64`). PostgreSQL logs showed no rejected connection. To verify the migration itself, Alembic generated the PostgreSQL upgrade SQL and it was applied transactionally with `ON_ERROR_STOP=1` through `psql` inside the healthy container:
+
+```text
+BEGIN
+CREATE TABLE (x5)
+CREATE INDEX (x8)
+INSERT 0 1
+COMMIT
+```
+
+Read-only PostgreSQL verification returned:
+
+- Domain tables: `manual_reviews`, `processing_attempts`, `recordings`, `recruiter_config`, `yandex_tokens`
+- Alembic revision: `20260714_0001`
+- `ck_recordings_status`: all 13 planned status values present
+
+This isolates the online-command failure to the managed host-to-Docker transport; the async Alembic environment imports, offline compilation, generated DDL, transactional application, and resulting schema were verified.
+
+## Cross-scope notes
+
+- `yandex_tokens` follows the schema approved in the plan. It remains absent from `docs/data-model.md`; the plan recorded this as B2 review debt, not a HIGH build blocker.
+- Existing user changes in `AGENTS.md`, `README.md`, `.agents/`, and `.codex/` were preserved.
+- Out-of-scope Phase 2+ integrations were not implemented.
+
+## Post-build workflow hardening
+
+- Added `Dockerfile` and `.dockerignore`.
+- Added Compose `migrate` one-shot service (`poetry run alembic upgrade head`).
+- Added Compose `app` service with dependency on successful migration, configurable `APP_PORT`, and an HTTP healthcheck.
+- Documented Swagger/ReDoc, migration drift checks, and command-based autogeneration in `README.md`.
+- Fixed ORM `Text`/migration type drift; Docker-network `alembic check` now returns `No new upgrade operations detected.`
+- Full Compose build succeeded; `migrate` exited 0 and app healthcheck passed. Host HTTP checks can still be reset by the managed Windows Docker transport; internal container HTTP check returned `{"status":"ok"}`.
