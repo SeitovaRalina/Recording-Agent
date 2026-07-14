@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conventional Commit"
+  short_description: "Create right-sized commits without pushing"
+  default_prompt: "Use $commit to create a right-sized Conventional Commit from the staged diff, validate scope and breaking-change markers, commit locally, and never push."
