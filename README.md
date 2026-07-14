@@ -40,21 +40,42 @@ docker compose up --build -d --wait
 # ReDoc:      http://localhost:8000/redoc
 # Health:     http://localhost:8000/health
 
-# 5. Check migration drift (runs through the app image)
-docker compose run --rm migrate poetry run alembic check
-
-# 6. Generate a migration after ORM model changes
+# 5. Generate a migration after ORM model changes
+# The repository is bind-mounted to /app, so the generated file is saved locally
+# under alembic/versions/ and can be reviewed and committed.
 docker compose run --rm migrate poetry run alembic revision --autogenerate -m "describe change"
 
-# 7. Apply migration explicitly when needed
+# 6. Review the generated migration, then apply it
 docker compose run --rm migrate poetry run alembic upgrade head
 
-# 8. Authorize Yandex per recruiter (one-time, Phase 2)
+# 7. Check that ORM metadata and the upgraded database have no schema drift
+docker compose run --rm migrate poetry run alembic check
+
+# 8. Inspect current revision or migration history when troubleshooting
+docker compose run --rm migrate poetry run alembic current
+docker compose run --rm migrate poetry run alembic history
+
+# 9. Authorize Yandex per recruiter (one-time, Phase 2)
 poetry run python tools/setup/yandex_oauth.py --recruiter anton@effective.band
 
-# 9. Run tests outside Docker
+# 10. Run tests outside Docker
 poetry run pytest
 ```
+
+## Migration workflow
+
+The `migrate` Compose service runs `alembic upgrade head` automatically before the application starts. Manual commands use the same image and Docker network, so a host Python process does not need direct access to PostgreSQL.
+
+For every ORM schema change:
+
+1. Start PostgreSQL: `docker compose up -d postgres`.
+2. Generate the revision with `docker compose run --rm migrate poetry run alembic revision --autogenerate -m "describe change"`.
+3. Review the new local file in `alembic/versions/`. Autogeneration is a draft and may require corrections.
+4. Apply it with `docker compose run --rm migrate poetry run alembic upgrade head`.
+5. Run `docker compose run --rm migrate poetry run alembic check`. Running `check` before `upgrade` reports `Target database is not up to date` by design.
+6. Commit the migration together with the matching ORM change.
+
+Do not delete a revision already recorded in `alembic_version`. For an empty, local-only head revision, first downgrade to its parent, then delete the file, run `upgrade head`, and finish with `check`. Keep applied migrations immutable in shared, staging, and production databases. If a migration file was deleted too early and Alembic cannot locate its revision, restore the exact revision file first; `stamp` cannot traverse a missing revision graph.
 
 ## Branch strategy
 
@@ -74,6 +95,8 @@ PRs: `feature/*` → `develop`. Release: `develop` → `main` after full test pa
 ```
 
 Test-gate blocks completion until `pytest` runs. See `AGENTS.md` for agent routing.
+
+Use `/commit` at each logical code-change checkpoint. It creates local Conventional Commits only, never pushes, and chooses a short or detailed message from the actual size and risk of the staged diff.
 
 ## Key docs
 
