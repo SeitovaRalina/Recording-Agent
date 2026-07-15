@@ -98,3 +98,27 @@ calink.ru events in CalDAV have two **guaranteed** markers visible in the event 
   rule.
 
 **Note:** custom_properties reads require extra API call per file (not returned in folder listing by default). Batch by reading only after scanner confirms file is candidate for processing — not on every scan.
+
+## Q11: Multiple Calendar selection and Telemost filename correlation ✅ CLOSED
+**Answer (2026-07-15):** The shared `/Записи Телемоста/` Disk folder is immutable and contains
+recordings for all recruiter calendars. Calendar selection therefore controls match eligibility,
+not Disk discovery.
+
+**Consequences:**
+- Each recruiter has exactly one explicit default calendar and zero or more selected calendars.
+  The effective set is the selected set when non-empty, otherwise the default only. A validated
+  legacy `caldav_calendar_url` is a migration fallback; response order never chooses a default.
+- Discovery stores recruiter-owned canonical same-origin HTTPS VEVENT collections and display
+  names. Configuration accepts only opaque discovered IDs; arbitrary URLs are never requested
+  with recruiter credentials.
+- Every scan queries all available calendars as one complete snapshot. Unselected calendars are
+  collision evidence only and can never become the confirmed source.
+- Official video and audio-only filenames must parse as either
+  `YYYY-MM-DD_HHMMSS_<meeting title>.webm` or
+  `YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm`. The parsed local start and exact
+  Unicode NFKC + casefold + whitespace-normalized title must agree with one eligible VEVENT.
+- Parser failure, no compatible event, unmonitored-only compatibility, duplicates, or any
+  monitored/unmonitored collision requires structured `manual_review_required`; automatic
+  `ignored` remains forbidden.
+- Confirmed matches store calendar row ID and immutable URL/display-name snapshots. Manual-review
+  diagnostics are bounded and exclude raw ICS, passwords, and authorization material.

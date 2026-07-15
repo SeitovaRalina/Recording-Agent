@@ -63,6 +63,10 @@ sources:
 
 ### 1. `found`
 
+Calendar lookup uses the start parsed from a supported Telemost filename in
+`SCAN_LOCAL_TIMEZONE`, not `disk_created_at`, as the event-correlation timestamp. An incomplete
+all-calendar query leaves this status resumable.
+
 **Когда устанавливается:** файл обнаружен в списке Яндекс.Диска, ещё не обрабатывался.
 
 **Что следует:** поиск события в Яндекс.Календаре в ±2h окне от времени записи.
@@ -73,7 +77,14 @@ sources:
 
 ### 2. `calendar_event_found`
 
-**Когда устанавливается:** найдено подходящее событие CalDAV с confidence ≥ threshold.
+This status is set only when the recording filename parses, its normalized title exactly equals
+the VEVENT `SUMMARY`, its parsed local start is temporally compatible, exactly one compatible
+occurrence belongs to the effective monitored calendar set, no compatible occurrence exists in
+an unmonitored calendar, and confidence meets the threshold. Identical occurrences are deduplicated
+only by `(calendar_id, UID, RECURRENCE-ID)`.
+
+The confirmed row stores calendar provenance: the calendar row ID and immutable canonical URL and
+display-name snapshots. A partial or stale all-calendar snapshot never produces this status.
 
 **Что следует:** поиск карточки кандидата в Notion.
 
@@ -117,6 +128,23 @@ sources:
 **При timeout рекрутера:** запись остаётся в `manual_review_required`. Reminder через 24h.
 
 **Только явный `"ignore"` от рекрутера** переводит запись в `ignored`.
+
+Calendar correlation uses structured reasons: `filename_parse_failed`, `no_compatible_event`,
+`unmonitored_calendar_only`, `multiple_compatible_events`,
+`monitored_unmonitored_collision`, and `confidence_below_threshold`. These outcomes persist no
+confirmed event or calendar provenance. Candidate diagnostics are bounded summaries and must not
+contain raw ICS, app passwords, authorization headers, or other credentials.
+
+An incomplete calendar snapshot is transient: keep the row resumable as `found` instead of making
+a partial automatic decision.
+
+### Calendar-match remediation
+
+The remediation command is dry-run by default. It identifies non-terminal
+`calendar_event_found` rows whose stored event title is incompatible with the recording filename.
+Explicit `--apply` clears confirmed calendar fields/provenance and requeues only the listed rows to
+`found`, recording operator audit output. It never rewrites terminal rows and never touches Disk,
+Notion, Synology, retention, or transfer state.
 
 ---
 

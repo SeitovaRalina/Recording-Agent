@@ -143,6 +143,31 @@ CREATE TABLE recruiter_config (
 -- VALUES ('anton@company.com', 'Антон', 'abc123-...', '/volume1/interviews/Anton', 'mm-user-id-xxx');
 ```
 
+### Calendar selection and match provenance
+
+`recruiter_calendar` is the authoritative inventory of recruiter-owned CalDAV VEVENT
+collections. Each row has a stable opaque `id`, `recruiter_id`, canonical same-origin HTTPS URL,
+display-name snapshot, `is_default`, `selected`, `available`, and `last_seen_at`. The database
+enforces unique `(recruiter_id, canonical_url)` and at most one default per recruiter. Missing
+collections are marked unavailable rather than deleted.
+
+`recruiter_config.calendar_selection_version` provides optimistic concurrency for atomic selection
+replacement. `calendar_selection_updated_at`, `calendar_selection_updated_by`,
+`calendar_selection_before`, and `calendar_selection_after` retain the latest mutation audit.
+The legacy `caldav_calendar_url` remains a compatibility fallback during migration but is not the
+authoritative selection after a successful backfill.
+
+Confirmed recordings use `matched_calendar_id` (`ON DELETE SET NULL`) plus immutable
+`matched_calendar_url` and `matched_calendar_display_name` snapshots. The snapshots preserve
+provenance if the discovered calendar is later renamed or removed. `manual_review_reason` stores a
+typed correlation outcome and `manual_review_candidates` stores bounded diagnostic summaries.
+Manual-review outcomes must clear all confirmed VEVENT fields and matched-calendar provenance;
+their diagnostics never contain raw ICS or credentials.
+
+Effective calendar semantics are computed, not stored separately: use all available selected
+calendars when any are selected, otherwise use the one available explicit default. A missing
+default is a visible configuration error and must never be repaired from response order.
+
 ### manual_reviews
 
 Открытые запросы на ручное уточнение. Закрывается после ответа рекрутера.

@@ -15,8 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, get_settings
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
-from app.services.matching import InterviewMatcher, MatchResult
-from app.tools.calendar import CalDAVAuthError, CalDAVClient
+from app.services.matching import (
+    InterviewMatcher,
+    ManualReviewReason,
+    MatchResult,
+)
+from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
 
 logger = logging.getLogger(__name__)
@@ -187,34 +191,73 @@ async def _resume_found_recording(
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
             return None
-        if recording.disk_created_at is None:
-            recording.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+        try:
+            recording_time = matcher.parse_filename(recording.disk_filename).start_utc
+        except (ValueError, KeyError):
+            result = matcher.score(recording, [])
+            _apply_match_result(recording, result)
             await session.commit()
-            return None
-        recording_time = _utc(recording.disk_created_at)
-        events = await cal.find_events(
-            recording.disk_owner_email,
-            recording_time - timedelta(hours=2),
-            recording_time + timedelta(hours=2),
-        )
+            return result
+        try:
+            events = await cal.find_events(
+                recording.disk_owner_email,
+                recording_time - timedelta(hours=2),
+                recording_time + timedelta(hours=2),
+            )
+        except CalendarConfigurationError:
+            result = MatchResult(
+                best_event=None,
+                confidence=0.0,
+                signals=[],
+                manual_review_required=True,
+                reason=ManualReviewReason.CALENDAR_CONFIGURATION_INCOMPLETE,
+            )
+            _apply_match_result(recording, result)
+            await session.commit()
+            return result
         result = matcher.score(recording, events)
-        recording.status = (
-            RecordingStatus.MANUAL_REVIEW_REQUIRED
-            if result.manual_review_required
-            else RecordingStatus.CALENDAR_EVENT_FOUND
-        )
+        _apply_match_result(recording, result)
         if result.best_event is not None:
             event = result.best_event
             recording.calendar_event_uid = event.uid
+            recording.calendar_event_recurrence_id = event.recurrence_id
             recording.calendar_event_summary = event.summary
             recording.calendar_dtstart = event.dtstart_utc
             recording.calendar_dtend = event.dtend_utc
             recording.calendar_organizer = event.organizer_email
             recording.calendar_raw_ics = event.raw_ics
+            recording.matched_calendar_id = event.calendar_id
+            recording.matched_calendar_url = event.calendar_url
+            recording.matched_calendar_display_name = event.calendar_display_name
             telemost = re.search(r"https://telemost\.360\.yandex\.ru/\S+", event.description)
             recording.calendar_telemost_url = telemost.group(0) if telemost else None
         await session.commit()
         return result
+
+
+def _apply_match_result(recording: Recording, result: MatchResult) -> None:
+    recording.status = (
+        RecordingStatus.MANUAL_REVIEW_REQUIRED
+        if result.manual_review_required
+        else RecordingStatus.CALENDAR_EVENT_FOUND
+    )
+    recording.manual_review_reason = result.reason.value if result.reason else None
+    recording.manual_review_candidates = (
+        [candidate.as_dict() for candidate in result.candidates] if result.candidates else None
+    )
+    if not result.manual_review_required:
+        return
+    recording.calendar_event_uid = None
+    recording.calendar_event_recurrence_id = None
+    recording.calendar_event_summary = None
+    recording.calendar_dtstart = None
+    recording.calendar_dtend = None
+    recording.calendar_organizer = None
+    recording.calendar_telemost_url = None
+    recording.calendar_raw_ics = None
+    recording.matched_calendar_id = None
+    recording.matched_calendar_url = None
+    recording.matched_calendar_display_name = None
 
 
 async def scan_all_recruiters(

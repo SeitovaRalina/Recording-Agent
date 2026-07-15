@@ -56,11 +56,13 @@ TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │
 ├─ For each new recording:
 │   ├─ disk.get_metadata(file_id) → name, datetime, owner, url
-│   ├─ calendar.find_events(date, owner) → CalDAV events ±2h
-│   ├─ matching.score(recording, events) → best_event + confidence
+│   ├─ calendar.find_events(date, owner) → complete all-calendar snapshot for the window
+│   ├─ matching.compatible(recording, events) → exact filename title + local start-time gate
+│   ├─ matching.score(unique eligible event) → confidence, only after collision checks
 │   └─ notion.search_cards(candidate_name, date, recruiter) → cards[]
 │
-├─ Case A: confidence >= threshold AND len(cards) == 1
+├─ Case A: unique eligible compatible event, no outside collision,
+│  confidence >= threshold, AND len(cards) == 1
 │   └─ Backend pushes event to OpenClaw:
 │       {"type": "recording_ready", "recording": ..., "event": ..., "card": ...}
 │       → OpenClaw verifies, calls Backend tool: confirm_and_transfer()
@@ -120,9 +122,34 @@ Confidence increases with each positive signal:
 
 **Source of truth: Yandex Calendar via CalDAV. Matcher must work regardless of booking service.**
 
+Every recruiter has exactly one explicit default calendar and zero or more explicitly selected
+calendars. When selected calendars exist, they are the effective eligible set; otherwise only the
+default is eligible. A validated legacy `caldav_calendar_url` remains a temporary default fallback.
+Discovery never infers a default from server ordering or display names.
+
+All discovered, available recruiter calendars are queried as one immutable snapshot. Events from
+the effective set are match candidates; events from other calendars are collision/source evidence
+only. Stale discovery or any collection query failure makes the snapshot incomplete and forbids an
+automatic match.
+
+Before confidence scoring, the Telemost filename must match one of these anchored shapes:
+`YYYY-MM-DD_HHMMSS_<meeting title>.webm` or
+`YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm`. The timestamp is interpreted in
+`SCAN_LOCAL_TIMEZONE`. Titles are normalized with Unicode NFKC, casefold, and trimmed/collapsed
+Unicode whitespace only. Compatibility requires exact normalized filename-title/SUMMARY equality
+and the existing time tolerance; no fuzzy, substring, token, punctuation-dropping, transliteration,
+edit-distance, or LLM comparison is permitted.
+
+Automatic matching requires exactly one compatible occurrence in the effective set, no compatible
+occurrence outside it, and confidence at or above the threshold. Deduplication is limited to
+`(calendar_id, UID, RECURRENCE-ID)`. Parser failure, no compatible event, unmonitored-only matches,
+multiple compatible events, or monitored/unmonitored collisions go to `manual_review_required`
+with a structured reason. Only confirmed matches persist calendar ID plus URL/display-name
+snapshots; manual review stores bounded candidate diagnostics without raw ICS or credentials.
+
 | Signal | Weight | Detection |
 |--------|--------|-----------|
-| Time overlap (recording time within event window) | HIGH = 0.35 | `recording.disk_created_at` within `[dtstart - 15min, dtend + 15min]` |
+| Time overlap (parsed filename start within event window) | HIGH = 0.35 | Parsed local filename timestamp within `[dtstart - 15min, dtend + 15min]` |
 | Booking source marker (`calink.ru`) | HIGH = 0.30 | Current effective.band booking flow; absence never blocks manual review |
 | Candidate name extracted from SUMMARY `(...)` | MEDIUM/HIGH = 0.25 | `re.search(r'\(([^)]+)\)$', summary)` — first name guaranteed, last name may be absent |
 | DESCRIPTION contains Telemost URL | LOW = 0.05 | Yandex adds it to every video event; diagnostic only |

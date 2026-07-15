@@ -68,6 +68,12 @@
 **Decision:** Full test environment (test Disk folder, test Calendar, test Notion DB copy, test Synology folder, test Mattermost channel) required before any production access.
 **Date:** 2026-07-13
 
+## ADR-014: Explicit calendar selection and exact filename correlation
+**Decision:** Each recruiter has one explicit default calendar and optional selected calendars. A non-empty selection is the effective eligible set; otherwise the default alone is eligible. Scans query every discovered available calendar for collision evidence, but unselected calendars can never supply a confirmed match. Automatic matching requires an exact conservatively normalized Telemost filename title/SUMMARY match, compatible filename start time, one eligible occurrence, no outside collision, and the confidence threshold.
+**Why:** All recordings share one immutable Telemost Disk folder, so calendar choice cannot filter discovery. Exact title/time compatibility and full-set collision evidence prevent nearby unrelated events from being auto-matched.
+**Safety:** Discovery accepts only same-origin canonical HTTPS collections returned by CalDAV. Missing defaults, stale discovery, incomplete collection queries, malformed filenames, ambiguity, and collisions fail closed to a resumable or structured manual-review path. Only a recruiter can choose `ignored`.
+**Date:** 2026-07-15
+
 ## ADR-009: Backend is the scheduler, OpenClaw is the reasoner
 **Decision:** APScheduler lives in Backend Tools Service, not in OpenClaw. Backend scans Yandex Disk on schedule, does all integrations, manages PostgreSQL state. When a decision point is reached (new recording found, ambiguity detected, manual review reply received), Backend pushes an event to OpenClaw. OpenClaw wakes up, reasons about the event, sends messages to recruiter, and calls Backend tools back as needed.
 **Why:** OpenClaw has no guaranteed cron capability. Backend already owns integrations and state. LLM reasoning (matching confidence, NLU, recruiter dialog) is the only part that belongs in OpenClaw. Clean separation: Backend = reliable executor, OpenClaw = intelligent reasoner.

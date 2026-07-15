@@ -1,100 +1,162 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import Settings
-from app.services.matching import InterviewMatcher
+from app.services.matching import (
+    InterviewMatcher,
+    ManualReviewReason,
+    normalize_title,
+    parse_recording_filename,
+)
 from app.tools.calendar import ParsedVEVENT
 
 
-def event(*, start: datetime, summary: str, description: str) -> ParsedVEVENT:
+def event(
+    *,
+    start: datetime,
+    summary: str,
+    description: str = "https://calink.ru/recruiter/interview/123?code=abc",
+    eligible: bool = True,
+    calendar_id: uuid.UUID | None = None,
+    uid: str = "event-1",
+    recurrence_id: str | None = None,
+) -> ParsedVEVENT:
     return ParsedVEVENT(
-        uid=summary,
+        uid=uid,
         summary=summary,
         dtstart_utc=start,
         dtend_utc=start + timedelta(hours=1),
         description=description,
         organizer_email="recruiter@example.com",
         attendees=[],
-        raw_ics="",
+        raw_ics="SECRET RAW ICS",
+        calendar_id=calendar_id,
+        calendar_url="https://caldav.test/calendar/",
+        calendar_display_name="Interviews",
+        eligible=eligible,
+        recurrence_id=recurrence_id,
     )
 
 
-def test_calink_time_and_candidate_name_auto_match() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    recording = SimpleNamespace(disk_created_at=created)
-    item = event(
-        start=created - timedelta(minutes=30),
-        summary="Meeting for 30 minutes (Dmitry Aqa)",
-        description="https://calink.ru/recruiter/interview/123?code=abc",
+def recording(title: str, start: datetime) -> SimpleNamespace:
+    return SimpleNamespace(
+        disk_filename=f"{start:%Y-%m-%d_%H%M%S}_{title}.webm",
+        disk_created_at=start,
     )
 
-    result = InterviewMatcher(Settings()).score(recording, [item])
+
+def test_filename_parser_video_audio_timezone_and_underscores() -> None:
+    video = parse_recording_filename("2026-07-15_085411_Тест_A.webm", "Asia/Omsk")
+    audio = parse_recording_filename("2026-07-15_085411_Тест_A_audio_only.webm", "Asia/Omsk")
+
+    assert video.start_utc == datetime(2026, 7, 15, 2, 54, 11, tzinfo=UTC)
+    assert video.title == "Тест_A"
+    assert video.audio_only is False
+    assert audio.title == "Тест_A"
+    assert audio.audio_only is True
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "renamed.webm",
+        "2026-07-15_0854_Title.webm",
+        "2026-07-15_085411_Title.mp4",
+        "2026-07-15_085411__audio_only.webm",
+        "copy_2026-07-15_085411_Title.webm",
+    ],
+)
+def test_filename_parser_rejects_unsupported_shapes(filename: str) -> None:
+    with pytest.raises(ValueError):
+        parse_recording_filename(filename, "UTC")
+
+
+def test_title_normalization_is_only_nfkc_casefold_and_whitespace() -> None:
+    assert normalize_title("  Ａbc\t Иван  ") == "abc иван"
+    assert normalize_title("Meeting-title") != normalize_title("Meeting title")
+    assert normalize_title("Иван") != normalize_title("Ivan")
+
+
+def test_unique_exact_title_time_and_calink_auto_match() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Встреча на 30 минут (Дмитрий Aqa)"
+    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+        recording(title, start), [event(start=start, summary=title)]
+    )
 
     assert result.confidence == 0.90
     assert result.manual_review_required is False
 
 
-def test_matcher_empty_and_tie_break() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    recording = SimpleNamespace(disk_created_at=created)
-    matcher = InterviewMatcher(Settings())
-    farther = event(start=created - timedelta(hours=1), summary="Team", description="")
-    closer = event(start=created - timedelta(minutes=5), summary="Sync", description="")
-
-    assert matcher.score(recording, []).best_event is None
-    assert matcher.score(recording, [farther, closer]).best_event is closer
-
-
-def test_telemost_and_time_requires_manual_review() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    recording = SimpleNamespace(disk_created_at=created)
-    item = event(
-        start=created - timedelta(minutes=30),
-        summary="Team sync",
-        description="https://telemost.360.yandex.ru/j/123",
+def test_reported_non_recruiting_title_cannot_match_other_event() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+        recording("Не рекрутинг встреча", start),
+        [event(start=start, summary="Встреча на 30 минут (Иван Иванов)")],
     )
 
-    result = InterviewMatcher(Settings()).score(recording, [item])
-
-    assert result.confidence == 0.40
-    assert result.manual_review_required is True
+    assert result.reason == ManualReviewReason.NO_COMPATIBLE_EVENT
+    assert result.best_event is None
 
 
-def test_telemost_time_and_candidate_name_requires_manual_review() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    item = event(
-        start=created - timedelta(minutes=30),
-        summary="Meeting (Ivan Ivanov)",
-        description="https://telemost.360.yandex.ru/j/123",
+def test_unmonitored_only_and_cross_calendar_collision_fail_closed() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Meeting (Ivan Ivanov)"
+    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
+    monitored = event(start=start, summary=title, calendar_id=uuid.uuid4())
+    unmonitored = event(
+        start=start,
+        summary=title,
+        eligible=False,
+        calendar_id=uuid.uuid4(),
+        uid="event-2",
     )
 
-    result = InterviewMatcher(Settings()).score(SimpleNamespace(disk_created_at=created), [item])
-
-    assert result.confidence == 0.65
-    assert result.manual_review_required is True
-
-
-def test_calink_time_and_name_match_without_telemost() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    item = event(
-        start=created - timedelta(minutes=30),
-        summary="Meeting (Ivan Ivanov)",
-        description="https://calink.ru/recruiter/interview/123?code=abc",
+    assert matcher.score(recording(title, start), [unmonitored]).reason == (
+        ManualReviewReason.UNMONITORED_ONLY
+    )
+    assert matcher.score(recording(title, start), [monitored, unmonitored]).reason == (
+        ManualReviewReason.UNMONITORED_COLLISION
     )
 
-    result = InterviewMatcher(Settings()).score(SimpleNamespace(disk_created_at=created), [item])
 
-    assert result.confidence == 0.90
-    assert result.manual_review_required is False
+def test_duplicate_occurrence_deduplicates_but_distinct_recurrence_is_ambiguous() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Meeting (Ivan Ivanov)"
+    calendar_id = uuid.uuid4()
+    first = event(start=start, summary=title, calendar_id=calendar_id)
+    duplicate = event(start=start, summary=title, calendar_id=calendar_id)
+    other_occurrence = event(
+        start=start,
+        summary=title,
+        calendar_id=calendar_id,
+        recurrence_id="20260715T085411Z",
+    )
+    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
 
-
-def test_zero_signal_event_requires_manual_review() -> None:
-    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
-    result = InterviewMatcher(Settings()).score(
-        SimpleNamespace(disk_created_at=created),
-        [event(start=created + timedelta(days=1), summary="Team sync", description="")],
+    assert matcher.score(recording(title, start), [first, duplicate]).best_event is first
+    assert matcher.score(recording(title, start), [first, other_occurrence]).reason == (
+        ManualReviewReason.MULTIPLE_ELIGIBLE
     )
 
-    assert result.confidence == 0.0
-    assert result.signals == []
-    assert result.manual_review_required is True
+
+def test_timestamp_inconsistency_and_low_confidence_fail_closed() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Team sync"
+    inconsistent = recording(title, start)
+    inconsistent.disk_created_at = start + timedelta(days=1)
+    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
+
+    assert matcher.score(inconsistent, [event(start=start, summary=title)]).reason == (
+        ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
+    )
+    assert (
+        matcher.score(
+            recording(title, start),
+            [event(start=start, summary=title, description="")],
+        ).reason
+        == ManualReviewReason.LOW_CONFIDENCE
+    )

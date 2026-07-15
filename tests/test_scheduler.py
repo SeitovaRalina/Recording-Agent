@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,20 +15,21 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
 from app.scheduler.cron import (
     _persist_found_recording,
+    _resume_found_recording,
     local_today_start_utc,
     register_jobs,
     scan_all_recruiters,
     scan_recruiter,
 )
 from app.services.matching import InterviewMatcher
-from app.tools.calendar import CalDAVAuthError
+from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 
 
 def found(file_id: str) -> Recording:
     return Recording(
         disk_file_id=file_id,
-        disk_path=f"disk:/Записи Телемоста/{file_id}.webm",
-        disk_filename=f"{file_id}.webm",
+        disk_path=f"disk:/{file_id}.webm",
+        disk_filename="2026-07-14_100000_Team sync.webm",
         disk_owner_email="recruiter@example.com",
         disk_created_at=datetime(2026, 7, 14, 10, tzinfo=UTC),
     )
@@ -37,7 +39,7 @@ def disk_metadata(file_id: str, created_at: datetime) -> dict[str, object]:
     return {
         "disk_file_id": file_id,
         "disk_path": f"disk:/{file_id}.webm",
-        "disk_filename": f"{file_id}.webm",
+        "disk_filename": f"{created_at:%Y-%m-%d_%H%M%S}_Team sync.webm",
         "disk_created_at": created_at,
     }
 
@@ -110,6 +112,110 @@ async def test_successful_scan_logs_insert_match_and_summary(
     assert "recording inserted:" in caplog.text
     assert "recording match decision:" in caplog.text
     assert "recruiter scan summary:" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Meeting (Ivan Ivanov)"
+    item = Recording(
+        disk_file_id="positive",
+        disk_path="disk:/positive.webm",
+        disk_filename=f"{start:%Y-%m-%d_%H%M%S}_{title}.webm",
+        disk_owner_email="recruiter@example.com",
+        disk_created_at=start,
+    )
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar_id = uuid.uuid4()
+    calendar = AsyncMock()
+    calendar.find_events.return_value = [
+        ParsedVEVENT(
+            uid="event-1",
+            summary=title,
+            dtstart_utc=start,
+            dtend_utc=start + timedelta(hours=1),
+            description="https://calink.ru/recruiter/interview/123",
+            organizer_email="recruiter@example.com",
+            attendees=[],
+            raw_ics="raw",
+            calendar_id=calendar_id,
+            calendar_url="https://caldav.test/interviews/",
+            calendar_display_name="Interviews",
+        )
+    ]
+
+    await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.CALENDAR_EVENT_FOUND
+    assert loaded.matched_calendar_id == calendar_id
+    assert loaded.matched_calendar_url == "https://caldav.test/interviews/"
+    assert loaded.manual_review_reason is None
+
+
+@pytest.mark.anyio
+async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    item = Recording(
+        disk_file_id="regression",
+        disk_path="disk:/regression.webm",
+        disk_filename=f"{start:%Y-%m-%d_%H%M%S}_Не рекрутинг встреча.webm",
+        disk_owner_email="recruiter@example.com",
+        disk_created_at=start,
+    )
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar = AsyncMock()
+    calendar.find_events.return_value = [
+        ParsedVEVENT(
+            uid="wrong-event",
+            summary="Встреча на 30 минут (Иван Иванов)",
+            dtstart_utc=start,
+            dtend_utc=start + timedelta(hours=1),
+            description="https://calink.ru/recruiter/interview/123",
+            organizer_email="recruiter@example.com",
+            attendees=[],
+            raw_ics="must-not-persist",
+        )
+    ]
+
+    await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "no_compatible_event"
+    assert loaded.calendar_event_uid is None
+    assert loaded.calendar_raw_ics is None
+    assert loaded.matched_calendar_url is None
 
 
 @pytest.mark.anyio
