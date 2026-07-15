@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -10,6 +11,7 @@ from app.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.main import app
 from app.scheduler.cron import (
     _persist_found_recording,
     local_today_start_utc,
@@ -108,6 +110,24 @@ async def test_successful_scan_logs_insert_match_and_summary(
     assert "recording inserted:" in caplog.text
     assert "recording match decision:" in caplog.text
     assert "recruiter scan summary:" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_persistence_failure_is_counted_in_recruiter_summary() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    disk = AsyncMock()
+    disk.list_new.return_value = [{"path": "disk:/broken.webm"}]
+    disk.get_metadata.side_effect = RuntimeError("metadata unavailable")
+
+    summary = await scan_recruiter(
+        recruiter(), factory, disk, AsyncMock(), InterviewMatcher(Settings())
+    )
+    await engine.dispose()
+
+    assert summary.failed == 1
 
 
 @pytest.mark.anyio
@@ -232,6 +252,24 @@ async def test_scan_all_recruiters_isolates_recruiter_failures(
     assert set(called) == {"first@example.com", "second@example.com"}
 
 
+@pytest.mark.anyio
+async def test_empty_recruiter_scan_emits_completion_totals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    with caplog.at_level("INFO"):
+        await scan_all_recruiters(factory, AsyncMock(), AsyncMock(), AsyncMock())
+    await engine.dispose()
+
+    assert "active_recruiters=0" in caplog.text
+    assert "scan_all_recruiters completed:" in caplog.text
+    assert "discovered=0 inserted=0 skipped_legacy=0" in caplog.text
+
+
 def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     get_settings.cache_clear()
     scheduler = MagicMock()
@@ -241,4 +279,39 @@ def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     cleanup_call = scheduler.add_job.call_args_list[1]
     assert cleanup_call.kwargs["id"] == "cleanup_expired_recordings"
     assert len(cleanup_call.kwargs["args"]) == 2
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_real_scheduler_registers_jobs_before_start_with_next_run_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    get_settings.cache_clear()
+    scheduler = AsyncIOScheduler(timezone=UTC)
+
+    with caplog.at_level("INFO"):
+        register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        scheduler.start(paused=True)
+    try:
+        scan_job = scheduler.get_job("scan_all_recruiters")
+        cleanup_job = scheduler.get_job("cleanup_expired_recordings")
+        assert scan_job is not None
+        assert cleanup_job is not None
+        assert scan_job.next_run_time is not None
+        assert cleanup_job.next_run_time is not None
+        assert "scan_all_recruiters registered:" in caplog.text
+        assert "cleanup_expired_recordings registered:" in caplog.text
+        assert "next_run=None" not in caplog.text
+    finally:
+        scheduler.shutdown(wait=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
+    get_settings.cache_clear()
+    async with app.router.lifespan_context(app):
+        assert app.state.scheduler.running is True
+        assert app.state.scheduler.get_job("scan_all_recruiters") is not None
+        assert app.state.scheduler.get_job("cleanup_expired_recordings") is not None
     get_settings.cache_clear()

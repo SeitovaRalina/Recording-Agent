@@ -35,3 +35,16 @@ Complete. No unresolved plan blockers.
 - The configuration example documents `SCAN_IGNORE_BEFORE_TODAY=true` and
   `SCAN_LOCAL_TIMEZONE=Asia/Omsk`.
 - No commit was created at the user's request.
+
+## Retry after review
+
+- Fixed scheduler registration before `AsyncIOScheduler.start()`: next-run timestamps are now
+  computed from the corresponding `CronTrigger`, rather than read from an uninitialised Job.
+- Completion totals are logged for empty recruiter sets, and discovery-persistence failures count
+  toward the per-run failure total.
+- Added real `AsyncIOScheduler` registration and FastAPI lifespan tests.
+- Verification:
+  - `poetry run ruff check app tests alembic` — pass.
+  - `poetry run ruff format --check app tests alembic` — pass.
+  - `poetry run mypy app tests` — `Success: no issues found in 33 source files`.
+  - `poetry run pytest` — `62 passed`; one existing `.pytest_cache` permission warning.

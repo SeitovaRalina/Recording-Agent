@@ -4,7 +4,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -69,6 +69,7 @@ async def scan_recruiter(
             elif outcome == "skipped_legacy":
                 summary.skipped_legacy += 1
         except Exception:
+            summary.failed += 1
             logger.exception("Failed to persist Disk recording for %s", recruiter.email)
 
     async with session_factory() as session:
@@ -228,7 +229,6 @@ async def scan_all_recruiters(
     logger.info("scan_all_recruiters started: active_recruiters=%d", len(recruiters))
     if not recruiters:
         logger.warning("No active recruiters configured; disk scan skipped")
-        return
     results = await asyncio.gather(
         *(
             scan_recruiter(item, session_factory, disk, cal, matcher, settings)
@@ -312,44 +312,53 @@ def register_jobs(
     matcher: InterviewMatcher,
 ) -> None:
     settings = get_settings()
+    scan_trigger = CronTrigger(
+        hour=settings.scan_hour,
+        minute=settings.scan_minute,
+        timezone=UTC,
+    )
     scheduler.add_job(
         scan_all_recruiters,
-        CronTrigger(hour=settings.scan_hour, minute=settings.scan_minute, timezone=UTC),
+        scan_trigger,
         args=[session_factory, disk, cal, matcher, settings],
         max_instances=1,
         misfire_grace_time=3600,
         id="scan_all_recruiters",
         replace_existing=True,
     )
-    scan_job = scheduler.get_job("scan_all_recruiters")
     logger.info(
         "scan_all_recruiters registered: hour=%d minute=%d next_run=%s",
         settings.scan_hour,
         settings.scan_minute,
-        scan_job.next_run_time.isoformat() if scan_job and scan_job.next_run_time else None,
+        _next_run_time(scan_trigger).isoformat(),
+    )
+    cleanup_trigger = CronTrigger(
+        hour=settings.disk_cleanup_hour,
+        minute=settings.disk_cleanup_minute,
+        timezone=UTC,
     )
     scheduler.add_job(
         cleanup_expired_recordings,
-        CronTrigger(
-            hour=settings.disk_cleanup_hour,
-            minute=settings.disk_cleanup_minute,
-            timezone=UTC,
-        ),
+        cleanup_trigger,
         args=[session_factory, disk],
         max_instances=1,
         misfire_grace_time=3600,
         id="cleanup_expired_recordings",
         replace_existing=True,
     )
-    cleanup_job = scheduler.get_job("cleanup_expired_recordings")
     logger.info(
         "cleanup_expired_recordings registered: hour=%d minute=%d next_run=%s",
         settings.disk_cleanup_hour,
         settings.disk_cleanup_minute,
-        cleanup_job.next_run_time.isoformat()
-        if cleanup_job and cleanup_job.next_run_time
-        else None,
+        _next_run_time(cleanup_trigger).isoformat(),
     )
+
+
+def _next_run_time(trigger: CronTrigger, now: datetime | None = None) -> datetime:
+    next_run = trigger.get_next_fire_time(None, now or datetime.now(UTC))
+    if next_run is None:
+        raise RuntimeError("Cron trigger has no next run time")
+    return cast(datetime, next_run).astimezone(UTC)
 
 
 def _datetime(value: Any) -> datetime | None:
