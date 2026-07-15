@@ -33,7 +33,7 @@
 **Date:** 2026-07-13
 
 ## ADR-007: Interview detection via multi-signal scoring
-**Decision:** Don't rely on a single field to identify interview recordings. Score multiple signals (recruiter ownership, Telemost link in event, calink.ru marker, keywords, candidate name). Low confidence → `manual_review_required`, not auto-ignore.
+**Decision:** Don't rely on a single field to identify interview recordings. Time overlap and the `calink.ru` booking marker are high signals for the current effective.band flow; candidate name is medium/high; Telemost confirms only a video call and is a low diagnostic signal. Low confidence → `manual_review_required`, not auto-ignore.
 **Why:** False negatives (missed interviews) worse than false positives (asking recruiter to confirm).
 **Date:** 2026-07-13
 

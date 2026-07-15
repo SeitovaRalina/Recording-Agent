@@ -2,22 +2,42 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from dataclasses import dataclass
+from datetime import UTC, datetime, time, timedelta
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
-from app.services.matching import InterviewMatcher
+from app.services.matching import InterviewMatcher, MatchResult
 from app.tools.calendar import CalDAVAuthError, CalDAVClient
 from app.tools.disk import DiskScanner
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ScanSummary:
+    discovered: int = 0
+    inserted: int = 0
+    skipped_legacy: int = 0
+    matched: int = 0
+    manual_review: int = 0
+    failed: int = 0
+
+
+def local_today_start_utc(settings: Settings, now: datetime | None = None) -> datetime:
+    current = _utc(now or datetime.now(UTC))
+    local_zone = ZoneInfo(settings.scan_local_timezone)
+    return datetime.combine(current.astimezone(local_zone).date(), time.min, local_zone).astimezone(
+        UTC
+    )
 
 
 async def scan_recruiter(
@@ -26,7 +46,11 @@ async def scan_recruiter(
     disk: DiskScanner,
     cal: CalDAVClient,
     matcher: InterviewMatcher,
-) -> None:
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> ScanSummary:
+    active_settings = settings or get_settings()
+    summary = ScanSummary()
     try:
         files = await disk.list_new(recruiter.email)
     except Exception:
@@ -34,9 +58,16 @@ async def scan_recruiter(
             "Disk listing failed for %s; resuming persisted recordings", recruiter.email
         )
         files = []
+    summary.discovered = len(files)
     for file_item in files:
         try:
-            await _persist_found_recording(recruiter, file_item, session_factory, disk)
+            outcome = await _persist_found_recording(
+                recruiter, file_item, session_factory, disk, active_settings, now
+            )
+            if outcome == "inserted":
+                summary.inserted += 1
+            elif outcome == "skipped_legacy":
+                summary.skipped_legacy += 1
         except Exception:
             logger.exception("Failed to persist Disk recording for %s", recruiter.email)
 
@@ -53,12 +84,42 @@ async def scan_recruiter(
         )
     for recording_id in recording_ids:
         try:
-            await _resume_found_recording(recording_id, session_factory, cal, matcher)
+            result = await _resume_found_recording(recording_id, session_factory, cal, matcher)
+            if result is not None:
+                if result.manual_review_required:
+                    summary.manual_review += 1
+                    status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+                else:
+                    summary.matched += 1
+                    status = RecordingStatus.CALENDAR_EVENT_FOUND
+                logger.info(
+                    "recording match decision: id=%s status=%s confidence=%.2f signals=%s "
+                    "event_summary=%s",
+                    recording_id,
+                    status,
+                    result.confidence,
+                    result.signals,
+                    result.best_event.summary if result.best_event is not None else None,
+                )
         except (CalDAVAuthError, KeyError, ValueError) as error:
             await _fail_recording(recording_id, session_factory, error)
+            summary.failed += 1
             logger.error("Recording %s failed permanently: %s", recording_id, error)
         except Exception:
+            summary.failed += 1
             logger.exception("Recording %s remains resumable after scan failure", recording_id)
+    logger.info(
+        "recruiter scan summary: recruiter=%s discovered=%d inserted=%d skipped_legacy=%d "
+        "matched=%d manual_review=%d failed=%d",
+        recruiter.email,
+        summary.discovered,
+        summary.inserted,
+        summary.skipped_legacy,
+        summary.matched,
+        summary.manual_review,
+        summary.failed,
+    )
+    return summary
 
 
 async def _persist_found_recording(
@@ -66,29 +127,53 @@ async def _persist_found_recording(
     file_item: dict[str, Any],
     session_factory: async_sessionmaker[AsyncSession],
     disk: DiskScanner,
-) -> None:
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> Literal["existing", "inserted", "skipped_legacy"]:
     path = str(file_item["path"])
     metadata = await disk.get_metadata(path, recruiter.email)
+    created_at = _datetime(metadata.get("disk_created_at"))
+    active_settings = settings or get_settings()
+    if (
+        active_settings.scan_ignore_before_today
+        and created_at is not None
+        and created_at < local_today_start_utc(active_settings, now)
+    ):
+        logger.info(
+            "legacy Disk recording skipped: recruiter=%s filename=%s created_at=%s",
+            recruiter.email,
+            metadata.get("disk_filename"),
+            created_at.isoformat(),
+        )
+        return "skipped_legacy"
     async with session_factory() as session:
         existing = await session.scalar(
             select(Recording.id).where(Recording.disk_file_id == str(metadata["disk_file_id"]))
         )
         if existing is not None:
-            return
-        session.add(
-            Recording(
-                disk_file_id=str(metadata["disk_file_id"]),
-                disk_path=str(metadata["disk_path"]),
-                disk_filename=str(metadata["disk_filename"]),
-                disk_owner_email=recruiter.email,
-                disk_created_at=_datetime(metadata.get("disk_created_at")),
-                disk_modified_at=_datetime(metadata.get("disk_modified_at")),
-                disk_size_bytes=_integer(metadata.get("disk_size_bytes")),
-                disk_mime_type=_optional_string(metadata.get("disk_mime_type")),
-                disk_md5=_optional_string(metadata.get("disk_md5")),
-            )
+            return "existing"
+        recording = Recording(
+            disk_file_id=str(metadata["disk_file_id"]),
+            disk_path=str(metadata["disk_path"]),
+            disk_filename=str(metadata["disk_filename"]),
+            disk_owner_email=recruiter.email,
+            disk_created_at=created_at,
+            disk_modified_at=_datetime(metadata.get("disk_modified_at")),
+            disk_size_bytes=_integer(metadata.get("disk_size_bytes")),
+            disk_mime_type=_optional_string(metadata.get("disk_mime_type")),
+            disk_md5=_optional_string(metadata.get("disk_md5")),
         )
+        session.add(recording)
         await session.commit()
+        logger.info(
+            "recording inserted: id=%s recruiter=%s filename=%s created_at=%s status=%s",
+            recording.id,
+            recruiter.email,
+            recording.disk_filename,
+            recording.disk_created_at.isoformat() if recording.disk_created_at else None,
+            recording.status,
+        )
+        return "inserted"
 
 
 async def _resume_found_recording(
@@ -96,15 +181,15 @@ async def _resume_found_recording(
     session_factory: async_sessionmaker[AsyncSession],
     cal: CalDAVClient,
     matcher: InterviewMatcher,
-) -> None:
+) -> MatchResult | None:
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
-            return
+            return None
         if recording.disk_created_at is None:
             recording.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
             await session.commit()
-            return
+            return None
         recording_time = _utc(recording.disk_created_at)
         events = await cal.find_events(
             recording.disk_owner_email,
@@ -128,6 +213,7 @@ async def _resume_found_recording(
             telemost = re.search(r"https://telemost\.360\.yandex\.ru/\S+", event.description)
             recording.calendar_telemost_url = telemost.group(0) if telemost else None
         await session.commit()
+        return result
 
 
 async def scan_all_recruiters(
@@ -135,18 +221,44 @@ async def scan_all_recruiters(
     disk: DiskScanner,
     cal: CalDAVClient,
     matcher: InterviewMatcher,
+    settings: Settings | None = None,
 ) -> None:
+    started_at = datetime.now(UTC)
     recruiters = await _active_recruiters(session_factory)
+    logger.info("scan_all_recruiters started: active_recruiters=%d", len(recruiters))
     if not recruiters:
         logger.warning("No active recruiters configured; disk scan skipped")
         return
     results = await asyncio.gather(
-        *(scan_recruiter(item, session_factory, disk, cal, matcher) for item in recruiters),
+        *(
+            scan_recruiter(item, session_factory, disk, cal, matcher, settings)
+            for item in recruiters
+        ),
         return_exceptions=True,
     )
     for recruiter, result in zip(recruiters, results, strict=True):
         if isinstance(result, BaseException):
             logger.error("Recruiter scan failed for %s: %s", recruiter.email, result)
+    summaries = [result for result in results if isinstance(result, ScanSummary)]
+    totals = ScanSummary(
+        discovered=sum(item.discovered for item in summaries),
+        inserted=sum(item.inserted for item in summaries),
+        skipped_legacy=sum(item.skipped_legacy for item in summaries),
+        matched=sum(item.matched for item in summaries),
+        manual_review=sum(item.manual_review for item in summaries),
+        failed=sum(item.failed for item in summaries),
+    )
+    logger.info(
+        "scan_all_recruiters completed: duration_seconds=%.3f discovered=%d inserted=%d "
+        "skipped_legacy=%d matched=%d manual_review=%d failed=%d",
+        (datetime.now(UTC) - started_at).total_seconds(),
+        totals.discovered,
+        totals.inserted,
+        totals.skipped_legacy,
+        totals.matched,
+        totals.manual_review,
+        totals.failed,
+    )
 
 
 async def cleanup_expired_recordings(
@@ -203,11 +315,18 @@ def register_jobs(
     scheduler.add_job(
         scan_all_recruiters,
         CronTrigger(hour=settings.scan_hour, minute=settings.scan_minute, timezone=UTC),
-        args=[session_factory, disk, cal, matcher],
+        args=[session_factory, disk, cal, matcher, settings],
         max_instances=1,
         misfire_grace_time=3600,
         id="scan_all_recruiters",
         replace_existing=True,
+    )
+    scan_job = scheduler.get_job("scan_all_recruiters")
+    logger.info(
+        "scan_all_recruiters registered: hour=%d minute=%d next_run=%s",
+        settings.scan_hour,
+        settings.scan_minute,
+        scan_job.next_run_time.isoformat() if scan_job and scan_job.next_run_time else None,
     )
     scheduler.add_job(
         cleanup_expired_recordings,
@@ -221,6 +340,15 @@ def register_jobs(
         misfire_grace_time=3600,
         id="cleanup_expired_recordings",
         replace_existing=True,
+    )
+    cleanup_job = scheduler.get_job("cleanup_expired_recordings")
+    logger.info(
+        "cleanup_expired_recordings registered: hour=%d minute=%d next_run=%s",
+        settings.disk_cleanup_hour,
+        settings.disk_cleanup_minute,
+        cleanup_job.next_run_time.isoformat()
+        if cleanup_job and cleanup_job.next_run_time
+        else None,
     )
 
 

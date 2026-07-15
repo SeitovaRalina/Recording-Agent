@@ -34,8 +34,8 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 ## Q6: calink.ru calendar event markers ✅ CLOSED
 **Answer (from Yandex Calendar screenshot, 2026-07-14):**
 calink.ru events in CalDAV have two **guaranteed** markers visible in the event detail:
-1. **DESCRIPTION contains `https://calink.ru/{recruiter-slug}/{type}/{id}?code=...`** — reliable HIGH-confidence signal that meeting was booked via calink scheduling link.
-2. **DESCRIPTION contains `https://telemost.360.yandex.ru/j/{id}`** — confirms this is a Telemost video meeting.
+1. **DESCRIPTION contains `https://calink.ru/{recruiter-slug}/{type}/{id}?code=...`** — a reliable HIGH-confidence signal that the meeting was booked through the current effective.band flow.
+2. **DESCRIPTION contains `https://telemost.360.yandex.ru/j/{id}`** — confirms only that this is a Telemost video meeting. Yandex prepends this block to every video event, including self-tests and manual events; it is a low diagnostic signal, not evidence of an interview.
 3. **SUMMARY pattern**: `"Встреча на N минут (Кандидат Имя)"` — candidate name in parentheses at end of title. First name guaranteed; last name present in the example but may be absent.
 4. **ATTENDEE**: email present (`strokan-dima@mail.ru`) but **unreliable for Notion matching** — may differ from Notion DB email. Treat as LOW signal.
 5. **ORGANIZER**: recruiter account ("Я") — already assumed.
@@ -43,11 +43,11 @@ calink.ru events in CalDAV have two **guaranteed** markers visible in the event 
 
 **Consequences for matching.py:**
 - Source of truth is Yandex Calendar via CalDAV — matcher works regardless of booking service.
-- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — **HIGH weight (0.35)**
-- `time_overlap` — recording time within [dtstart-15min, dtend+15min] — **HIGH weight (0.30)**
-- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — **HIGH weight (0.20)**
-- `booking_source_marker` — any scheduling URL (calink.ru, calendly, etc.) in DESCRIPTION — **LOW weight (0.05), OPTIONAL** — absence never blocks match
-- calink.ru URL is NOT a required or HIGH signal; it is one of many possible booking sources
+- `time_overlap` — recording time within [dtstart-15min, dtend+15min] — **HIGH weight (0.35)**
+- `booking_source_marker` — `calink.ru` URL in DESCRIPTION — **HIGH weight (0.30)** for the current effective.band flow; absence never blocks manual review
+- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — **MEDIUM/HIGH weight (0.25)**
+- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — **LOW weight (0.05)**
+- Interview keywords — **LOW weight (0.05)**
 - Attendee email → **LOW (0.05), STUBBED Phase 2**; never block match on email mismatch
 - No PRODID inspection needed
 

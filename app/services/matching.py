@@ -34,22 +34,22 @@ class InterviewMatcher:
         score = 0.0
         signals: list[str] = []
         if TELEMOST_PATTERN.search(event.description):
-            score += 0.35
+            score += 0.05
             signals.append("has_telemost_url")
         recording_time = self._recording_time(recording)
         if recording_time is not None and event.dtstart_utc - timedelta(
             minutes=15
         ) <= recording_time <= event.dtend_utc + timedelta(minutes=15):
-            score += 0.30
+            score += 0.35
             signals.append("time_overlap")
         if NAME_PATTERN.search(event.summary):
-            score += 0.20
+            score += 0.25
             signals.append("name_in_summary")
         if INTERVIEW_PATTERN.search(event.summary):
             score += 0.05
             signals.append("interview_keywords")
         if BOOKING_PATTERN.search(event.description):
-            score += 0.05
+            score += 0.30
             signals.append("booking_source_marker")
         # TODO Phase 3: score attendee_email_match after Notion candidate lookup is wired.
         return min(round(score, 2), 1.0), signals

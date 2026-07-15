@@ -19,18 +19,18 @@ def event(*, start: datetime, summary: str, description: str) -> ParsedVEVENT:
     )
 
 
-def test_matcher_core_signals_match_without_booking_marker() -> None:
+def test_calink_time_and_candidate_name_auto_match() -> None:
     created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
     recording = SimpleNamespace(disk_created_at=created)
     item = event(
         start=created - timedelta(minutes=30),
-        summary="Screen (Ivan Ivanov)",
-        description="https://telemost.360.yandex.ru/j/123",
+        summary="Meeting for 30 minutes (Dmitry Aqa)",
+        description="https://calink.ru/recruiter/interview/123?code=abc",
     )
 
     result = InterviewMatcher(Settings()).score(recording, [item])
 
-    assert result.confidence == 0.85
+    assert result.confidence == 0.90
     assert result.manual_review_required is False
 
 
@@ -45,20 +45,46 @@ def test_matcher_empty_and_tie_break() -> None:
     assert matcher.score(recording, [farther, closer]).best_event is closer
 
 
-def test_booking_marker_raises_telemost_and_time_to_threshold() -> None:
+def test_telemost_and_time_requires_manual_review() -> None:
     created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
     recording = SimpleNamespace(disk_created_at=created)
     item = event(
         start=created - timedelta(minutes=30),
         summary="Team sync",
-        description=(
-            "https://telemost.360.yandex.ru/j/123 https://calendly.com/recruiter/interview"
-        ),
+        description="https://telemost.360.yandex.ru/j/123",
     )
 
     result = InterviewMatcher(Settings()).score(recording, [item])
 
-    assert result.confidence == 0.70
+    assert result.confidence == 0.40
+    assert result.manual_review_required is True
+
+
+def test_telemost_time_and_candidate_name_requires_manual_review() -> None:
+    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    item = event(
+        start=created - timedelta(minutes=30),
+        summary="Meeting (Ivan Ivanov)",
+        description="https://telemost.360.yandex.ru/j/123",
+    )
+
+    result = InterviewMatcher(Settings()).score(SimpleNamespace(disk_created_at=created), [item])
+
+    assert result.confidence == 0.65
+    assert result.manual_review_required is True
+
+
+def test_calink_time_and_name_match_without_telemost() -> None:
+    created = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    item = event(
+        start=created - timedelta(minutes=30),
+        summary="Meeting (Ivan Ivanov)",
+        description="https://calink.ru/recruiter/interview/123?code=abc",
+    )
+
+    result = InterviewMatcher(Settings()).score(SimpleNamespace(disk_created_at=created), [item])
+
+    assert result.confidence == 0.90
     assert result.manual_review_required is False
 
 

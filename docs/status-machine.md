@@ -269,22 +269,29 @@ retained state proves that deletion was already requested/completed.
    can resume after partial failure. Treat 404 as success only for a stage previously recorded
    as requested/completed.
 
+### First-run discovery cutoff
+
+By default, a recruiter's first discovery scan inserts only Disk files created at or after the
+start of the current local date. `SCAN_LOCAL_TIMEZONE` defines the local date (default:
+`Asia/Omsk`), and `SCAN_IGNORE_BEFORE_TODAY` can disable the cutoff. The cutoff applies only to
+new Disk files: existing `recordings` rows, including older `found` rows, remain resumable.
+
+Scanner insert and match-decision entries are application logs, not PostgreSQL logs.
+
 ---
 
-## Confidence Scoring (из architecture.md)
+## Confidence Scoring
 
-| Сигнал | Вес |
-|--------|-----|
-| Owner = known recruiter | high |
-| CalDAV event has Telemost link | high |
-| CalDAV event created via calink.ru | high |
-| Event title contains interview keywords | medium |
-| Candidate name in event title | medium |
-| Recording in designated Disk folder | medium |
+| Signal | Weight |
+|--------|--------|
+| Time overlap | high (0.35) |
+| `calink.ru` booking marker | high (0.30) |
+| Candidate name in event title | medium/high (0.25) |
+| Telemost URL | low (0.05), diagnostic only |
+| Interview keywords | low (0.05) |
 
-Если `total_confidence < threshold` → `manual_review_required` (не `ignored`).
-
-Threshold определяется при настройке. Начать с 0.7.
+If `total_confidence < threshold`, transition to `manual_review_required`, not `ignored`.
+Start with a threshold of `0.7`.
 
 ---
 

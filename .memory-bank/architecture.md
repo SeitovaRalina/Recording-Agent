@@ -51,6 +51,8 @@ TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 ├─ Backend: disk.list_new() → recordings absent from PostgreSQL and without
 │  custom_properties.processed == "true"
 │  (processed=true + missing/invalid processed_at is repaired to now UTC and still skipped)
+│  On first-run discovery, files created before the current local date are skipped by default;
+│  the cutoff is configurable and does not apply to existing database rows.
 │
 ├─ For each new recording:
 │   ├─ disk.get_metadata(file_id) → name, datetime, owner, url
@@ -120,11 +122,11 @@ Confidence increases with each positive signal:
 
 | Signal | Weight | Detection |
 |--------|--------|-----------|
-| DESCRIPTION contains Telemost URL | HIGH = 0.35 | `re.search(r'https://telemost\.360\.yandex\.ru/', description)` |
-| Time overlap (recording time within event window) | HIGH = 0.30 | `recording.disk_created_at` within `[dtstart - 15min, dtend + 15min]` |
-| Candidate name extracted from SUMMARY `(...)` | HIGH = 0.20 | `re.search(r'\(([^)]+)\)$', summary)` — first name guaranteed, last name may be absent |
+| Time overlap (recording time within event window) | HIGH = 0.35 | `recording.disk_created_at` within `[dtstart - 15min, dtend + 15min]` |
+| Booking source marker (`calink.ru`) | HIGH = 0.30 | Current effective.band booking flow; absence never blocks manual review |
+| Candidate name extracted from SUMMARY `(...)` | MEDIUM/HIGH = 0.25 | `re.search(r'\(([^)]+)\)$', summary)` — first name guaranteed, last name may be absent |
+| DESCRIPTION contains Telemost URL | LOW = 0.05 | Yandex adds it to every video event; diagnostic only |
 | Interview keywords in SUMMARY | LOW = 0.05 | `собеседование\|интервью\|interview\|candidate` in SUMMARY |
-| Booking source marker (any scheduling service URL) | LOW = 0.05 | Any booking URL in DESCRIPTION (calink.ru, calendly.com, cal.com, etc.) — **optional**, never block match on absence |
 | ATTENDEE email matches Notion card email | LOW = 0.05 | **STUBBED Phase 2** — always 0; resolved Phase 3 |
 
 If total confidence < threshold → status `manual_review_required`, not `ignored`.

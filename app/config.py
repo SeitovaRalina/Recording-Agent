@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     )
     scan_hour: int = Field(default=2, validation_alias=AliasChoices("scan_hour", "SCAN_HOUR"))
     scan_minute: int = Field(default=0, validation_alias=AliasChoices("scan_minute", "SCAN_MINUTE"))
+    scan_ignore_before_today: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("scan_ignore_before_today", "SCAN_IGNORE_BEFORE_TODAY"),
+    )
+    scan_local_timezone: str = Field(
+        default="Asia/Omsk",
+        validation_alias=AliasChoices("scan_local_timezone", "SCAN_LOCAL_TIMEZONE"),
+    )
     disk_cleanup_hour: int = 3
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7
