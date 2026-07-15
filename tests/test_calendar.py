@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models.recruiter_calendar import RecruiterCalendar
 from app.db.models.recruiter_config import RecruiterConfig
-from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
+from app.tools.calendar import (
+    CalDAVAuthError,
+    CalDAVClient,
+    CalendarSnapshotIncomplete,
+)
 
 ICS = """BEGIN:VCALENDAR
 VERSION:2.0
@@ -183,7 +187,7 @@ async def test_unavailable_legacy_default_is_never_requested_before_discovery(
     )
     client = httpx.AsyncClient()
     try:
-        with pytest.raises(CalendarConfigurationError):
+        with pytest.raises(CalendarSnapshotIncomplete):
             await CalDAVClient(settings, session, client).find_events(
                 recruiter.email,
                 datetime(2026, 7, 15, tzinfo=UTC),
@@ -191,3 +195,43 @@ async def test_unavailable_legacy_default_is_never_requested_before_discovery(
             )
     finally:
         await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_selected_unavailable_or_stale_calendar_never_falls_back_to_default(
+    session: AsyncSession,
+) -> None:
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    session.add(recruiter)
+    await session.flush()
+    default = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/default/",
+        display_name="Default",
+        is_default=True,
+        last_seen_at=datetime.now(UTC),
+    )
+    selected = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/selected/",
+        display_name="Selected",
+        selected=True,
+        available=False,
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add_all([default, selected])
+    await session.commit()
+    client = CalDAVClient(Settings(CALDAV_BASE_URL="https://caldav.test"), session)
+
+    with pytest.raises(CalendarSnapshotIncomplete, match="unavailable"):
+        await client._calendar_snapshot(recruiter.email)
+
+    selected.available = True
+    selected.last_seen_at = datetime.now(UTC) - timedelta(days=2)
+    await session.commit()
+    with pytest.raises(CalendarSnapshotIncomplete, match="stale"):
+        await client._calendar_snapshot(recruiter.email)

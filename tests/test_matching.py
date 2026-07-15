@@ -1,4 +1,6 @@
+import json
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -160,3 +162,30 @@ def test_timestamp_inconsistency_and_low_confidence_fail_closed() -> None:
         ).reason
         == ManualReviewReason.LOW_CONFIDENCE
     )
+
+
+def test_manual_review_candidate_payload_is_field_and_total_bounded() -> None:
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "X" * 500
+    events = [
+        event(
+            start=start,
+            summary=title,
+            calendar_id=uuid.uuid4(),
+            uid=f"event-{index}-" + "u" * 500,
+        )
+        for index in range(20)
+    ]
+    events = [replace(item, calendar_display_name="Calendar " + "d" * 500) for item in events]
+
+    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+        recording(title, start), events
+    )
+    payload = [candidate.as_dict() for candidate in result.candidates]
+
+    assert result.reason == ManualReviewReason.MULTIPLE_ELIGIBLE
+    assert len(payload) <= 5
+    assert len(json.dumps(payload, ensure_ascii=False)) <= 4096
+    assert all(len(str(item["calendar_display_name"])) <= 100 for item in payload)
+    assert all(len(str(item["event_uid"])) <= 160 for item in payload)
+    assert all(len(str(item["event_summary"])) <= 160 for item in payload)

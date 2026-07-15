@@ -215,8 +215,7 @@ class CalDAVClient:
                 (
                     await session.scalars(
                         select(RecruiterCalendar).where(
-                            RecruiterCalendar.recruiter_id == recruiter.id,
-                            RecruiterCalendar.available.is_(True),
+                            RecruiterCalendar.recruiter_id == recruiter.id
                         )
                     )
                 ).all()
@@ -225,21 +224,36 @@ class CalDAVClient:
                 raise CalendarConfigurationError(
                     f"No discovered calendar configured for {recruiter_email}"
                 )
-            if any(
-                self._as_utc(row.last_seen_at) < datetime.now(UTC) - DISCOVERY_MAX_AGE
-                for row in rows
-            ):
+            selected = [row for row in rows if row.selected]
+            if selected and any(not row.available for row in selected):
+                raise CalendarSnapshotIncomplete(
+                    f"Selected calendar is unavailable for {recruiter_email}"
+                )
+            if selected and any(self._calendar_is_stale(row) for row in selected):
+                raise CalendarSnapshotIncomplete(
+                    f"Selected calendar discovery is stale for {recruiter_email}"
+                )
+            available_rows = [row for row in rows if row.available]
+            if not available_rows:
+                raise CalendarSnapshotIncomplete(
+                    f"No available calendar snapshot for {recruiter_email}"
+                )
+            if any(self._calendar_is_stale(row) for row in available_rows):
                 raise CalendarSnapshotIncomplete(
                     f"Calendar discovery is stale for {recruiter_email}"
                 )
-            selected_ids = {row.id for row in rows if row.selected}
+            selected_ids = {row.id for row in selected}
             if selected_ids:
                 eligible_ids = selected_ids
             else:
                 defaults = [row for row in rows if row.is_default]
                 if len(defaults) != 1:
                     raise CalendarConfigurationError(
-                        f"Exactly one available default calendar is required for {recruiter_email}"
+                        f"Exactly one default calendar is required for {recruiter_email}"
+                    )
+                if not defaults[0].available or self._calendar_is_stale(defaults[0]):
+                    raise CalendarSnapshotIncomplete(
+                        f"Default calendar snapshot is incomplete for {recruiter_email}"
                     )
                 eligible_ids = {defaults[0].id}
             return tuple(
@@ -249,8 +263,12 @@ class CalDAVClient:
                     display_name=row.display_name,
                     eligible=row.id in eligible_ids,
                 )
-                for row in sorted(rows, key=lambda item: str(item.id))
+                for row in sorted(available_rows, key=lambda item: str(item.id))
             )
+
+    @classmethod
+    def _calendar_is_stale(cls, row: RecruiterCalendar) -> bool:
+        return cls._as_utc(row.last_seen_at) < datetime.now(UTC) - DISCOVERY_MAX_AGE
 
     async def _report_calendar(
         self,

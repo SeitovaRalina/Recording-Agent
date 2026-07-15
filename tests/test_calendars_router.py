@@ -99,21 +99,52 @@ async def test_selection_replacement_version_clear_and_default_audit(
         headers=headers,
         json={"version": 0, "calendar_ids": []},
     )
+    assert selected.status_code == 200
+    assert selected.json()["effective_ids"] == [str(second.id)]
+    assert selected.json()["selected_ids"] == [str(second.id)]
+    assert selected.json()["selection_incomplete"] is False
+    await session.refresh(recruiter)
+    assert recruiter.calendar_selection_before == {
+        "selected_ids": [],
+        "effective_ids": [str(first.id)],
+        "default_id": str(first.id),
+    }
+    assert recruiter.calendar_selection_after == {
+        "selected_ids": [str(second.id)],
+        "effective_ids": [str(second.id)],
+        "default_id": str(first.id),
+    }
+
+    second.available = False
+    await session.commit()
+    incomplete = await async_client.get(
+        "/internal/recruiters/recruiter@example.com/calendars",
+        headers={"X-OpenClaw-Secret": "test-secret"},
+    )
+    assert incomplete.json()["selected_ids"] == [str(second.id)]
+    assert incomplete.json()["effective_ids"] == [str(second.id)]
+    assert incomplete.json()["selection_incomplete"] is True
+
+    assert conflict.status_code == 409
     cleared = await async_client.put(
         "/internal/recruiters/recruiter@example.com/calendars/selection",
         headers=headers,
         json={"version": 1, "calendar_ids": []},
     )
+    assert cleared.json()["effective_ids"] == [str(first.id)]
+    await session.refresh(recruiter)
+    assert recruiter.calendar_selection_before is not None
+    assert recruiter.calendar_selection_before["selected_ids"] == [str(second.id)]
+    assert recruiter.calendar_selection_after is not None
+    assert recruiter.calendar_selection_after["selected_ids"] == []
+
+    second.available = True
+    await session.commit()
     changed_default = await async_client.put(
         "/internal/recruiters/recruiter@example.com/calendars/default",
         headers=headers,
         json={"version": 2, "calendar_id": str(second.id)},
     )
-
-    assert selected.status_code == 200
-    assert selected.json()["effective_ids"] == [str(second.id)]
-    assert conflict.status_code == 409
-    assert cleared.json()["effective_ids"] == [str(first.id)]
     assert changed_default.json()["default_id"] == str(second.id)
     await session.refresh(recruiter)
     assert recruiter.calendar_selection_version == 3

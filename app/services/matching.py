@@ -1,3 +1,4 @@
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -13,6 +14,10 @@ TELEMOST_PATTERN = re.compile(r"https://telemost\.360\.yandex\.ru/")
 NAME_PATTERN = re.compile(r"\(([^)]+)\)$")
 INTERVIEW_PATTERN = re.compile(r"собеседование|интервью|interview|candidate", re.IGNORECASE)
 BOOKING_PATTERN = re.compile(r"https://(?:calink\.ru|calendly\.com|cal\.com)/", re.IGNORECASE)
+MAX_DIAGNOSTIC_CANDIDATES = 5
+MAX_DIAGNOSTIC_PAYLOAD_CHARS = 4096
+MAX_DIAGNOSTIC_TEXT_CHARS = 160
+MAX_CALENDAR_DISPLAY_NAME_CHARS = 100
 FILENAME_PATTERN = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})_(?P<body>.+)\.webm$")
 
 
@@ -53,9 +58,12 @@ class MatchCandidate:
     def from_event(cls, event: ParsedVEVENT) -> "MatchCandidate":
         return cls(
             calendar_id=str(event.calendar_id) if event.calendar_id else None,
-            calendar_display_name=event.calendar_display_name,
-            event_uid=event.uid[:200],
-            event_summary=event.summary[:200],
+            calendar_display_name=(event.calendar_display_name or "")[
+                :MAX_CALENDAR_DISPLAY_NAME_CHARS
+            ]
+            or None,
+            event_uid=event.uid[:MAX_DIAGNOSTIC_TEXT_CHARS],
+            event_summary=event.summary[:MAX_DIAGNOSTIC_TEXT_CHARS],
             event_start_utc=event.dtstart_utc.isoformat(),
             eligible=event.eligible,
         )
@@ -165,7 +173,7 @@ class InterviewMatcher:
             key = (event.calendar_id, event.uid, event.recurrence_id)
             compatible_by_key.setdefault(key, event)
         compatible = list(compatible_by_key.values())
-        candidates = tuple(MatchCandidate.from_event(item) for item in compatible[:10])
+        candidates = self._bounded_candidates(compatible)
         eligible = [item for item in compatible if item.eligible]
         unmonitored = [item for item in compatible if not item.eligible]
         if not compatible:
@@ -191,6 +199,18 @@ class InterviewMatcher:
             signals=signals,
             manual_review_required=False,
         )
+
+    @staticmethod
+    def _bounded_candidates(events: list[ParsedVEVENT]) -> tuple[MatchCandidate, ...]:
+        candidates: list[MatchCandidate] = []
+        for event in events[:MAX_DIAGNOSTIC_CANDIDATES]:
+            candidate = MatchCandidate.from_event(event)
+            trial = [*candidates, candidate]
+            payload_chars = len(json.dumps([item.as_dict() for item in trial], ensure_ascii=False))
+            if payload_chars > MAX_DIAGNOSTIC_PAYLOAD_CHARS:
+                break
+            candidates.append(candidate)
+        return tuple(candidates)
 
     @staticmethod
     def _manual(

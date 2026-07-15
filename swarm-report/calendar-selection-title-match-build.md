@@ -56,3 +56,15 @@ Complete. No unresolved plan blockers.
 
 - No Disk deletion, Notion mutation, Synology operation, or remediation apply was executed.
 - The unrelated untracked `swarm-report/phase-3-transfer-plan.md` was preserved and excluded.
+
+## Review retry
+
+- Explicit selected calendars now remain authoritative even when unavailable or stale; an
+  incomplete selected set raises `CalendarSnapshotIncomplete` and can never fall back to the
+  default or a partial selection.
+- Calendar state exposes `selected_ids` and `selection_incomplete`; audit snapshots retain the
+  actual selected IDs.
+- Manual-review diagnostics are bounded to five candidates, 4096 serialized characters, bounded
+  UID/summary fields, and 100-character calendar display names.
+- Verification: Ruff/format clean; mypy clean (41 files); focused tests `22 passed`; full pytest
+  `79 passed in 35.84s`.
