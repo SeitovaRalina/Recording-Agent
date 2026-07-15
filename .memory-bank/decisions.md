@@ -33,7 +33,7 @@
 **Date:** 2026-07-13
 
 ## ADR-007: Interview detection via multi-signal scoring
-**Decision:** Don't rely on a single field to identify interview recordings. Score multiple signals (recruiter ownership, Telemost link in event, calink.ru marker, keywords, candidate name). Low confidence → `manual_review_required`, not auto-ignore.
+**Decision:** Don't rely on a single field to identify interview recordings. Time overlap and the `calink.ru` booking marker are high signals for the current effective.band flow; candidate name is medium/high; Telemost confirms only a video call and is a low diagnostic signal. Low confidence → `manual_review_required`, not auto-ignore.
 **Why:** False negatives (missed interviews) worse than false positives (asking recruiter to confirm).
 **Date:** 2026-07-13
 
@@ -67,6 +67,12 @@
 ## ADR-008: Test environment mandatory before production
 **Decision:** Full test environment (test Disk folder, test Calendar, test Notion DB copy, test Synology folder, test Mattermost channel) required before any production access.
 **Date:** 2026-07-13
+
+## ADR-014: Explicit calendar selection and exact filename correlation
+**Decision:** Each recruiter has one explicit default calendar and optional selected calendars. A non-empty selection is the effective eligible set; otherwise the default alone is eligible. Scans query every discovered available calendar for collision evidence, but unselected calendars can never supply a confirmed match. Automatic matching requires an exact conservatively normalized Telemost filename title/SUMMARY match, compatible filename start time, one eligible occurrence, no outside collision, and the confidence threshold.
+**Why:** All recordings share one immutable Telemost Disk folder, so calendar choice cannot filter discovery. Exact title/time compatibility and full-set collision evidence prevent nearby unrelated events from being auto-matched.
+**Safety:** Discovery accepts only same-origin canonical HTTPS collections returned by CalDAV. Missing defaults, stale discovery, incomplete collection queries, malformed filenames, ambiguity, and collisions fail closed to a resumable or structured manual-review path. Only a recruiter can choose `ignored`.
+**Date:** 2026-07-15
 
 ## ADR-009: Backend is the scheduler, OpenClaw is the reasoner
 **Decision:** APScheduler lives in Backend Tools Service, not in OpenClaw. Backend scans Yandex Disk on schedule, does all integrations, manages PostgreSQL state. When a decision point is reached (new recording found, ambiguity detected, manual review reply received), Backend pushes an event to OpenClaw. OpenClaw wakes up, reasons about the event, sends messages to recruiter, and calls Backend tools back as needed.

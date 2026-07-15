@@ -1,3 +1,4 @@
+import hmac
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -26,7 +27,8 @@ async def verify_openclaw_secret(
     x_openclaw_secret: Annotated[str | None, Header(alias=OPENCLAW_SECRET_HEADER)] = None,
 ) -> None:
     expected = settings.openclaw_secret.get_secret_value()
-    if not expected or x_openclaw_secret != expected:
+    supplied = x_openclaw_secret or ""
+    if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid OpenClaw secret"
         )

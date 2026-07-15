@@ -5,7 +5,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Index, Text, text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -104,12 +114,20 @@ class Recording(Base):
     disk_mime_type: Mapped[str | None] = mapped_column(Text)
     disk_md5: Mapped[str | None] = mapped_column(Text)
     calendar_event_uid: Mapped[str | None] = mapped_column(Text)
+    calendar_event_recurrence_id: Mapped[str | None] = mapped_column(Text)
     calendar_event_summary: Mapped[str | None] = mapped_column(Text)
     calendar_dtstart: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     calendar_dtend: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     calendar_organizer: Mapped[str | None] = mapped_column(Text)
     calendar_telemost_url: Mapped[str | None] = mapped_column(Text)
     calendar_raw_ics: Mapped[str | None] = mapped_column(Text)
+    matched_calendar_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recruiter_calendar.id", ondelete="SET NULL")
+    )
+    matched_calendar_url: Mapped[str | None] = mapped_column(Text)
+    matched_calendar_display_name: Mapped[str | None] = mapped_column(Text)
+    manual_review_reason: Mapped[str | None] = mapped_column(Text)
+    manual_review_candidates: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
     candidate_name: Mapped[str | None] = mapped_column(Text)
     candidate_email: Mapped[str | None] = mapped_column(Text)
     notion_database_id: Mapped[str | None] = mapped_column(Text)
@@ -145,6 +163,7 @@ class Recording(Base):
     manual_reviews: Mapped[list[ManualReview]] = relationship(
         back_populates="recording", cascade="all, delete-orphan"
     )
+    matched_calendar: Mapped[RecruiterCalendar | None] = relationship(back_populates="recordings")
 
     def transition_to(self, new_status: RecordingStatus | str) -> None:
         try:
@@ -164,3 +183,4 @@ class Recording(Base):
 
 from app.db.models.manual_review import ManualReview  # noqa: E402
 from app.db.models.processing_attempt import ProcessingAttempt  # noqa: E402
+from app.db.models.recruiter_calendar import RecruiterCalendar  # noqa: E402

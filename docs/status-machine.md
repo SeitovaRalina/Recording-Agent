@@ -47,7 +47,7 @@ sources:
   source_marked_processed
           │
           ▼
-  source_deleted (опционально, по retention policy)
+  source_deleted (after soft-delete cron + separately approved permanent purge)
           │
           ▼
        completed
@@ -63,6 +63,10 @@ sources:
 
 ### 1. `found`
 
+Calendar lookup uses the start parsed from a supported Telemost filename in
+`SCAN_LOCAL_TIMEZONE`, not `disk_created_at`, as the event-correlation timestamp. An incomplete
+all-calendar query leaves this status resumable.
+
 **Когда устанавливается:** файл обнаружен в списке Яндекс.Диска, ещё не обрабатывался.
 
 **Что следует:** поиск события в Яндекс.Календаре в ±2h окне от времени записи.
@@ -73,7 +77,14 @@ sources:
 
 ### 2. `calendar_event_found`
 
-**Когда устанавливается:** найдено подходящее событие CalDAV с confidence ≥ threshold.
+This status is set only when the recording filename parses, its normalized title exactly equals
+the VEVENT `SUMMARY`, its parsed local start is temporally compatible, exactly one compatible
+occurrence belongs to the effective monitored calendar set, no compatible occurrence exists in
+an unmonitored calendar, and confidence meets the threshold. Identical occurrences are deduplicated
+only by `(calendar_id, UID, RECURRENCE-ID)`.
+
+The confirmed row stores calendar provenance: the calendar row ID and immutable canonical URL and
+display-name snapshots. A partial or stale all-calendar snapshot never produces this status.
 
 **Что следует:** поиск карточки кандидата в Notion.
 
@@ -117,6 +128,23 @@ sources:
 **При timeout рекрутера:** запись остаётся в `manual_review_required`. Reminder через 24h.
 
 **Только явный `"ignore"` от рекрутера** переводит запись в `ignored`.
+
+Calendar correlation uses structured reasons: `filename_parse_failed`, `no_compatible_event`,
+`unmonitored_calendar_only`, `multiple_compatible_events`,
+`monitored_unmonitored_collision`, and `confidence_below_threshold`. These outcomes persist no
+confirmed event or calendar provenance. Candidate diagnostics are bounded summaries and must not
+contain raw ICS, app passwords, authorization headers, or other credentials.
+
+An incomplete calendar snapshot is transient: keep the row resumable as `found` instead of making
+a partial automatic decision.
+
+### Calendar-match remediation
+
+The remediation command is dry-run by default. It identifies non-terminal
+`calendar_event_found` rows whose stored event title is incompatible with the recording filename.
+Explicit `--apply` clears confirmed calendar fields/provenance and requeues only the listed rows to
+`found`, recording operator audit output. It never rewrites terminal rows and never touches Disk,
+Notion, Synology, retention, or transfer state.
 
 ---
 
@@ -162,19 +190,40 @@ sources:
 
 ### 9. `source_marked_processed`
 
-**Когда устанавливается:** файл перемещён в `/processed/` на Яндекс.Диске (POST /disk/resources/move).
+**Set when:** after Synology upload and the downstream update succeed, PATCH
+`/disk/resources` stores `custom_properties.processed="true"` and a UTC ISO 8601
+`custom_properties.processed_at` value on the source file.
 
-**Что следует:** опционально — удалить файл с Диска (зависит от retention policy — Q9 из open-questions.md).
+**Semantics:** the source remains at its original path. Scanner discovery skips it by reading
+the custom property, independently of the PostgreSQL idempotency check. If `processed=true` but
+`processed_at` is missing or invalid, discovery repairs it to current UTC and still excludes the
+source. The cleanup fallback performs the same repair but does not delete the source in that run.
+
+**Next:** remain in this state until a separate daily cleanup considers the source after
+`processed_at` is at least seven days old.
 
 ---
 
 ### 10. `source_deleted`
 
-**Когда устанавливается:** исходный файл удалён с Яндекс.Диска (`permanently=true`).
+**Set when:** the daily soft-delete cron previously moved the eligible source to Trash with
+`DELETE /disk/resources`, and a separate explicitly approved purge permanently deleted the
+actual `trash:/...` resource with `DELETE /disk/trash/resources`.
 
-**Условие:** только если все шаги 1-9 завершились успешно.
+**Preconditions:** `source_marked_processed` succeeded, `processed_at` is at least seven days
+old, and an operator explicitly approved this purge invocation. Approval contains a non-empty
+operator identity, timezone-aware timestamp no more than five minutes old, and non-empty unique
+nonce. Freshness uses a trusted injected aware UTC clock; callers cannot supply `now`. The nonce
+is consumed before any request and cannot be reused after success or failure. Approval cannot
+come from a standing environment/configuration value; age, scheduler execution, and prior
+processing success never grant permanent-delete authority.
 
-**Что следует:** → `completed`.
+**Resumability:** the purge enumerates current Trash resources and uses their actual paths,
+correlating them through `origin_path`. A partial failure leaves remaining resources discoverable;
+a later retry requires newly issued approval with a new nonce and re-enumerates Trash. A 404 is success only when
+retained state proves that deletion was already requested/completed.
+
+**Next:** → `completed`.
 
 ---
 
@@ -239,24 +288,38 @@ sources:
 1. **`found`** — перед добавлением записи проверить `disk_file_id` в PostgreSQL. Если уже есть — пропустить.
 2. **`transfer_started`** — перед upload проверить что файл не существует в Synology по имени/пути.
 3. **`notion_updated`** — перед PATCH проверить текущее значение поля. Если уже заполнено нашим URL — пропустить.
-4. **`source_deleted`** — проверить что `source_marked_processed` завершён. Если файл уже удалён (404) — считать успехом.
+4. **`source_marked_processed`** — read the existing custom properties before PATCH; an
+   existing valid `processed=true` and `processed_at` is success. A missing/invalid timestamp on
+   a processed source is repaired to current UTC; discovery excludes it, and cleanup skips
+   deletion for that repair run.
+5. **`source_deleted`** — the scheduled stage is soft-delete-only. A separate purge verifies
+   the seven-day boundary and a fresh named per-run approval, enumerates real Trash paths, and
+   can resume after partial failure. Treat 404 as success only for a stage previously recorded
+   as requested/completed.
+
+### First-run discovery cutoff
+
+By default, a recruiter's first discovery scan inserts only Disk files created at or after the
+start of the current local date. `SCAN_LOCAL_TIMEZONE` defines the local date (default:
+`Asia/Omsk`), and `SCAN_IGNORE_BEFORE_TODAY` can disable the cutoff. The cutoff applies only to
+new Disk files: existing `recordings` rows, including older `found` rows, remain resumable.
+
+Scanner insert and match-decision entries are application logs, not PostgreSQL logs.
 
 ---
 
-## Confidence Scoring (из architecture.md)
+## Confidence Scoring
 
-| Сигнал | Вес |
-|--------|-----|
-| Owner = known recruiter | high |
-| CalDAV event has Telemost link | high |
-| CalDAV event created via calink.ru | high |
-| Event title contains interview keywords | medium |
-| Candidate name in event title | medium |
-| Recording in designated Disk folder | medium |
+| Signal | Weight |
+|--------|--------|
+| Time overlap | high (0.35) |
+| `calink.ru` booking marker | high (0.30) |
+| Candidate name in event title | medium/high (0.25) |
+| Telemost URL | low (0.05), diagnostic only |
+| Interview keywords | low (0.05) |
 
-Если `total_confidence < threshold` → `manual_review_required` (не `ignored`).
-
-Threshold определяется при настройке. Начать с 0.7.
+If `total_confidence < threshold`, transition to `manual_review_required`, not `ignored`.
+Start with a threshold of `0.7`.
 
 ---
 
@@ -266,4 +329,4 @@ Threshold определяется при настройке. Начать с 0.
 - [[architecture]] → data flow happy path
 - [[mattermost]] → disambiguation flow
 - [[yandex-disk]] → операции mark_processed, delete
-- open-questions: Q9 (retention policy — нужно ли `source_deleted`)
+- open-questions: Q9 (closed two-stage retention policy)

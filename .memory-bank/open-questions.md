@@ -31,10 +31,25 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 **Action:** Call Notion API: `GET /v1/databases/{database_id}` → get property IDs.
 **Status:** Open — need database_ids from recruiter
 
-## Q6: calink.ru calendar event markers [BLOCKER for matching.py interview detection]
-**Question:** Do CalDAV events created via calink.ru have a recognizable marker (PRODID, organizer format, custom property) we can use for filtering?
-**Action:** Export a real calink.ru-created event as `.ics` and inspect all fields.
-**Status:** Open
+## Q6: calink.ru calendar event markers ✅ CLOSED
+**Answer (from Yandex Calendar screenshot, 2026-07-14):**
+calink.ru events in CalDAV have two **guaranteed** markers visible in the event detail:
+1. **DESCRIPTION contains `https://calink.ru/{recruiter-slug}/{type}/{id}?code=...`** — a reliable HIGH-confidence signal that the meeting was booked through the current effective.band flow.
+2. **DESCRIPTION contains `https://telemost.360.yandex.ru/j/{id}`** — confirms only that this is a Telemost video meeting. Yandex prepends this block to every video event, including self-tests and manual events; it is a low diagnostic signal, not evidence of an interview.
+3. **SUMMARY pattern**: `"Встреча на N минут (Кандидат Имя)"` — candidate name in parentheses at end of title. First name guaranteed; last name present in the example but may be absent.
+4. **ATTENDEE**: email present (`strokan-dima@mail.ru`) but **unreliable for Notion matching** — may differ from Notion DB email. Treat as LOW signal.
+5. **ORGANIZER**: recruiter account ("Я") — already assumed.
+**PRODID/custom CalDAV properties**: not needed — calink.ru URL in DESCRIPTION is sufficient marker.
+
+**Consequences for matching.py:**
+- Source of truth is Yandex Calendar via CalDAV — matcher works regardless of booking service.
+- `time_overlap` — recording time within [dtstart-15min, dtend+15min] — **HIGH weight (0.35)**
+- `booking_source_marker` — `calink.ru` URL in DESCRIPTION — **HIGH weight (0.30)** for the current effective.band flow; absence never blocks manual review
+- `extract_candidate_name(summary)` → `re.search(r'\(([^)]+)\)$', summary)` — **MEDIUM/HIGH weight (0.25)**
+- `has_telemost_url(description)` → `re.search(r'https://telemost\.360\.yandex\.ru/', description)` — **LOW weight (0.05)**
+- Interview keywords — **LOW weight (0.05)**
+- Attendee email → **LOW (0.05), STUBBED Phase 2**; never block match on email mismatch
+- No PRODID inspection needed
 
 ## Q7: Multiple Яндекс accounts ✅ CLOSED
 **Answer:** All recruiters are in the same Яндекс 360 org — corporate accounts `@effective.band`.
@@ -53,7 +68,57 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 **Strategy:** Design Backend as standard HTTP endpoints first. Adapt tool descriptions to OpenClaw format after confirming. Backend design is independent of registration format.
 **Status:** Open — check OpenClaw docs/source
 
-## Q9: Recording retention policy on Яндекс.Диск
-**Question:** After successful transfer to Synology: delete immediately, or move to `/processed/` archive folder, or keep?
-**Per TOR:** Delete if all steps successful. But what is the grace period?
-**Status:** Open — decision from client needed
+## Q9: Recording retention policy on Яндекс.Диск ✅ CLOSED
+**Answer (2026-07-14):** Two-stage retention:
+1. On successful Synology upload: set custom property `app:recording_agent:processed=true` via `PATCH /disk/resources` (Yandex Disk custom_properties).
+2. DiskScanner skips files with this property → no double processing.
+3. Separate daily cleanup cron: for files where `processed=true` and `processed_at` is at least
+   7 days old, call `DELETE /disk/resources` to move them to Trash. This cron is soft-delete-only.
+4. Permanent deletion is a separate, never-scheduled operation. Every run requires a new
+   `PermanentDeleteApproval` with a non-empty operator identity, timezone-aware timestamp no
+   more than 5 minutes old, and non-empty unique nonce. Freshness uses an injected/trusted aware
+   UTC clock; callers cannot provide `now`. The nonce is consumed before any request and cannot
+   be reused after success or failure. The purge enumerates real Trash resources and deletes
+   their actual `trash:/...` paths. No environment/configuration boolean may grant standing
+   authority.
+
+**Consequences for disk.py:**
+- `DiskScanner.list()` filters out items with `custom_properties.processed == "true"`. If
+  `processed_at` is missing or invalid, it repairs the timestamp to current UTC and still
+  excludes the item, preventing duplicate processing.
+- `DiskScanner.mark_processed(path)` → PATCH custom_properties: `{"processed": "true", "processed_at": "<ISO8601>"}`.
+- `DiskScanner.delete_expired()` → list processed items, check `processed_at` age, and move those
+  aged at least 7 days to Trash. If a processed item has missing/invalid `processed_at`, repair
+  it to current UTC and do not delete it during that run. It never permanently deletes.
+- `DiskScanner.purge_expired_from_trash(approval)` → validate fresh per-run approval, enumerate
+  Trash, correlate `origin_path`, validate markers/age, and permanently delete actual Trash paths.
+- A partial purge is resumable: a later run requires fresh approval and re-enumerates remaining
+  Trash resources. The prior nonce remains consumed even when the purge failed, so retry requires
+  a newly issued approval. Ask before every purge run per the `AGENTS.md` destructive-operations
+  rule.
+
+**Note:** custom_properties reads require extra API call per file (not returned in folder listing by default). Batch by reading only after scanner confirms file is candidate for processing — not on every scan.
+
+## Q11: Multiple Calendar selection and Telemost filename correlation ✅ CLOSED
+**Answer (2026-07-15):** The shared `/Записи Телемоста/` Disk folder is immutable and contains
+recordings for all recruiter calendars. Calendar selection therefore controls match eligibility,
+not Disk discovery.
+
+**Consequences:**
+- Each recruiter has exactly one explicit default calendar and zero or more selected calendars.
+  The effective set is the selected set when non-empty, otherwise the default only. A validated
+  legacy `caldav_calendar_url` is a migration fallback; response order never chooses a default.
+- Discovery stores recruiter-owned canonical same-origin HTTPS VEVENT collections and display
+  names. Configuration accepts only opaque discovered IDs; arbitrary URLs are never requested
+  with recruiter credentials.
+- Every scan queries all available calendars as one complete snapshot. Unselected calendars are
+  collision evidence only and can never become the confirmed source.
+- Official video and audio-only filenames must parse as either
+  `YYYY-MM-DD_HHMMSS_<meeting title>.webm` or
+  `YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm`. The parsed local start and exact
+  Unicode NFKC + casefold + whitespace-normalized title must agree with one eligible VEVENT.
+- Parser failure, no compatible event, unmonitored-only compatibility, duplicates, or any
+  monitored/unmonitored collision requires structured `manual_review_required`; automatic
+  `ignored` remains forbidden.
+- Confirmed matches store calendar row ID and immutable URL/display-name snapshots. Manual-review
+  diagnostics are bounded and exclude raw ICS, passwords, and authorization material.

@@ -1,0 +1,423 @@
+import uuid
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config import Settings, get_settings
+from app.db.base import Base
+from app.db.models.recording import Recording, RecordingStatus
+from app.db.models.recruiter_config import RecruiterConfig
+from app.main import app
+from app.scheduler.cron import (
+    _persist_found_recording,
+    _resume_found_recording,
+    local_today_start_utc,
+    register_jobs,
+    scan_all_recruiters,
+    scan_recruiter,
+)
+from app.services.matching import InterviewMatcher
+from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
+
+
+def found(file_id: str) -> Recording:
+    return Recording(
+        disk_file_id=file_id,
+        disk_path=f"disk:/{file_id}.webm",
+        disk_filename="2026-07-14_100000_Team sync.webm",
+        disk_owner_email="recruiter@example.com",
+        disk_created_at=datetime(2026, 7, 14, 10, tzinfo=UTC),
+    )
+
+
+def disk_metadata(file_id: str, created_at: datetime) -> dict[str, object]:
+    return {
+        "disk_file_id": file_id,
+        "disk_path": f"disk:/{file_id}.webm",
+        "disk_filename": f"{created_at:%Y-%m-%d_%H%M%S}_Team sync.webm",
+        "disk_created_at": created_at,
+    }
+
+
+def recruiter() -> RecruiterConfig:
+    return RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+
+
+@pytest.mark.anyio
+async def test_discovery_skips_only_new_files_before_local_today() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    settings = Settings(scan_local_timezone="Asia/Omsk")
+    now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    cutoff = local_today_start_utc(settings, now)
+    disk = AsyncMock()
+    disk.get_metadata.side_effect = [
+        disk_metadata("legacy", cutoff - timedelta(seconds=1)),
+        disk_metadata("current", cutoff),
+    ]
+
+    legacy = await _persist_found_recording(
+        recruiter(), {"path": "disk:/legacy.webm"}, factory, disk, settings, now
+    )
+    current = await _persist_found_recording(
+        recruiter(), {"path": "disk:/current.webm"}, factory, disk, settings, now
+    )
+    async with factory() as session:
+        recordings = list((await session.scalars(select(Recording))).all())
+    await engine.dispose()
+
+    assert legacy == "skipped_legacy"
+    assert current == "inserted"
+    assert [item.disk_file_id for item in recordings] == ["current"]
+
+
+@pytest.mark.anyio
+async def test_successful_scan_logs_insert_match_and_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    created = datetime(2026, 7, 15, 10, tzinfo=UTC)
+    disk = AsyncMock()
+    disk.list_new.return_value = [{"path": "disk:/current.webm"}]
+    disk.get_metadata.return_value = disk_metadata("current", created)
+    calendar = AsyncMock()
+    calendar.find_events.return_value = []
+
+    with caplog.at_level("INFO"):
+        await scan_recruiter(
+            recruiter(),
+            factory,
+            disk,
+            calendar,
+            InterviewMatcher(Settings(scan_local_timezone="UTC")),
+            Settings(scan_local_timezone="UTC"),
+            datetime(2026, 7, 15, 12, tzinfo=UTC),
+        )
+    await engine.dispose()
+
+    assert "recording inserted:" in caplog.text
+    assert "recording match decision:" in caplog.text
+    assert "recruiter scan summary:" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Meeting (Ivan Ivanov)"
+    item = Recording(
+        disk_file_id="positive",
+        disk_path="disk:/positive.webm",
+        disk_filename=f"{start:%Y-%m-%d_%H%M%S}_{title}.webm",
+        disk_owner_email="recruiter@example.com",
+        disk_created_at=start,
+    )
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar_id = uuid.uuid4()
+    calendar = AsyncMock()
+    calendar.find_events.return_value = [
+        ParsedVEVENT(
+            uid="event-1",
+            summary=title,
+            dtstart_utc=start,
+            dtend_utc=start + timedelta(hours=1),
+            description="https://calink.ru/recruiter/interview/123",
+            organizer_email="recruiter@example.com",
+            attendees=[],
+            raw_ics="raw",
+            calendar_id=calendar_id,
+            calendar_url="https://caldav.test/interviews/",
+            calendar_display_name="Interviews",
+        )
+    ]
+
+    await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.CALENDAR_EVENT_FOUND
+    assert loaded.matched_calendar_id == calendar_id
+    assert loaded.matched_calendar_url == "https://caldav.test/interviews/"
+    assert loaded.manual_review_reason is None
+
+
+@pytest.mark.anyio
+async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    item = Recording(
+        disk_file_id="regression",
+        disk_path="disk:/regression.webm",
+        disk_filename=f"{start:%Y-%m-%d_%H%M%S}_Не рекрутинг встреча.webm",
+        disk_owner_email="recruiter@example.com",
+        disk_created_at=start,
+    )
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar = AsyncMock()
+    calendar.find_events.return_value = [
+        ParsedVEVENT(
+            uid="wrong-event",
+            summary="Встреча на 30 минут (Иван Иванов)",
+            dtstart_utc=start,
+            dtend_utc=start + timedelta(hours=1),
+            description="https://calink.ru/recruiter/interview/123",
+            organizer_email="recruiter@example.com",
+            attendees=[],
+            raw_ics="must-not-persist",
+        )
+    ]
+
+    await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "no_compatible_event"
+    assert loaded.calendar_event_uid is None
+    assert loaded.calendar_raw_ics is None
+    assert loaded.matched_calendar_url is None
+
+
+@pytest.mark.anyio
+async def test_persistence_failure_is_counted_in_recruiter_summary() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    disk = AsyncMock()
+    disk.list_new.return_value = [{"path": "disk:/broken.webm"}]
+    disk.get_metadata.side_effect = RuntimeError("metadata unavailable")
+
+    summary = await scan_recruiter(
+        recruiter(), factory, disk, AsyncMock(), InterviewMatcher(Settings())
+    )
+    await engine.dispose()
+
+    assert summary.failed == 1
+
+
+@pytest.mark.anyio
+async def test_scan_resumes_found_and_one_failure_does_not_abort_others() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    async with factory() as session:
+        session.add_all([found("first"), found("second")])
+        await session.commit()
+
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    calendar = AsyncMock()
+    calendar.find_events.side_effect = [
+        httpx.ConnectError(
+            "temporary CalDAV failure",
+            request=httpx.Request("REPORT", "https://caldav.test/calendar/"),
+        ),
+        [],
+    ]
+    matcher = InterviewMatcher(Settings())
+
+    await scan_recruiter(recruiter, factory, disk, calendar, matcher)
+    async with factory() as session:
+        statuses = list((await session.scalars(select(Recording.status))).all())
+    assert statuses.count(RecordingStatus.FOUND) == 1
+    assert statuses.count(RecordingStatus.MANUAL_REVIEW_REQUIRED) == 1
+
+    calendar.find_events.side_effect = None
+    calendar.find_events.return_value = []
+    await scan_recruiter(recruiter, factory, disk, calendar, matcher)
+    async with factory() as session:
+        statuses = list((await session.scalars(select(Recording.status))).all())
+    await engine.dispose()
+    assert statuses.count(RecordingStatus.FOUND) == 0
+    assert statuses.count(RecordingStatus.MANUAL_REVIEW_REQUIRED) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error", "message_fragment"),
+    [
+        (CalDAVAuthError("invalid app password"), "invalid app password"),
+        (KeyError("missing calendar config"), "missing calendar config"),
+        (ValueError("invalid calendar payload"), "invalid calendar payload"),
+    ],
+)
+async def test_permanent_calendar_failure_marks_recording_failed(
+    error: Exception, message_fragment: str
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    async with factory() as session:
+        session.add(found("auth-failure"))
+        await session.commit()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    calendar = AsyncMock()
+    calendar.find_events.side_effect = error
+
+    await scan_recruiter(recruiter, factory, disk, calendar, InterviewMatcher(Settings()))
+    async with factory() as session:
+        item = await session.scalar(select(Recording))
+    await engine.dispose()
+
+    assert item is not None
+    assert item.status == RecordingStatus.FAILED
+    assert item.error_step == "calendar_matching"
+    assert item.error_message is not None
+    assert message_fragment in item.error_message
+    assert item.last_attempted_at is not None
+
+
+@pytest.mark.anyio
+async def test_scan_all_recruiters_isolates_recruiter_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all(
+            [
+                RecruiterConfig(
+                    email="first@example.com",
+                    notion_database_id="one",
+                    synology_base_folder="/one",
+                ),
+                RecruiterConfig(
+                    email="second@example.com",
+                    notion_database_id="two",
+                    synology_base_folder="/two",
+                ),
+            ]
+        )
+        await session.commit()
+    called: list[str] = []
+
+    async def fake_scan(recruiter: RecruiterConfig, *_args: object) -> None:
+        called.append(recruiter.email)
+        if recruiter.email == "first@example.com":
+            raise RuntimeError("first failed")
+
+    monkeypatch.setattr("app.scheduler.cron.scan_recruiter", fake_scan)
+    await scan_all_recruiters(factory, MagicMock(), MagicMock(), MagicMock())
+    await engine.dispose()
+    assert set(called) == {"first@example.com", "second@example.com"}
+
+
+@pytest.mark.anyio
+async def test_empty_recruiter_scan_emits_completion_totals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    with caplog.at_level("INFO"):
+        await scan_all_recruiters(factory, AsyncMock(), AsyncMock(), AsyncMock())
+    await engine.dispose()
+
+    assert "active_recruiters=0" in caplog.text
+    assert "scan_all_recruiters completed:" in caplog.text
+    assert "discovered=0 inserted=0 skipped_legacy=0" in caplog.text
+
+
+def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
+    get_settings.cache_clear()
+    scheduler = MagicMock()
+    register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+
+    assert scheduler.add_job.call_count == 2
+    cleanup_call = scheduler.add_job.call_args_list[1]
+    assert cleanup_call.kwargs["id"] == "cleanup_expired_recordings"
+    assert len(cleanup_call.kwargs["args"]) == 2
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_real_scheduler_registers_jobs_before_start_with_next_run_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    get_settings.cache_clear()
+    scheduler = AsyncIOScheduler(timezone=UTC)
+
+    with caplog.at_level("INFO"):
+        register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        scheduler.start(paused=True)
+    try:
+        scan_job = scheduler.get_job("scan_all_recruiters")
+        cleanup_job = scheduler.get_job("cleanup_expired_recordings")
+        assert scan_job is not None
+        assert cleanup_job is not None
+        assert scan_job.next_run_time is not None
+        assert cleanup_job.next_run_time is not None
+        assert "scan_all_recruiters registered:" in caplog.text
+        assert "cleanup_expired_recordings registered:" in caplog.text
+        assert "next_run=None" not in caplog.text
+    finally:
+        scheduler.shutdown(wait=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
+    get_settings.cache_clear()
+    async with app.router.lifespan_context(app):
+        assert app.state.scheduler.running is True
+        assert app.state.scheduler.get_job("scan_all_recruiters") is not None
+        assert app.state.scheduler.get_job("cleanup_expired_recordings") is not None
+    get_settings.cache_clear()

@@ -48,15 +48,21 @@
 ```
 TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │
-├─ Backend: disk.list_new() → recordings with no processed marker
+├─ Backend: disk.list_new() → recordings absent from PostgreSQL and without
+│  custom_properties.processed == "true"
+│  (processed=true + missing/invalid processed_at is repaired to now UTC and still skipped)
+│  On first-run discovery, files created before the current local date are skipped by default;
+│  the cutoff is configurable and does not apply to existing database rows.
 │
 ├─ For each new recording:
 │   ├─ disk.get_metadata(file_id) → name, datetime, owner, url
-│   ├─ calendar.find_events(date, owner) → CalDAV events ±2h
-│   ├─ matching.score(recording, events) → best_event + confidence
+│   ├─ calendar.find_events(date, owner) → complete all-calendar snapshot for the window
+│   ├─ matching.compatible(recording, events) → exact filename title + local start-time gate
+│   ├─ matching.score(unique eligible event) → confidence, only after collision checks
 │   └─ notion.search_cards(candidate_name, date, recruiter) → cards[]
 │
-├─ Case A: confidence >= threshold AND len(cards) == 1
+├─ Case A: unique eligible compatible event, no outside collision,
+│  confidence >= threshold, AND len(cards) == 1
 │   └─ Backend pushes event to OpenClaw:
 │       {"type": "recording_ready", "recording": ..., "event": ..., "card": ...}
 │       → OpenClaw verifies, calls Backend tool: confirm_and_transfer()
@@ -80,26 +86,75 @@ HAPPY PATH (Backend executes on OpenClaw tool call):
     db.set_status("synology_link_created")
     notion.update_card(card_id, field="General Interview recording", value=url)
     db.set_status("notion_updated")
-    disk.mark_processed(file_id)
+    disk.mark_processed(file_id)  # PATCH processed=true + processed_at=<UTC ISO 8601>
     db.set_status("source_marked_processed")
-    [optional] disk.delete(file_id) — per retention policy
-    db.set_status("completed")
     → Backend notifies OpenClaw → OpenClaw sends recruiter confirmation
+
+DAILY RETENTION CRON (soft delete only; separate from the happy path):
+    disk.delete_expired() selects files with processed=true and processed_at >= 7 days old
+    missing/invalid processed_at is repaired to now UTC; source is not deleted in that run
+    DELETE /disk/resources moves each eligible source to Trash
+
+SEPARATE PERMANENT PURGE (never scheduled):
+    operator gives fresh per-run PermanentDeleteApproval(approved_by, approved_at, nonce)
+    identity/unique nonce must be non-empty; timestamp must be aware and <=5 minutes old
+    validate with trusted injected UTC clock; caller cannot provide now
+    consume nonce before any request; approval cannot be reused after success/failure
+    disk.purge_expired_from_trash() enumerates current Trash resources
+    validate origin_path, processed markers, and >=7-day age
+    DELETE /disk/trash/resources uses each actual trash:/... path
+    db.set_status("source_deleted") after both deletion stages succeed
+    db.set_status("completed")
 ```
+
+The source file remains in its original folder during the seven-day retention window. The
+scanner skips it by reading its custom properties. The cron job cannot permanently delete.
+Permanent deletion is destructive and must never run without the explicit approval required by
+`AGENTS.md`; approval is valid only for one invocation and cannot be stored in configuration.
+If a purge partially fails, a later run requires newly issued approval with a new nonce and
+resumes by enumerating the
+remaining real Trash resources rather than reconstructing paths from their original locations.
 
 ## Interview detection logic
 
 Agent must distinguish interview recordings from team meetings.
 Confidence increases with each positive signal:
 
-| Signal | Weight |
-|--------|--------|
-| Recording owner is a known recruiter | high |
-| Matching CalDAV event has Telemost link | high |
-| CalDAV event created via calink.ru (check PRODID or organizer) | high |
-| Event title contains interview keywords (собеседование, интервью, interview, candidate) | medium |
-| Candidate name found in event title | medium |
-| Recording in designated Disk folder (if configured) | medium |
+**Source of truth: Yandex Calendar via CalDAV. Matcher must work regardless of booking service.**
+
+Every recruiter has exactly one explicit default calendar and zero or more explicitly selected
+calendars. When selected calendars exist, they are the effective eligible set; otherwise only the
+default is eligible. A validated legacy `caldav_calendar_url` remains a temporary default fallback.
+Discovery never infers a default from server ordering or display names.
+
+All discovered, available recruiter calendars are queried as one immutable snapshot. Events from
+the effective set are match candidates; events from other calendars are collision/source evidence
+only. Stale discovery or any collection query failure makes the snapshot incomplete and forbids an
+automatic match.
+
+Before confidence scoring, the Telemost filename must match one of these anchored shapes:
+`YYYY-MM-DD_HHMMSS_<meeting title>.webm` or
+`YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm`. The timestamp is interpreted in
+`SCAN_LOCAL_TIMEZONE`. Titles are normalized with Unicode NFKC, casefold, and trimmed/collapsed
+Unicode whitespace only. Compatibility requires exact normalized filename-title/SUMMARY equality
+and the existing time tolerance; no fuzzy, substring, token, punctuation-dropping, transliteration,
+edit-distance, or LLM comparison is permitted.
+
+Automatic matching requires exactly one compatible occurrence in the effective set, no compatible
+occurrence outside it, and confidence at or above the threshold. Deduplication is limited to
+`(calendar_id, UID, RECURRENCE-ID)`. Parser failure, no compatible event, unmonitored-only matches,
+multiple compatible events, or monitored/unmonitored collisions go to `manual_review_required`
+with a structured reason. Only confirmed matches persist calendar ID plus URL/display-name
+snapshots; manual review stores bounded candidate diagnostics without raw ICS or credentials.
+
+| Signal | Weight | Detection |
+|--------|--------|-----------|
+| Time overlap (parsed filename start within event window) | HIGH = 0.35 | Parsed local filename timestamp within `[dtstart - 15min, dtend + 15min]` |
+| Booking source marker (`calink.ru`) | HIGH = 0.30 | Current effective.band booking flow; absence never blocks manual review |
+| Candidate name extracted from SUMMARY `(...)` | MEDIUM/HIGH = 0.25 | `re.search(r'\(([^)]+)\)$', summary)` — first name guaranteed, last name may be absent |
+| DESCRIPTION contains Telemost URL | LOW = 0.05 | Yandex adds it to every video event; diagnostic only |
+| Interview keywords in SUMMARY | LOW = 0.05 | `собеседование\|интервью\|interview\|candidate` in SUMMARY |
+| ATTENDEE email matches Notion card email | LOW = 0.05 | **STUBBED Phase 2** — always 0; resolved Phase 3 |
 
 If total confidence < threshold → status `manual_review_required`, not `ignored`.
 Only explicit recruiter "ignore" command → status `ignored`.
