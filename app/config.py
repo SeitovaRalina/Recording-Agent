@@ -11,6 +11,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    app_environment: Literal["development", "test", "production"] = "production"
+    pipeline_trace_enabled: bool = False
+
     database_url: SecretStr = SecretStr(
         "postgresql+asyncpg://postgres:postgres@localhost:5432/recording_agent"
     )
@@ -72,6 +75,10 @@ class Settings(BaseSettings):
         default=0.7,
         validation_alias=AliasChoices("confidence_threshold", "CONFIDENCE_THRESHOLD"),
     )
+
+    @property
+    def pipeline_trace_active(self) -> bool:
+        return self.app_environment == "development" and self.pipeline_trace_enabled
 
     @field_validator("yandex_refresh_tokens", "yandex_caldav_passwords", mode="before")
     @classmethod

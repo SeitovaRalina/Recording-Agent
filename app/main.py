@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     calendar = CalDAVClient(settings, session_factory, http_client=http_client)
     app.state.calendar_client = calendar
     matcher = InterviewMatcher(settings)
-    notion = NotionClient(settings.notion_token, http_client)
+    notion = NotionClient(settings.notion_token, http_client, settings=settings)
     storage = StorageFactory.create(settings, http_client)
     candidate_service = CandidateService(notion, settings)
     transfer_service = TransferService(disk, storage, http_client)

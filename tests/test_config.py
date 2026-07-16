@@ -7,6 +7,8 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")
     monkeypatch.setenv("NOTION_TOKEN", "notion-secret")
     monkeypatch.setenv("YANDEX_CLIENT_SECRET", "yandex-secret")
+    monkeypatch.setenv("APP_ENVIRONMENT", "production")
+    monkeypatch.setenv("PIPELINE_TRACE_ENABLED", "false")
     get_settings.cache_clear()
 
     settings = get_settings()
@@ -19,6 +21,8 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.scan_ignore_before_today is True
     assert settings.scan_local_timezone == "Asia/Omsk"
     assert settings.recording_filename_timezone == "Europe/Moscow"
+    assert settings.app_environment == "production"
+    assert settings.pipeline_trace_active is False
     get_settings.cache_clear()
 
 
@@ -40,9 +44,12 @@ def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None: 
     monkeypatch.setenv("SCAN_IGNORE_BEFORE_TODAY", "false")
     monkeypatch.setenv("SCAN_LOCAL_TIMEZONE", "UTC")
     monkeypatch.setenv("RECORDING_FILENAME_TIMEZONE", "Europe/Berlin")
+    monkeypatch.setenv("APP_ENVIRONMENT", "development")
+    monkeypatch.setenv("PIPELINE_TRACE_ENABLED", "true")
 
     settings = Settings()
 
     assert settings.scan_ignore_before_today is False
     assert settings.scan_local_timezone == "UTC"
     assert settings.recording_filename_timezone == "Europe/Berlin"
+    assert settings.pipeline_trace_active is True

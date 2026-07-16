@@ -20,7 +20,9 @@ from app.services.matching import (
     InterviewMatcher,
     ManualReviewReason,
     MatchResult,
+    normalize_title,
 )
+from app.services.pipeline_trace import safe_url, trace
 from app.services.status import StatusService
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
@@ -99,7 +101,7 @@ async def scan_recruiter(
     for recording_id in recording_ids:
         try:
             result = await _resume_found_recording(
-                recording_id, session_factory, cal, matcher, active_status
+                recording_id, session_factory, cal, matcher, active_status, active_settings
             )
             if result is not None:
                 if result.manual_review_required:
@@ -184,6 +186,14 @@ async def _resume_transfer_recording(
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.CALENDAR_EVENT_FOUND:
             return
+        trace(
+            settings,
+            "pipeline.candidate_match.start",
+            recording_id=recording.id,
+            calendar_summary=recording.calendar_event_summary,
+            calendar_start=recording.calendar_dtstart,
+            recruiter_database_id=recruiter.notion_database_id,
+        )
         try:
             match = await candidate_service.find_and_match(recording, recruiter, session)
         except Exception as error:
@@ -197,6 +207,14 @@ async def _resume_transfer_recording(
             await session.commit()
             return
         if match.page is None:
+            trace(
+                settings,
+                "pipeline.candidate_match.manual_review",
+                recording_id=recording.id,
+                reason=match.reason,
+                confidence=match.confidence,
+                candidates=match.candidates or [],
+            )
             await status.advance(
                 session,
                 recording,
@@ -208,6 +226,16 @@ async def _resume_transfer_recording(
             return
         page = match.page
         candidate_name = _candidate_name(recording.calendar_event_summary)
+        trace(
+            settings,
+            "pipeline.candidate_match.success",
+            recording_id=recording.id,
+            confidence=match.confidence,
+            candidate_name=candidate_name,
+            notion_page_id=page.id,
+            notion_page_title=page.title,
+            notion_page_url=page.url,
+        )
         await status.advance(
             session,
             recording,
@@ -221,6 +249,13 @@ async def _resume_transfer_recording(
         await session.commit()
         await status.advance(session, recording, RecordingStatus.TRANSFER_STARTED)
         await session.commit()
+        trace(
+            settings,
+            "pipeline.transfer.start",
+            recording_id=recording.id,
+            filename=recording.disk_filename,
+            candidate_name=candidate_name,
+        )
         try:
             result = await transfer_service.transfer(recording, recruiter, candidate_name, session)
         except TransferError as error:
@@ -241,6 +276,13 @@ async def _resume_transfer_recording(
             synology_file_path=result.file_path,
         )
         await session.commit()
+        trace(
+            settings,
+            "pipeline.transfer.uploaded",
+            recording_id=recording.id,
+            storage_folder=result.folder_path,
+            storage_path=result.file_path,
+        )
         try:
             share_url = await transfer_service.create_share_link(result.file_path)
         except TransferError as error:
@@ -260,6 +302,13 @@ async def _resume_transfer_recording(
             synology_share_url=share_url,
         )
         await session.commit()
+        trace(
+            settings,
+            "pipeline.transfer.share_link",
+            recording_id=recording.id,
+            storage_path=result.file_path,
+            share_url=safe_url(share_url),
+        )
         try:
             await notion.update_page_file(
                 page.id,
@@ -281,6 +330,13 @@ async def _resume_transfer_recording(
             session, recording, RecordingStatus.NOTION_UPDATED, notion_page_url=page.url
         )
         await session.commit()
+        trace(
+            settings,
+            "pipeline.notion_update.success",
+            recording_id=recording.id,
+            notion_page_id=page.id,
+            notion_page_url=page.url,
+        )
         try:
             await disk.mark_processed(recording.disk_path, recruiter.email)
         except Exception as error:
@@ -301,6 +357,13 @@ async def _resume_transfer_recording(
             disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
         )
         await session.commit()
+        trace(
+            settings,
+            "pipeline.completed_source_marked",
+            recording_id=recording.id,
+            disk_path=recording.disk_path,
+            deletable_after=recording.disk_deletable_after,
+        )
 
 
 def _candidate_name(summary: str | None) -> str:
@@ -370,14 +433,28 @@ async def _resume_found_recording(
     cal: CalDAVClient,
     matcher: InterviewMatcher,
     status: StatusService | None = None,
+    settings: Settings | None = None,
 ) -> MatchResult | None:
     active_status = status or StatusService()
+    active_settings = settings or get_settings()
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
             return None
         try:
-            recording_time = matcher.parse_filename(recording.disk_filename).start_utc
+            parsed = matcher.parse_filename(recording.disk_filename)
+            recording_time = parsed.start_utc
+            trace(
+                active_settings,
+                "pipeline.calendar_match.parsed_filename",
+                recording_id=recording.id,
+                filename=recording.disk_filename,
+                filename_title=parsed.title,
+                filename_start_utc=recording_time,
+                filename_timezone=active_settings.recording_filename_timezone,
+                calendar_window_start=recording_time - timedelta(hours=2),
+                calendar_window_end=recording_time + timedelta(hours=2),
+            )
         except (ValueError, KeyError):
             result = matcher.score(recording, [])
             await _apply_match_result(session, recording, result, active_status)
@@ -388,6 +465,28 @@ async def _resume_found_recording(
                 recording.disk_owner_email,
                 recording_time - timedelta(hours=2),
                 recording_time + timedelta(hours=2),
+            )
+            trace(
+                active_settings,
+                "pipeline.calendar_match.events",
+                recording_id=recording.id,
+                event_count=len(events),
+                events=[
+                    {
+                        "summary": event.summary,
+                        "start": event.dtstart_utc,
+                        "end": event.dtend_utc,
+                        "calendar": event.calendar_display_name,
+                        "eligible": event.eligible,
+                        "title_exact": normalize_title(event.summary) == parsed.normalized_title,
+                        "time_compatible": (
+                            event.dtstart_utc - timedelta(minutes=15)
+                            <= recording_time
+                            <= event.dtend_utc + timedelta(minutes=15)
+                        ),
+                    }
+                    for event in events
+                ],
             )
         except CalendarConfigurationError:
             result = MatchResult(
@@ -401,6 +500,18 @@ async def _resume_found_recording(
             await session.commit()
             return result
         result = matcher.score(recording, events)
+        trace(
+            active_settings,
+            "pipeline.calendar_match.decision",
+            recording_id=recording.id,
+            manual_review_required=result.manual_review_required,
+            reason=result.reason,
+            confidence=result.confidence,
+            signals=result.signals,
+            best_event_summary=result.best_event.summary if result.best_event else None,
+            best_event_start=result.best_event.dtstart_utc if result.best_event else None,
+            candidates=[candidate.as_dict() for candidate in result.candidates],
+        )
         await _apply_match_result(session, recording, result, active_status)
         await session.commit()
         return result

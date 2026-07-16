@@ -9,6 +9,9 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 
+from app.config import Settings
+from app.services.pipeline_trace import safe_url, trace
+
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2026-03-11"
 DEFAULT_RECORDING_PROP = "General Interview recording"
@@ -100,12 +103,14 @@ class NotionClient:
         client: httpx.AsyncClient,
         *,
         cache_size: int = DEFAULT_CACHE_SIZE,
+        settings: Settings | None = None,
     ) -> None:
         if cache_size < 1:
             raise ValueError("Notion source cache size must be positive")
         self._token = token
         self._client = client
         self._cache_size = cache_size
+        self._settings = settings
         self._source_cache: OrderedDict[SourceCacheKey, str] = OrderedDict()
         self._inflight: dict[SourceCacheKey, asyncio.Task[str]] = {}
         self._inflight_guard = asyncio.Lock()
@@ -129,6 +134,17 @@ class NotionClient:
     ) -> list[NotionPage]:
         key = (database_id, name_prop, date_prop, recording_prop)
         source_id, was_cached = await self._resolve_source(key)
+        self._trace(
+            "notion.query.start",
+            database_id=database_id,
+            data_source_id=source_id,
+            source_cache_hit=was_cached,
+            candidate_name=candidate_name,
+            event_date=event_date,
+            name_property=name_prop,
+            date_property=date_prop,
+            recording_property=recording_prop,
+        )
         response = await self._query_source(
             source_id, candidate_name, event_date, name_prop, date_prop
         )
@@ -143,9 +159,24 @@ class NotionClient:
         results = payload.get("results")
         if not isinstance(results, list):
             raise NotionMalformedResponseError("Notion query response has invalid results")
-        return [self._parse_page(item, name_prop, date_prop) for item in results[:10]]
+        pages = [self._parse_page(item, name_prop, date_prop) for item in results[:10]]
+        self._trace(
+            "notion.query.result",
+            database_id=database_id,
+            data_source_id=source_id,
+            result_count=len(pages),
+            pages=[{"id": page.id, "title": page.title, "url": page.url} for page in pages],
+        )
+        return pages
 
     async def update_page_file(self, page_id: str, prop_name: str, url: str, filename: str) -> None:
+        self._trace(
+            "notion.page_update.start",
+            page_id=page_id,
+            property=prop_name,
+            filename=filename,
+            external_url=safe_url(url),
+        )
         try:
             response = await self._client.patch(
                 f"{NOTION_API_BASE}/pages/{page_id}",
@@ -168,6 +199,7 @@ class NotionClient:
         self._raise_common(response)
         if response.is_error:
             raise NotionUpdateError(f"Notion page update failed with HTTP {response.status_code}")
+        self._trace("notion.page_update.success", page_id=page_id, property=prop_name)
 
     async def _resolve_source(self, key: SourceCacheKey) -> tuple[str, bool]:
         cached = self._cache_get(key)
@@ -231,7 +263,15 @@ class NotionClient:
             raise NotionSourceAmbiguityError(
                 "Multiple Notion data sources have the required schema"
             )
-        return compatible[0]
+        selected = compatible[0]
+        self._trace(
+            "notion.source_selected",
+            database_id=database_id,
+            discovered_source_count=len(sources),
+            compatible_source_count=len(compatible),
+            data_source_id=selected,
+        )
+        return selected
 
     async def _retrieve_schema(self, source_id: str) -> NotionDataSourceSchema:
         try:
@@ -344,6 +384,10 @@ class NotionClient:
     def _invalidate(self, key: SourceCacheKey, source_id: str) -> None:
         if self._source_cache.get(key) == source_id:
             del self._source_cache[key]
+
+    def _trace(self, event: str, **fields: object) -> None:
+        if self._settings is not None:
+            trace(self._settings, event, **fields)
 
     @staticmethod
     def _parse_page(item: Any, name_prop: str, date_prop: str) -> NotionPage:
