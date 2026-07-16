@@ -96,3 +96,17 @@ It did not affect test collection or execution.
   with the integration.
 - Production Synology setup requires DSM 7 API-key access. MinIO remains the development and test
   provider.
+
+## Subsequent Notion API Migration Context
+
+The verification above is preserved as historical Phase 3 evidence. It predates the approved
+`swarm-report/notion-2026-api-plan.md` migration and does not verify the current Notion contract.
+
+Current authoritative behavior uses `Notion-Version: 2026-03-11`. It keeps each original database
+ID at configuration and persistence boundaries, discovers sources with
+`GET /v1/databases/{database_id}`, validates each schema with
+`GET /v1/data_sources/{data_source_id}`, selects exactly one compatible schema, and queries with
+`POST /v1/data_sources/{data_source_id}/query`. Sharing, schema mismatch, or source ambiguity fails
+closed. Pre-deploy validation starts with a read-only probe against a copied database; it performs
+database and source retrieval only, then repeats discovery against production after explicit
+sharing. New migration gate results belong in the separate Notion 2026 build report.

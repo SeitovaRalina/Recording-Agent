@@ -1,5 +1,13 @@
 # Plan: Phase 3 — Candidate Matching + Transfer Pipeline   (slug: phase-3-transfer)
 
+> **Superseded Notion contract (2026-07-16):** This historical Phase 3 plan specified
+> `Notion-Version: 2022-06-28` and `POST /v1/databases/{database_id}/query`. Those statements are
+> no longer authoritative. The approved `swarm-report/notion-2026-api-plan.md` requires
+> `Notion-Version: 2026-03-11`, runtime `GET /v1/databases/{database_id}` discovery,
+> `GET /v1/data_sources/{data_source_id}` schema validation, unique compatible-source selection,
+> and `POST /v1/data_sources/{data_source_id}/query`. Original database IDs remain persisted;
+> data-source IDs are runtime-only. See `docs/api-contracts/notion.md`.
+
 ## TL;DR
 
 Phase 2 leaves recordings at `calendar_event_found`. Phase 3 advances them through the full

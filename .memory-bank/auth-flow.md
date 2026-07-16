@@ -78,14 +78,33 @@ RECRUITER_NOTION_DB_IDS: dict[str, str] = {
 }
 ```
 
-**Usage:**
+Values must be original database IDs. Do not configure or persist data-source IDs.
+
+**Runtime discovery and usage:**
 ```python
 headers = {
     "Authorization": f"Bearer {settings.notion_token}",
-    "Notion-Version": "2022-06-28",
+    "Notion-Version": "2026-03-11",
     "Content-Type": "application/json",
 }
 ```
+
+1. `GET /v1/databases/{database_id}` returns the database's `data_sources` descriptors.
+2. `GET /v1/data_sources/{data_source_id}` returns each source schema.
+3. Select exactly one source whose configured name/date/recording properties have types
+   `title`/`date`/`url`. Zero matches or multiple matches fail closed.
+4. Candidate lookup uses `POST /v1/data_sources/{data_source_id}/query`.
+5. Recording URL update uses `PATCH /v1/pages/{page_id}`.
+
+The integration must be connected directly to the original database. Sharing a parent page or a
+linked view is insufficient. A `403` or resource `404` blocks that recruiter until the database is
+shared and its original ID is verified.
+
+**Pre-deploy read-only probe:** First copy each recruiter database to a test location and connect
+the integration to the copy. Use only database retrieval and data-source retrieval to verify that
+exactly one schema has the configured `title`, `date`, and `url` properties. Do not query pages or
+write recording URLs during the probe. Repeat discovery against production only after explicit
+sharing; block enablement on sharing, schema, or ambiguity failure.
 
 ---
 

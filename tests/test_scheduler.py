@@ -477,6 +477,7 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
     assert loaded.status == RecordingStatus.SOURCE_MARKED_PROCESSED
     assert loaded.source_processed is True
     assert loaded.candidate_name == "Ivan Ivanov"
+    assert loaded.notion_database_id == owner.notion_database_id
     assert loaded.synology_share_url == "https://share/video"
     notion.update_page_url.assert_awaited_once()
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)

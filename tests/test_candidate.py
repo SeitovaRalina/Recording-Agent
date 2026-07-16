@@ -90,6 +90,7 @@ async def test_candidate_search_uses_configured_local_date(session: object) -> N
         session,  # type: ignore[arg-type]
     )
 
+    assert notion.search_pages.await_args.args[0] == "db"
     assert notion.search_pages.await_args.args[2] == date(2026, 7, 16)
 
 
