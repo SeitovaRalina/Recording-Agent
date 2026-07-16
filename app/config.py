@@ -43,6 +43,10 @@ class Settings(BaseSettings):
         default="Asia/Omsk",
         validation_alias=AliasChoices("scan_local_timezone", "SCAN_LOCAL_TIMEZONE"),
     )
+    recording_filename_timezone: str = Field(
+        default="Europe/Moscow",
+        validation_alias=AliasChoices("recording_filename_timezone", "RECORDING_FILENAME_TIMEZONE"),
+    )
     disk_cleanup_hour: int = 3
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7

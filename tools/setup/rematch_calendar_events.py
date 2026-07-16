@@ -110,7 +110,9 @@ async def _run(apply: bool, operator: str | None) -> None:
     factory = create_session_factory(engine)
     try:
         async with factory() as session:
-            findings = await find_false_calendar_matches(session, settings.scan_local_timezone)
+            findings = await find_false_calendar_matches(
+                session, settings.recording_filename_timezone
+            )
             output: object = [asdict(item) for item in findings]
             if apply:
                 if operator is None:

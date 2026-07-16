@@ -106,7 +106,8 @@ Current authoritative behavior uses `Notion-Version: 2026-03-11`. It keeps each 
 ID at configuration and persistence boundaries, discovers sources with
 `GET /v1/databases/{database_id}`, validates each schema with
 `GET /v1/data_sources/{data_source_id}`, selects exactly one compatible schema, and queries with
-`POST /v1/data_sources/{data_source_id}/query`. Sharing, schema mismatch, or source ambiguity fails
+`POST /v1/data_sources/{data_source_id}/query`. The recording field is a dedicated `files`
+property containing one named external Synology share link. Sharing, schema mismatch, or source ambiguity fails
 closed. Pre-deploy validation starts with a read-only probe against a copied database; it performs
 database and source retrieval only, then repeats discovery against production after explicit
 sharing. New migration gate results belong in the separate Notion 2026 build report.

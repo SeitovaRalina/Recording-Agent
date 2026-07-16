@@ -27,7 +27,7 @@ Alembic migration, or persisted recruiter setting changed. No commit was created
 - Set every Notion request to `Notion-Version: 2026-03-11`.
 - Preserved the original database ID at configuration, service, and persistence boundaries.
 - Added database-to-data-source discovery and exact schema validation for the configured
-  `title`, `date`, and `url` properties.
+  `title`, `date`, and `files` properties.
 - Required exactly one compatible source and added typed errors for missing and ambiguous schemas.
 - Switched candidate lookup to `POST /v1/data_sources/{data_source_id}/query` while preserving
   page parsing, candidate cardinality rules, and page URL updates.
@@ -37,6 +37,8 @@ Alembic migration, or persisted recruiter setting changed. No commit was created
   malformed responses, queries, and updates.
 - Added operation-specific typed transport failures for discovery, schema retrieval, query, and
   update; raw transport URLs and credential-bearing context are suppressed.
+- Aligned the recording property with the real `Test Interviews` schema: page updates now write
+  one named external Synology link to the dedicated `files` property.
 - Updated authoritative documentation and added the copied-database read-only rollout probe.
 
 ## Verification

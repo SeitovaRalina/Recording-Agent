@@ -64,8 +64,10 @@ sources:
 ### 1. `found`
 
 Calendar lookup uses the start parsed from a supported Telemost filename in
-`SCAN_LOCAL_TIMEZONE`, not `disk_created_at`, as the event-correlation timestamp. An incomplete
-all-calendar query leaves this status resumable.
+`RECORDING_FILENAME_TIMEZONE` (default: `Europe/Moscow`), not `disk_created_at`, as the
+event-correlation timestamp. `SCAN_LOCAL_TIMEZONE` remains the recruiter's business timezone for
+local-day boundaries and Notion dates. An incomplete all-calendar query leaves this status
+resumable.
 
 **Когда устанавливается:** файл обнаружен в списке Яндекс.Диска, ещё не обрабатывался.
 

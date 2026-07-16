@@ -22,15 +22,15 @@ Official migration references:
    `GET /v1/databases/{database_id}`, reads `data_sources`, and never treats a database ID as a
    data-source ID.
 3. For every discovered source, the client calls `GET /v1/data_sources/{data_source_id}` and
-   validates the configured name, date, and recording properties as `title`, `date`, and `url`.
+   validates the configured name, date, and recording properties as `title`, `date`, and `files`.
 4. Exactly one compatible source is selected. Zero compatible sources raises a typed schema
    error. More than one compatible source raises a typed ambiguity error. Source order never
    selects a winner.
 5. Candidate lookup calls `POST /v1/data_sources/{data_source_id}/query` with the existing title
    contains filter, local-date equals filter, and page-size bound of 10. `NotionPage` parsing and
    the zero/one/many candidate semantics remain unchanged.
-6. `PATCH /v1/pages/{page_id}` remains the recording-URL update endpoint and uses the current
-   version header and URL-property body.
+6. `PATCH /v1/pages/{page_id}` writes one external file object to the dedicated recording
+   `files` property, including the original recording filename and Synology share URL.
 7. Successful database-to-source resolution is cached in process by database ID plus configured
    property names. Cache size is bounded. Concurrent first lookups for the same key do not perform
    duplicate discovery chains.
@@ -69,7 +69,7 @@ Affected file: `app/tools/notion.py`.
 
 - Discover sources with `GET /v1/databases/{database_id}`.
 - Retrieve each schema with `GET /v1/data_sources/{data_source_id}`.
-- Match configured property names and exact types: name=`title`, date=`date`, recording=`url`.
+- Match configured property names and exact types: name=`title`, date=`date`, recording=`files`.
 - Select only when exactly one source is compatible.
 - Keep the original database ID at all service and persistence boundaries.
 
@@ -100,6 +100,8 @@ Required tests:
   compatible schemas; verify source order is irrelevant.
 - Missing/wrong name, date, or recording property types.
 - Current header on database discovery, source retrieval, query, and page PATCH.
+- External-file PATCH body includes the recording filename and share URL; it intentionally
+  replaces the dedicated recording property's file array.
 - 401, 403, database 404, source 404, 400 validation, 429, 5xx, malformed JSON shapes, and
   sanitized error messages.
 - Cache hit, concurrent first lookup, bounded eviction, cached stale-source invalidation, and one
@@ -157,7 +159,7 @@ None for implementation.
 - `2026-03-11` is the required fixed current API version, not a user-selectable arbitrary version.
 - Existing recruiter values identify original databases shared directly with the integration.
 - Schema compatibility is defined by the configured name/date/recording properties and their exact
-  `title`/`date`/`url` types.
+  `title`/`date`/`files` types.
 - Runtime discovery plus bounded caching is preferable to a persisted source ID that can become
   stale after source replacement.
 - The current dirty Phase 3 worktree belongs to the user and must be preserved.

@@ -86,7 +86,7 @@ class NotionDataSourceSchema:
         return (
             self.property_types.get(name_prop) == "title"
             and self.property_types.get(date_prop) == "date"
-            and self.property_types.get(recording_prop) == "url"
+            and self.property_types.get(recording_prop) == "files"
         )
 
 
@@ -145,12 +145,23 @@ class NotionClient:
             raise NotionMalformedResponseError("Notion query response has invalid results")
         return [self._parse_page(item, name_prop, date_prop) for item in results[:10]]
 
-    async def update_page_url(self, page_id: str, prop_name: str, url: str) -> None:
+    async def update_page_file(self, page_id: str, prop_name: str, url: str, filename: str) -> None:
         try:
             response = await self._client.patch(
                 f"{NOTION_API_BASE}/pages/{page_id}",
                 headers=self._headers,
-                json={"properties": {prop_name: {"url": url}}},
+                json={
+                    "properties": {
+                        prop_name: {
+                            "files": [
+                                {
+                                    "name": filename,
+                                    "external": {"url": url},
+                                }
+                            ]
+                        }
+                    }
+                },
             )
         except httpx.RequestError:
             raise NotionUpdateError("Notion page update transport failed") from None

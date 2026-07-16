@@ -261,7 +261,12 @@ async def _resume_transfer_recording(
         )
         await session.commit()
         try:
-            await notion.update_page_url(page.id, settings.notion_recording_prop, share_url)
+            await notion.update_page_file(
+                page.id,
+                settings.notion_recording_prop,
+                share_url,
+                recording.disk_filename,
+            )
         except Exception as error:
             await status.advance(
                 session,

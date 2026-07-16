@@ -108,7 +108,7 @@ async def test_successful_scan_logs_insert_match_and_summary(
             factory,
             disk,
             calendar,
-            InterviewMatcher(Settings(scan_local_timezone="UTC")),
+            InterviewMatcher(Settings(recording_filename_timezone="UTC")),
             Settings(scan_local_timezone="UTC"),
             datetime(2026, 7, 15, 12, tzinfo=UTC),
         )
@@ -160,7 +160,7 @@ async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate()
         recording_id,
         factory,
         calendar,
-        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+        InterviewMatcher(Settings(recording_filename_timezone="UTC")),
     )
     async with factory() as session:
         loaded = await session.get(Recording, recording_id)
@@ -210,7 +210,7 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
         recording_id,
         factory,
         calendar,
-        InterviewMatcher(Settings(scan_local_timezone="UTC")),
+        InterviewMatcher(Settings(recording_filename_timezone="UTC")),
     )
     async with factory() as session:
         loaded = await session.get(Recording, recording_id)
@@ -479,7 +479,12 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
     assert loaded.candidate_name == "Ivan Ivanov"
     assert loaded.notion_database_id == owner.notion_database_id
     assert loaded.synology_share_url == "https://share/video"
-    notion.update_page_url.assert_awaited_once()
+    notion.update_page_file.assert_awaited_once_with(
+        "page",
+        Settings().notion_recording_prop,
+        "https://share/video",
+        item.disk_filename,
+    )
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
 
 

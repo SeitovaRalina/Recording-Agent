@@ -18,6 +18,7 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.confidence_threshold == 0.7
     assert settings.scan_ignore_before_today is True
     assert settings.scan_local_timezone == "Asia/Omsk"
+    assert settings.recording_filename_timezone == "Europe/Moscow"
     get_settings.cache_clear()
 
 
@@ -38,8 +39,10 @@ def test_phase_two_settings_parse_json_maps() -> None:
 def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("SCAN_IGNORE_BEFORE_TODAY", "false")
     monkeypatch.setenv("SCAN_LOCAL_TIMEZONE", "UTC")
+    monkeypatch.setenv("RECORDING_FILENAME_TIMEZONE", "Europe/Berlin")
 
     settings = Settings()
 
     assert settings.scan_ignore_before_today is False
     assert settings.scan_local_timezone == "UTC"
+    assert settings.recording_filename_timezone == "Europe/Berlin"

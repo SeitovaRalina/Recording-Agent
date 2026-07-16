@@ -50,7 +50,7 @@ def schema(
     *,
     name_type: str = "title",
     date_type: str = "date",
-    recording_type: str = "url",
+    recording_type: str = "files",
     omit: str | None = None,
 ) -> dict[str, object]:
     properties: dict[str, object] = {
@@ -161,7 +161,7 @@ async def test_fails_closed_when_schema_selection_is_not_unique(
         schema("source", omit=RECORDING),
         schema("source", name_type="rich_text"),
         schema("source", date_type="rich_text"),
-        schema("source", recording_type="files"),
+        schema("source", recording_type="url"),
     ],
 )
 async def test_rejects_missing_or_wrong_required_property_types(
@@ -366,21 +366,24 @@ async def test_stale_source_retry_happens_only_once() -> None:
 
 
 @pytest.mark.anyio
-async def test_update_page_url_uses_current_header_and_typed_errors() -> None:
+async def test_update_page_file_uses_external_file_and_current_header() -> None:
     async with httpx.AsyncClient() as http:
         client = NotionClient(SecretStr("token"), http)
         with respx.mock(assert_all_called=True) as router:
             route = router.patch(f"{BASE}/pages/page").mock(
                 return_value=httpx.Response(200, json={})
             )
-            await client.update_page_url("page", RECORDING, "https://share")
+            await client.update_page_file("page", RECORDING, "https://share", "interview.webm")
         assert route.calls.last.request.headers["Notion-Version"] == NOTION_API_VERSION
-        assert b'"url":"https://share"' in route.calls.last.request.content
+        assert route.calls.last.request.content == (
+            b'{"properties":{"General Interview recording":{"files":['
+            b'{"name":"interview.webm","external":{"url":"https://share"}}]}}}'
+        )
 
         with respx.mock(assert_all_called=True) as router:
             router.patch(f"{BASE}/pages/page").mock(return_value=httpx.Response(500))
             with pytest.raises(NotionUpdateError):
-                await client.update_page_url("page", RECORDING, "https://share")
+                await client.update_page_file("page", RECORDING, "https://share", "interview.webm")
 
 
 @pytest.mark.anyio
@@ -425,8 +428,11 @@ async def test_transport_failures_are_typed_and_sanitized(
 
             with pytest.raises(error_type) as raised:
                 if operation == "update":
-                    await client.update_page_url(
-                        "secret-page-id", RECORDING, "https://secret-share-url"
+                    await client.update_page_file(
+                        "secret-page-id",
+                        RECORDING,
+                        "https://secret-share-url",
+                        "secret-recording-name.webm",
                     )
                 else:
                     await client.search_pages(
@@ -438,4 +444,5 @@ async def test_transport_failures_are_typed_and_sanitized(
         assert "secret-database-id" not in message
         assert "secret-source-id" not in message
         assert "secret-share-url" not in message
+        assert "secret-recording-name" not in message
         assert "credential-bearing" not in message

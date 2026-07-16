@@ -135,10 +135,11 @@ automatic match.
 Before confidence scoring, the Telemost filename must match one of these anchored shapes:
 `YYYY-MM-DD_HHMMSS_<meeting title>.webm` or
 `YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm`. The timestamp is interpreted in
-`SCAN_LOCAL_TIMEZONE`. Titles are normalized with Unicode NFKC, casefold, and trimmed/collapsed
-Unicode whitespace only. Compatibility requires exact normalized filename-title/SUMMARY equality
-and the existing time tolerance; no fuzzy, substring, token, punctuation-dropping, transliteration,
-edit-distance, or LLM comparison is permitted.
+`RECORDING_FILENAME_TIMEZONE` (default: `Europe/Moscow`). `SCAN_LOCAL_TIMEZONE` separately defines
+the recruiter's business date. Titles are normalized with Unicode NFKC, casefold, and
+trimmed/collapsed Unicode whitespace only. Compatibility requires exact normalized
+filename-title/SUMMARY equality and the existing time tolerance; no fuzzy, substring, token,
+punctuation-dropping, transliteration, edit-distance, or LLM comparison is permitted.
 
 Automatic matching requires exactly one compatible occurrence in the effective set, no compatible
 occurrence outside it, and confidence at or above the threshold. Deduplication is limited to

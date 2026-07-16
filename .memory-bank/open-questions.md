@@ -29,12 +29,12 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 **Question:** What is each recruiter's original database ID, and is it shared directly with the
 Recording Agent integration?
 **Known (Anton's Interviews DB):** Name (title), General Interview Date (date), General Interview
-recording (url), TBD (formula), Spots (relation).
+recording (files), TBD (formula), Spots (relation).
 **Action:** Keep only the original database ID in configuration. With `Notion-Version: 2026-03-11`,
 call `GET /v1/databases/{database_id}`, then retrieve every advertised schema through
 `GET /v1/data_sources/{data_source_id}`. Property IDs and types come from data-source retrieval,
 not database retrieval. Enable the recruiter only when exactly one source has the configured
-name/date/recording properties with types `title`/`date`/`url`.
+name/date/recording properties with types `title`/`date`/`files`.
 **Status:** Open operational input — database IDs and direct sharing are required per recruiter;
 data-source IDs are discovered at runtime and are not configured.
 

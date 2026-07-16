@@ -85,7 +85,7 @@ def test_title_normalization_is_only_nfkc_casefold_and_whitespace() -> None:
 def test_unique_exact_title_time_and_calink_auto_match() -> None:
     start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
     title = "Встреча на 30 минут (Дмитрий Aqa)"
-    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
         recording(title, start), [event(start=start, summary=title)]
     )
 
@@ -95,7 +95,7 @@ def test_unique_exact_title_time_and_calink_auto_match() -> None:
 
 def test_reported_non_recruiting_title_cannot_match_other_event() -> None:
     start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
-    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
         recording("Не рекрутинг встреча", start),
         [event(start=start, summary="Встреча на 30 минут (Иван Иванов)")],
     )
@@ -107,7 +107,7 @@ def test_reported_non_recruiting_title_cannot_match_other_event() -> None:
 def test_unmonitored_only_and_cross_calendar_collision_fail_closed() -> None:
     start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
     title = "Meeting (Ivan Ivanov)"
-    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
     monitored = event(start=start, summary=title, calendar_id=uuid.uuid4())
     unmonitored = event(
         start=start,
@@ -137,7 +137,7 @@ def test_duplicate_occurrence_deduplicates_but_distinct_recurrence_is_ambiguous(
         calendar_id=calendar_id,
         recurrence_id="20260715T085411Z",
     )
-    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
 
     assert matcher.score(recording(title, start), [first, duplicate]).best_event is first
     assert matcher.score(recording(title, start), [first, other_occurrence]).reason == (
@@ -150,7 +150,7 @@ def test_timestamp_inconsistency_and_low_confidence_fail_closed() -> None:
     title = "Team sync"
     inconsistent = recording(title, start)
     inconsistent.disk_created_at = start + timedelta(days=1)
-    matcher = InterviewMatcher(Settings(scan_local_timezone="UTC"))
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
 
     assert matcher.score(inconsistent, [event(start=start, summary=title)]).reason == (
         ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
@@ -178,7 +178,7 @@ def test_manual_review_candidate_payload_is_field_and_total_bounded() -> None:
     ]
     events = [replace(item, calendar_display_name="Calendar " + "d" * 500) for item in events]
 
-    result = InterviewMatcher(Settings(scan_local_timezone="UTC")).score(
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
         recording(title, start), events
     )
     payload = [candidate.as_dict() for candidate in result.candidates]
@@ -189,3 +189,24 @@ def test_manual_review_candidate_payload_is_field_and_total_bounded() -> None:
     assert all(len(str(item["calendar_display_name"])) <= 100 for item in payload)
     assert all(len(str(item["event_uid"])) <= 160 for item in payload)
     assert all(len(str(item["event_summary"])) <= 160 for item in payload)
+
+
+def test_telemost_filename_timezone_is_independent_from_recruiter_local_timezone() -> None:
+    settings = Settings(
+        scan_local_timezone="Asia/Omsk",
+        recording_filename_timezone="Europe/Moscow",
+    )
+    item = SimpleNamespace(
+        disk_filename=("2026-07-16_061826_Встреча на 30 минут (Максим Соболев).webm"),
+        disk_created_at=datetime(2026, 7, 16, 3, 25, 38, tzinfo=UTC),
+    )
+    calendar_event = event(
+        start=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        summary="Встреча на 30 минут (Максим Соболев)",
+    )
+
+    result = InterviewMatcher(settings).score(item, [calendar_event])
+
+    assert result.manual_review_required is False
+    assert result.best_event is calendar_event
+    assert "time_overlap" in result.signals

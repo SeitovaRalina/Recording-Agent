@@ -41,7 +41,7 @@ Candidate lookup resolves a queryable data source at runtime:
 4. Validate configured properties against the retrieved data-source schema:
    - `notion_name_prop` must have type `title`.
    - `notion_date_prop` must have type `date`.
-   - `notion_recording_prop` must have type `url`.
+   - `notion_recording_prop` must have type `files`.
 5. Select the source only when exactly one schema is compatible.
 
 Zero compatible sources is a schema error. More than one compatible source is an ambiguity error.
@@ -85,7 +85,7 @@ zero results require manual review, one result matches, and multiple results req
 `POST /v1/databases/{database_id}/query` and `Notion-Version: 2022-06-28` are legacy contracts and
 must not be used by runtime code.
 
-## Recording URL update
+## Recording file-link update
 
 Page updates remain page-scoped:
 
@@ -97,14 +97,23 @@ PATCH /v1/pages/{page_id}
 {
   "properties": {
     "General Interview recording": {
-      "url": "https://storage.example/recording"
+      "files": [
+        {
+          "name": "interview-recording.webm",
+          "external": {
+            "url": "https://storage.example/recording"
+          }
+        }
+      ]
     }
   }
 }
 ```
 
-Send `Notion-Version: 2026-03-11`. The recording property must already exist as type `url` in the
-selected data-source schema.
+Send `Notion-Version: 2026-03-11`. The recording property must already exist as type `files` in the
+selected data-source schema. The external file `name` is the original recording filename. Updating
+a `files` property replaces its entire array; this integration intentionally owns the dedicated
+recording property and writes one external Synology share link.
 
 ## Sharing and errors
 
@@ -137,7 +146,7 @@ Run this process before production enablement for every recruiter:
 4. Send only `GET /v1/databases/{database_id}` and `GET /v1/data_sources/{data_source_id}` requests
    using `Notion-Version: 2026-03-11`.
 5. Confirm the database payload exposes data sources and exactly one retrieved schema has
-   `title`, `date`, and `url` properties under the configured names.
+   `title`, `date`, and `files` properties under the configured names.
 6. Record sanitized pass/fail evidence. Do not query candidate pages and do not patch any page.
 7. Repeat the read-only discovery against the production database ID after explicit sharing.
 
