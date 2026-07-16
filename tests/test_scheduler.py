@@ -16,13 +16,18 @@ from app.main import app
 from app.scheduler.cron import (
     _persist_found_recording,
     _resume_found_recording,
+    _resume_transfer_recording,
     local_today_start_utc,
     register_jobs,
     scan_all_recruiters,
     scan_recruiter,
 )
+from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
+from app.services.status import StatusService
+from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
+from app.tools.notion import NotionPage
 
 
 def found(file_id: str) -> Recording:
@@ -166,6 +171,7 @@ async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate()
     assert loaded.matched_calendar_id == calendar_id
     assert loaded.matched_calendar_url == "https://caldav.test/interviews/"
     assert loaded.manual_review_reason is None
+    assert loaded.last_attempted_at is not None
 
 
 @pytest.mark.anyio
@@ -216,6 +222,7 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
     assert loaded.calendar_event_uid is None
     assert loaded.calendar_raw_ics is None
     assert loaded.matched_calendar_url is None
+    assert loaded.last_attempted_at is not None
 
 
 @pytest.mark.anyio
@@ -347,7 +354,7 @@ async def test_scan_all_recruiters_isolates_recruiter_failures(
         await session.commit()
     called: list[str] = []
 
-    async def fake_scan(recruiter: RecruiterConfig, *_args: object) -> None:
+    async def fake_scan(recruiter: RecruiterConfig, *_args: object, **_kwargs: object) -> None:
         called.append(recruiter.email)
         if recruiter.email == "first@example.com":
             raise RuntimeError("first failed")
@@ -381,10 +388,11 @@ def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     scheduler = MagicMock()
     register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
-    assert scheduler.add_job.call_count == 2
+    assert scheduler.add_job.call_count == 3
     cleanup_call = scheduler.add_job.call_args_list[1]
     assert cleanup_call.kwargs["id"] == "cleanup_expired_recordings"
     assert len(cleanup_call.kwargs["args"]) == 2
+    assert scheduler.add_job.call_args_list[2].kwargs["id"] == "cleanup_stale_transfer_files"
     get_settings.cache_clear()
 
 
@@ -421,3 +429,260 @@ async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
         assert app.state.scheduler.get_job("scan_all_recruiters") is not None
         assert app.state.scheduler.get_job("cleanup_expired_recordings") is not None
     get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("pipeline")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    page = NotionPage("page", "https://notion/page", "Different Notion Title", "2026-07-16")
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(page=page, confidence=1.0)
+    transfer = AsyncMock()
+    transfer.transfer.return_value = TransferResult(
+        "/recordings/2026-07-16/Ivan Ivanov",
+        "/recordings/2026-07-16/Ivan Ivanov/video.webm",
+    )
+    transfer.create_share_link.return_value = "https://share/video"
+    disk = AsyncMock()
+    notion = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        disk,
+        candidate,
+        transfer,
+        StatusService(),
+        notion,
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.SOURCE_MARKED_PROCESSED
+    assert loaded.source_processed is True
+    assert loaded.candidate_name == "Ivan Ivanov"
+    assert loaded.synology_share_url == "https://share/video"
+    notion.update_page_url.assert_awaited_once()
+    disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
+
+
+@pytest.mark.anyio
+async def test_scan_resumes_calendar_match_and_routes_missing_candidate_to_review() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("candidate-missing")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        reason="no_candidate_found", candidates=[]
+    )
+    transfer = AsyncMock()
+
+    await scan_recruiter(
+        owner,
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        candidate_service=candidate,
+        transfer_service=transfer,
+        status_service=StatusService(),
+        notion=AsyncMock(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "no_candidate_found"
+    assert loaded.manual_review_candidates == []
+    candidate.find_and_match.assert_awaited_once()
+    transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_transfer_failure_persists_failed_step() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("transfer-failed")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Calendar Name)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage("page", "https://notion/page", "Notion Name", "2026-07-16")
+    )
+    transfer = AsyncMock()
+    transfer.transfer.side_effect = TransferError("upload", RuntimeError("storage down"))
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.FAILED
+    assert loaded.error_step == "upload"
+    assert loaded.error_message == "storage down"
+    assert loaded.candidate_name == "Calendar Name"
+    assert loaded.synology_file_path is None
+
+
+@pytest.mark.anyio
+async def test_share_failure_keeps_committed_upload_paths() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("share-failed")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Calendar Name)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage("page", "https://notion/page", "Notion Name", "2026-07-16")
+    )
+    transfer = AsyncMock()
+    transfer.transfer.return_value = TransferResult("/folder", "/folder/video.webm")
+    transfer.create_share_link.side_effect = TransferError(
+        "share_link", RuntimeError("share unavailable")
+    )
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.FAILED
+    assert loaded.error_step == "share_link"
+    assert loaded.synology_folder_path == "/folder"
+    assert loaded.synology_file_path == "/folder/video.webm"
+
+
+@pytest.mark.anyio
+async def test_transfer_failure_is_isolated_between_recruiters() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owners = [
+        RecruiterConfig(
+            email="first@example.com", notion_database_id="one", synology_base_folder="/one"
+        ),
+        RecruiterConfig(
+            email="second@example.com", notion_database_id="two", synology_base_folder="/two"
+        ),
+    ]
+    items: list[Recording] = []
+    for index, owner in enumerate(owners):
+        item = found(f"isolation-{index}")
+        item.disk_owner_email = owner.email
+        item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+        item.calendar_event_summary = f"Interview (Candidate {index})"
+        item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+        items.append(item)
+    async with factory() as session:
+        session.add_all([*owners, *items])
+        await session.commit()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage("page", "https://notion/page", "Notion Name", "2026-07-16")
+    )
+    transfer = AsyncMock()
+
+    async def transfer_effect(
+        _recording: Recording, owner: RecruiterConfig, *_args: object
+    ) -> TransferResult:
+        if owner.email == "first@example.com":
+            raise TransferError("upload", RuntimeError("first storage failed"))
+        return TransferResult("/two/folder", "/two/folder/video.webm")
+
+    transfer.transfer.side_effect = transfer_effect
+    transfer.create_share_link.return_value = "https://share/video"
+
+    await scan_all_recruiters(
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+    )
+    async with factory() as session:
+        statuses = {
+            row.disk_owner_email: row.status
+            for row in (await session.scalars(select(Recording))).all()
+        }
+    await engine.dispose()
+
+    assert statuses == {
+        "first@example.com": RecordingStatus.FAILED,
+        "second@example.com": RecordingStatus.SOURCE_MARKED_PROCESSED,
+    }

@@ -15,13 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, get_settings
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.candidate import CandidateService
 from app.services.matching import (
     InterviewMatcher,
     ManualReviewReason,
     MatchResult,
 )
+from app.services.status import StatusService
+from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
+from app.tools.notion import NotionClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +56,13 @@ async def scan_recruiter(
     matcher: InterviewMatcher,
     settings: Settings | None = None,
     now: datetime | None = None,
+    candidate_service: CandidateService | None = None,
+    transfer_service: TransferService | None = None,
+    status_service: StatusService | None = None,
+    notion: NotionClient | None = None,
 ) -> ScanSummary:
     active_settings = settings or get_settings()
+    active_status = status_service or StatusService()
     summary = ScanSummary()
     try:
         files = await disk.list_new(recruiter.email)
@@ -89,7 +98,9 @@ async def scan_recruiter(
         )
     for recording_id in recording_ids:
         try:
-            result = await _resume_found_recording(recording_id, session_factory, cal, matcher)
+            result = await _resume_found_recording(
+                recording_id, session_factory, cal, matcher, active_status
+            )
             if result is not None:
                 if result.manual_review_required:
                     summary.manual_review += 1
@@ -107,12 +118,43 @@ async def scan_recruiter(
                     result.best_event.summary if result.best_event is not None else None,
                 )
         except (CalDAVAuthError, KeyError, ValueError) as error:
-            await _fail_recording(recording_id, session_factory, error)
+            await _fail_recording(recording_id, session_factory, error, active_status)
             summary.failed += 1
             logger.error("Recording %s failed permanently: %s", recording_id, error)
         except Exception:
             summary.failed += 1
             logger.exception("Recording %s remains resumable after scan failure", recording_id)
+    if all(
+        service is not None
+        for service in (candidate_service, transfer_service, status_service, notion)
+    ):
+        async with session_factory() as session:
+            transfer_ids = list(
+                (
+                    await session.scalars(
+                        select(Recording.id).where(
+                            Recording.disk_owner_email == recruiter.email,
+                            Recording.status == RecordingStatus.CALENDAR_EVENT_FOUND,
+                        )
+                    )
+                ).all()
+            )
+        for recording_id in transfer_ids:
+            try:
+                await _resume_transfer_recording(
+                    recording_id,
+                    recruiter,
+                    session_factory,
+                    disk,
+                    cast(CandidateService, candidate_service),
+                    cast(TransferService, transfer_service),
+                    cast(StatusService, status_service),
+                    cast(NotionClient, notion),
+                    active_settings,
+                )
+            except Exception:
+                summary.failed += 1
+                logger.exception("Recording %s transfer pipeline failed", recording_id)
     logger.info(
         "recruiter scan summary: recruiter=%s discovered=%d inserted=%d skipped_legacy=%d "
         "matched=%d manual_review=%d failed=%d",
@@ -125,6 +167,142 @@ async def scan_recruiter(
         summary.failed,
     )
     return summary
+
+
+async def _resume_transfer_recording(
+    recording_id: uuid.UUID,
+    recruiter: RecruiterConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    disk: DiskScanner,
+    candidate_service: CandidateService,
+    transfer_service: TransferService,
+    status: StatusService,
+    notion: NotionClient,
+    settings: Settings,
+) -> None:
+    async with session_factory() as session:
+        recording = await session.get(Recording, recording_id)
+        if recording is None or recording.status != RecordingStatus.CALENDAR_EVENT_FOUND:
+            return
+        try:
+            match = await candidate_service.find_and_match(recording, recruiter, session)
+        except Exception as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="candidate_matching",
+                error_message=str(error),
+            )
+            await session.commit()
+            return
+        if match.page is None:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                manual_review_reason=match.reason,
+                manual_review_candidates=match.candidates or [],
+            )
+            await session.commit()
+            return
+        page = match.page
+        candidate_name = _candidate_name(recording.calendar_event_summary)
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.CANDIDATE_MATCHED,
+            candidate_name=candidate_name,
+            candidate_email=page.email,
+            notion_database_id=recruiter.notion_database_id,
+            notion_page_id=page.id,
+            notion_page_url=page.url,
+        )
+        await session.commit()
+        await status.advance(session, recording, RecordingStatus.TRANSFER_STARTED)
+        await session.commit()
+        try:
+            result = await transfer_service.transfer(recording, recruiter, candidate_name, session)
+        except TransferError as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step=error.step,
+                error_message=str(error.cause),
+            )
+            await session.commit()
+            return
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.UPLOADED_TO_SYNOLOGY,
+            synology_folder_path=result.folder_path,
+            synology_file_path=result.file_path,
+        )
+        await session.commit()
+        try:
+            share_url = await transfer_service.create_share_link(result.file_path)
+        except TransferError as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step=error.step,
+                error_message=str(error.cause),
+            )
+            await session.commit()
+            return
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.SYNOLOGY_LINK_CREATED,
+            synology_share_url=share_url,
+        )
+        await session.commit()
+        try:
+            await notion.update_page_url(page.id, settings.notion_recording_prop, share_url)
+        except Exception as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="notion_update",
+                error_message=str(error),
+            )
+            await session.commit()
+            return
+        await status.advance(
+            session, recording, RecordingStatus.NOTION_UPDATED, notion_page_url=page.url
+        )
+        await session.commit()
+        try:
+            await disk.mark_processed(recording.disk_path, recruiter.email)
+        except Exception as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="mark_processed",
+                error_message=str(error),
+            )
+            await session.commit()
+            return
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.SOURCE_MARKED_PROCESSED,
+            source_processed=True,
+            disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
+        )
+        await session.commit()
+
+
+def _candidate_name(summary: str | None) -> str:
+    match = re.search(r"\(([^)]+)\)$", summary or "")
+    if match is None:
+        raise ValueError("Calendar event has no candidate name")
+    return match.group(1).strip()
 
 
 async def _persist_found_recording(
@@ -186,7 +364,9 @@ async def _resume_found_recording(
     session_factory: async_sessionmaker[AsyncSession],
     cal: CalDAVClient,
     matcher: InterviewMatcher,
+    status: StatusService | None = None,
 ) -> MatchResult | None:
+    active_status = status or StatusService()
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
@@ -195,7 +375,7 @@ async def _resume_found_recording(
             recording_time = matcher.parse_filename(recording.disk_filename).start_utc
         except (ValueError, KeyError):
             result = matcher.score(recording, [])
-            _apply_match_result(recording, result)
+            await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
         try:
@@ -212,52 +392,63 @@ async def _resume_found_recording(
                 manual_review_required=True,
                 reason=ManualReviewReason.CALENDAR_CONFIGURATION_INCOMPLETE,
             )
-            _apply_match_result(recording, result)
+            await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
         result = matcher.score(recording, events)
-        _apply_match_result(recording, result)
-        if result.best_event is not None:
-            event = result.best_event
-            recording.calendar_event_uid = event.uid
-            recording.calendar_event_recurrence_id = event.recurrence_id
-            recording.calendar_event_summary = event.summary
-            recording.calendar_dtstart = event.dtstart_utc
-            recording.calendar_dtend = event.dtend_utc
-            recording.calendar_organizer = event.organizer_email
-            recording.calendar_raw_ics = event.raw_ics
-            recording.matched_calendar_id = event.calendar_id
-            recording.matched_calendar_url = event.calendar_url
-            recording.matched_calendar_display_name = event.calendar_display_name
-            telemost = re.search(r"https://telemost\.360\.yandex\.ru/\S+", event.description)
-            recording.calendar_telemost_url = telemost.group(0) if telemost else None
+        await _apply_match_result(session, recording, result, active_status)
         await session.commit()
         return result
 
 
-def _apply_match_result(recording: Recording, result: MatchResult) -> None:
-    recording.status = (
+async def _apply_match_result(
+    session: AsyncSession,
+    recording: Recording,
+    result: MatchResult,
+    status: StatusService,
+) -> None:
+    new_status = (
         RecordingStatus.MANUAL_REVIEW_REQUIRED
         if result.manual_review_required
         else RecordingStatus.CALENDAR_EVENT_FOUND
     )
-    recording.manual_review_reason = result.reason.value if result.reason else None
-    recording.manual_review_candidates = (
-        [candidate.as_dict() for candidate in result.candidates] if result.candidates else None
-    )
-    if not result.manual_review_required:
-        return
-    recording.calendar_event_uid = None
-    recording.calendar_event_recurrence_id = None
-    recording.calendar_event_summary = None
-    recording.calendar_dtstart = None
-    recording.calendar_dtend = None
-    recording.calendar_organizer = None
-    recording.calendar_telemost_url = None
-    recording.calendar_raw_ics = None
-    recording.matched_calendar_id = None
-    recording.matched_calendar_url = None
-    recording.matched_calendar_display_name = None
+    updates: dict[str, Any] = {
+        "manual_review_reason": result.reason.value if result.reason else None,
+        "manual_review_candidates": (
+            [candidate.as_dict() for candidate in result.candidates] if result.candidates else None
+        ),
+    }
+    event = result.best_event
+    if result.manual_review_required or event is None:
+        updates.update(
+            calendar_event_uid=None,
+            calendar_event_recurrence_id=None,
+            calendar_event_summary=None,
+            calendar_dtstart=None,
+            calendar_dtend=None,
+            calendar_organizer=None,
+            calendar_telemost_url=None,
+            calendar_raw_ics=None,
+            matched_calendar_id=None,
+            matched_calendar_url=None,
+            matched_calendar_display_name=None,
+        )
+    else:
+        telemost = re.search(r"https://telemost\.360\.yandex\.ru/\S+", event.description)
+        updates.update(
+            calendar_event_uid=event.uid,
+            calendar_event_recurrence_id=event.recurrence_id,
+            calendar_event_summary=event.summary,
+            calendar_dtstart=event.dtstart_utc,
+            calendar_dtend=event.dtend_utc,
+            calendar_organizer=event.organizer_email,
+            calendar_telemost_url=telemost.group(0) if telemost else None,
+            calendar_raw_ics=event.raw_ics,
+            matched_calendar_id=event.calendar_id,
+            matched_calendar_url=event.calendar_url,
+            matched_calendar_display_name=event.calendar_display_name,
+        )
+    await status.advance(session, recording, new_status, **updates)
 
 
 async def scan_all_recruiters(
@@ -266,6 +457,10 @@ async def scan_all_recruiters(
     cal: CalDAVClient,
     matcher: InterviewMatcher,
     settings: Settings | None = None,
+    candidate_service: CandidateService | None = None,
+    transfer_service: TransferService | None = None,
+    status_service: StatusService | None = None,
+    notion: NotionClient | None = None,
 ) -> None:
     started_at = datetime.now(UTC)
     recruiters = await _active_recruiters(session_factory)
@@ -274,7 +469,18 @@ async def scan_all_recruiters(
         logger.warning("No active recruiters configured; disk scan skipped")
     results = await asyncio.gather(
         *(
-            scan_recruiter(item, session_factory, disk, cal, matcher, settings)
+            scan_recruiter(
+                item,
+                session_factory,
+                disk,
+                cal,
+                matcher,
+                settings,
+                candidate_service=candidate_service,
+                transfer_service=transfer_service,
+                status_service=status_service,
+                notion=notion,
+            )
             for item in recruiters
         ),
         return_exceptions=True,
@@ -322,15 +528,20 @@ async def _fail_recording(
     recording_id: uuid.UUID,
     session_factory: async_sessionmaker[AsyncSession],
     error: Exception,
+    status: StatusService | None = None,
 ) -> None:
+    active_status = status or StatusService()
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
             return
-        recording.status = RecordingStatus.FAILED
-        recording.error_step = "calendar_matching"
-        recording.error_message = str(error)
-        recording.last_attempted_at = datetime.now(UTC)
+        await active_status.advance(
+            session,
+            recording,
+            RecordingStatus.FAILED,
+            error_step="calendar_matching",
+            error_message=str(error),
+        )
         await session.commit()
 
 
@@ -353,6 +564,10 @@ def register_jobs(
     disk: DiskScanner,
     cal: CalDAVClient,
     matcher: InterviewMatcher,
+    candidate_service: CandidateService | None = None,
+    transfer_service: TransferService | None = None,
+    status_service: StatusService | None = None,
+    notion: NotionClient | None = None,
 ) -> None:
     settings = get_settings()
     scan_trigger = CronTrigger(
@@ -363,7 +578,17 @@ def register_jobs(
     scheduler.add_job(
         scan_all_recruiters,
         scan_trigger,
-        args=[session_factory, disk, cal, matcher, settings],
+        args=[
+            session_factory,
+            disk,
+            cal,
+            matcher,
+            settings,
+            candidate_service,
+            transfer_service,
+            status_service,
+            notion,
+        ],
         max_instances=1,
         misfire_grace_time=3600,
         id="scan_all_recruiters",
@@ -394,6 +619,14 @@ def register_jobs(
         settings.disk_cleanup_hour,
         settings.disk_cleanup_minute,
         _next_run_time(cleanup_trigger).isoformat(),
+    )
+    scheduler.add_job(
+        cleanup_stale_temp_files,
+        "interval",
+        hours=1,
+        max_instances=1,
+        id="cleanup_stale_transfer_files",
+        replace_existing=True,
     )
 
 

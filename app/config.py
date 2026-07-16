@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7
     notion_token: SecretStr = SecretStr("")
+    notion_name_prop: str = "Name"
+    notion_date_prop: str = "General Interview Date"
+    notion_recording_prop: str = "General Interview recording"
     synology_base_url: str = ""
     synology_api_key: SecretStr = SecretStr("")
     synology_user: str = ""
