@@ -78,10 +78,11 @@ query failure makes the set incomplete and forbids a partial automatic match.
 The official filename parser accepts only anchored
 `YYYY-MM-DD_HHMMSS_<meeting title>.webm` and
 `YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm` forms. The timestamp uses
-`SCAN_LOCAL_TIMEZONE`. Title normalization is Unicode NFKC, casefold, and trimmed/collapsed Unicode
-whitespace only. Exact normalized title/SUMMARY equality and compatible start time are mandatory
-before confidence scoring. Substring, token, punctuation-dropping, transliteration, edit-distance,
-fuzzy, and LLM comparisons are forbidden.
+`RECORDING_FILENAME_TIMEZONE` (default: `Europe/Moscow`), independently from the recruiter's
+`SCAN_LOCAL_TIMEZONE`. Title normalization is Unicode NFKC, casefold, and trimmed/collapsed
+Unicode whitespace only. Exact normalized title/SUMMARY equality and compatible start time are
+mandatory before confidence scoring. Substring, token, punctuation-dropping, transliteration,
+edit-distance, fuzzy, and LLM comparisons are forbidden.
 
 Exactly one compatible effective occurrence, no compatible occurrence outside the effective set,
 and the confidence threshold are required for confirmation. Deduplication is limited to

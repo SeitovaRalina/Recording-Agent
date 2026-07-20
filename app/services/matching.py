@@ -120,7 +120,7 @@ class InterviewMatcher:
         self._settings = settings
 
     def parse_filename(self, filename: str) -> ParsedRecordingFilename:
-        return parse_recording_filename(filename, self._settings.scan_local_timezone)
+        return parse_recording_filename(filename, self._settings.recording_filename_timezone)
 
     def _score_event(
         self, recording_start: datetime, event: ParsedVEVENT
@@ -151,7 +151,7 @@ class InterviewMatcher:
     def score(self, recording: RecordingLike, events: list[ParsedVEVENT]) -> MatchResult:
         try:
             parsed = parse_recording_filename(
-                recording.disk_filename, self._settings.scan_local_timezone
+                recording.disk_filename, self._settings.recording_filename_timezone
             )
         except (ValueError, KeyError):
             return self._manual(ManualReviewReason.FILENAME_INVALID)

@@ -11,6 +11,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    app_environment: Literal["development", "test", "production"] = "production"
+    pipeline_trace_enabled: bool = False
+
     database_url: SecretStr = SecretStr(
         "postgresql+asyncpg://postgres:postgres@localhost:5432/recording_agent"
     )
@@ -43,10 +46,17 @@ class Settings(BaseSettings):
         default="Asia/Omsk",
         validation_alias=AliasChoices("scan_local_timezone", "SCAN_LOCAL_TIMEZONE"),
     )
+    recording_filename_timezone: str = Field(
+        default="Europe/Moscow",
+        validation_alias=AliasChoices("recording_filename_timezone", "RECORDING_FILENAME_TIMEZONE"),
+    )
     disk_cleanup_hour: int = 3
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7
     notion_token: SecretStr = SecretStr("")
+    notion_name_prop: str = "Name"
+    notion_date_prop: str = "General Interview Date"
+    notion_recording_prop: str = "General Interview recording"
     synology_base_url: str = ""
     synology_api_key: SecretStr = SecretStr("")
     synology_user: str = ""
@@ -65,6 +75,10 @@ class Settings(BaseSettings):
         default=0.7,
         validation_alias=AliasChoices("confidence_threshold", "CONFIDENCE_THRESHOLD"),
     )
+
+    @property
+    def pipeline_trace_active(self) -> bool:
+        return self.app_environment == "development" and self.pipeline_trace_enabled
 
     @field_validator("yandex_refresh_tokens", "yandex_caldav_passwords", mode="before")
     @classmethod

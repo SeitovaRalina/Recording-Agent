@@ -62,6 +62,20 @@ poetry run python tools/setup/yandex_oauth.py --recruiter anton@effective.band
 poetry run pytest
 ```
 
+## Development pipeline trace
+
+For local end-to-end diagnosis only, enable both settings in `.env` and restart the app:
+
+```env
+APP_ENVIRONMENT=development
+PIPELINE_TRACE_ENABLED=true
+```
+
+The application then writes structured `PIPELINE_TRACE` entries for filename parsing, calendar
+event candidates and confidence signals, Notion data-source/page lookup, transfer paths, share-link
+creation, and page updates. The trace is disabled in production even if the flag is set. Tokens,
+raw ICS, and signed URL query parameters are redacted.
+
 ## Migration workflow
 
 The `migrate` Compose service runs `alembic upgrade head` automatically before the application starts. Manual commands use the same image and Docker network, so a host Python process does not need direct access to PostgreSQL.

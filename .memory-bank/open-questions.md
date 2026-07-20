@@ -25,11 +25,18 @@ Resolve these BEFORE starting the affected phase. Each one is a blocker for spec
 - Link to folder: `https://disk.yandex.ru/client/disk/Записи%20Телемоста`
 **Consequence for disk.py:** Scan path `/Записи Телемоста/` per recruiter account. Both video and audio files land there.
 
-## Q5: Notion database IDs + field IDs [BLOCKER for notion.py]
-**Question:** Need exact database IDs and property IDs (not just names) for each recruiter's DB.
-**Known (Anton's Interviews DB):** Name (title), General Interview Date (date), General Interview recording (url), TBD (formula), Spots (relation).
-**Action:** Call Notion API: `GET /v1/databases/{database_id}` → get property IDs.
-**Status:** Open — need database_ids from recruiter
+## Q5: Notion database IDs and schema validation [OPERATIONAL BLOCKER per recruiter]
+**Question:** What is each recruiter's original database ID, and is it shared directly with the
+Recording Agent integration?
+**Known (Anton's Interviews DB):** Name (title), General Interview Date (date), General Interview
+recording (files), TBD (formula), Spots (relation).
+**Action:** Keep only the original database ID in configuration. With `Notion-Version: 2026-03-11`,
+call `GET /v1/databases/{database_id}`, then retrieve every advertised schema through
+`GET /v1/data_sources/{data_source_id}`. Property IDs and types come from data-source retrieval,
+not database retrieval. Enable the recruiter only when exactly one source has the configured
+name/date/recording properties with types `title`/`date`/`files`.
+**Status:** Open operational input — database IDs and direct sharing are required per recruiter;
+data-source IDs are discovered at runtime and are not configured.
 
 ## Q6: calink.ru calendar event markers ✅ CLOSED
 **Answer (from Yandex Calendar screenshot, 2026-07-14):**
@@ -58,7 +65,11 @@ calink.ru events in CalDAV have two **guaranteed** markers visible in the event 
 
 ## Q8: Lili's Notion database
 **Question:** What is Lili's Notion database structure? Same schema as Anton's or different fields?
-**Status:** Open — need Lili's database_id and field listing
+**Validation:** Run the read-only copied-database probe first: retrieve the copied database, retrieve
+all advertised data-source schemas, and require exactly one compatible schema. Do not query or
+update candidate pages during this probe.
+**Status:** Open — production enablement is blocked for Lili until direct sharing and unique schema
+compatibility are verified. Source order must not resolve ambiguity.
 
 ## Q10: OpenClaw tool registration method [BLOCKER for tool contract design]
 **Question:** How does OpenClaw register/discover tools from Backend?
