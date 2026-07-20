@@ -68,12 +68,24 @@ def recruiter() -> RecruiterConfig:
 
 
 def download_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, content=b"video", headers={"Content-Length": "5"}, request=request
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "download":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://storage/video"},
+                request=request,
             )
-        )
+        if request.url.host == "storage":
+            return httpx.Response(
+                200,
+                content=b"video",
+                headers={"Content-Length": "5"},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
     )
 
 

@@ -94,7 +94,7 @@ class TransferService:
             raise TransferError("share_link", error) from error
 
     async def _stream_upload(self, href: str, folder: str, filename: str) -> str:
-        async with self._client.stream("GET", href) as response:
+        async with self._client.stream("GET", href, follow_redirects=True) as response:
             response.raise_for_status()
             size_value = response.headers.get("Content-Length")
             size = int(size_value) if size_value and int(size_value) > 0 else None
@@ -107,7 +107,7 @@ class TransferService:
         temp_path = temp_dir / filename
         await anyio.to_thread.run_sync(temp_dir.mkdir, 0o700, True, True)
         try:
-            async with self._client.stream("GET", href) as response:
+            async with self._client.stream("GET", href, follow_redirects=True) as response:
                 response.raise_for_status()
                 async with await anyio.open_file(temp_path, "wb") as target:
                     async for chunk in response.aiter_bytes(1024 * 1024):

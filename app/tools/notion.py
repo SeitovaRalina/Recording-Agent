@@ -16,6 +16,7 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2026-03-11"
 DEFAULT_RECORDING_PROP = "General Interview recording"
 DEFAULT_CACHE_SIZE = 128
+_TRACE_BODY_LIMIT = 500
 
 
 class NotionAPIError(RuntimeError):
@@ -195,9 +196,22 @@ class NotionClient:
                 },
             )
         except httpx.RequestError:
+            self._trace(
+                "notion.page_update.failure",
+                page_id=page_id,
+                property=prop_name,
+                error_type="transport",
+            )
             raise NotionUpdateError("Notion page update transport failed") from None
         self._raise_common(response)
         if response.is_error:
+            self._trace(
+                "notion.page_update.failure",
+                page_id=page_id,
+                property=prop_name,
+                status_code=response.status_code,
+                response_body=_response_excerpt(response.text),
+            )
             raise NotionUpdateError(f"Notion page update failed with HTTP {response.status_code}")
         self._trace("notion.page_update.success", page_id=page_id, property=prop_name)
 
@@ -433,3 +447,10 @@ class NotionClient:
             return None
         start = value["date"].get("start")
         return str(start) if start is not None else None
+
+
+def _response_excerpt(value: str) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) > _TRACE_BODY_LIMIT:
+        return normalized[:_TRACE_BODY_LIMIT]
+    return normalized
