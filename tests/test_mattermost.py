@@ -37,3 +37,18 @@ async def test_mattermost_error_is_sanitized() -> None:
                 "recruiter", "message"
             )
     assert "raw secret" not in str(caught.value)
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_mattermost_preflight_validates_user_without_sending_message() -> None:
+    route = respx.get("https://mm.test/api/v4/users/recruiter").mock(
+        return_value=httpx.Response(200, json={"id": "recruiter"})
+    )
+
+    async with httpx.AsyncClient() as http:
+        await MattermostClient("https://mm.test", SecretStr("secret"), "bot", http).probe_user(
+            "recruiter"
+        )
+
+    assert route.call_count == 1

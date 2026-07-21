@@ -35,6 +35,14 @@ class MattermostClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token.get_secret_value()}"}
 
+    async def probe_user(self, recruiter_user_id: str) -> None:
+        """Validate the configured DM endpoints without creating a channel or post."""
+        if not self._base_url or not self._bot_user_id or not recruiter_user_id:
+            raise MattermostError("Mattermost DM configuration is incomplete")
+        payload = await self._json_request("GET", f"/api/v4/users/{recruiter_user_id}")
+        if payload.get("id") != recruiter_user_id:
+            raise MattermostError("Mattermost recruiter mapping response is malformed")
+
     async def send_dm(
         self, recruiter_user_id: str, message: str, root_id: str = ""
     ) -> MattermostPost:
@@ -59,11 +67,18 @@ class MattermostClient:
         thread_id = returned_root if isinstance(returned_root, str) and returned_root else post_id
         return MattermostPost(channel_id=channel_id, post_id=post_id, thread_id=thread_id)
 
-    async def _json_request(self, method: str, path: str, *, json: object) -> dict[str, Any]:
+    async def _json_request(
+        self, method: str, path: str, *, json: object | None = None
+    ) -> dict[str, Any]:
         try:
-            response = await self._client.request(
-                method, f"{self._base_url}{path}", headers=self._headers, json=json
-            )
+            if json is None:
+                response = await self._client.request(
+                    method, f"{self._base_url}{path}", headers=self._headers
+                )
+            else:
+                response = await self._client.request(
+                    method, f"{self._base_url}{path}", headers=self._headers, json=json
+                )
         except httpx.RequestError:
             raise MattermostError("Mattermost request transport failed") from None
         if response.is_error:
