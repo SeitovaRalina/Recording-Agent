@@ -16,6 +16,7 @@ class CandidateMatchResult:
     reason: str | None = None
     candidates: list[dict[str, object]] | None = None
     confidence: float = 0.0
+    choices: list[dict[str, object]] | None = None
 
 
 class CandidateService:
@@ -49,6 +50,8 @@ class CandidateService:
             event_date,
             self._settings.notion_name_prop,
             self._settings.notion_date_prop,
+            self._settings.notion_recording_prop,
+            self._settings.notion_project_prop,
         )
         if not pages:
             return CandidateMatchResult(reason="no_candidate_found", candidates=[])
@@ -57,4 +60,13 @@ class CandidateService:
         return CandidateMatchResult(
             reason="multiple_candidates",
             candidates=[{"name": page.title, "url": page.url} for page in pages[:10]],
+            choices=[
+                {
+                    "id": page.id,
+                    "name": page.title,
+                    "url": page.url,
+                    "project_or_spot": page.project_or_spot or "",
+                }
+                for page in pages[:10]
+            ],
         )

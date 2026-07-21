@@ -84,9 +84,7 @@ def download_client() -> httpx.AsyncClient:
             )
         return httpx.Response(404, request=request)
 
-    return httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 @pytest.mark.anyio

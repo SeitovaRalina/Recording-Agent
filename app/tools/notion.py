@@ -74,6 +74,7 @@ class NotionPage:
     title: str
     date_str: str | None
     email: str | None = None
+    project_or_spot: str | None = "unspecified"
 
 
 @dataclass(frozen=True)
@@ -86,15 +87,18 @@ class NotionDataSourceSchema:
     id: str
     property_types: dict[str, str]
 
-    def is_compatible(self, name_prop: str, date_prop: str, recording_prop: str) -> bool:
+    def is_compatible(
+        self, name_prop: str, date_prop: str, recording_prop: str, project_prop: str = ""
+    ) -> bool:
         return (
             self.property_types.get(name_prop) == "title"
             and self.property_types.get(date_prop) == "date"
             and self.property_types.get(recording_prop) == "files"
+            and (not project_prop or self.property_types.get(project_prop) == "rich_text")
         )
 
 
-SourceCacheKey = tuple[str, str, str, str]
+SourceCacheKey = tuple[str, str, str, str, str]
 
 
 class NotionClient:
@@ -132,8 +136,9 @@ class NotionClient:
         name_prop: str,
         date_prop: str,
         recording_prop: str = DEFAULT_RECORDING_PROP,
+        project_prop: str = "",
     ) -> list[NotionPage]:
-        key = (database_id, name_prop, date_prop, recording_prop)
+        key = (database_id, name_prop, date_prop, recording_prop, project_prop)
         source_id, was_cached = await self._resolve_source(key)
         self._trace(
             "notion.query.start",
@@ -160,7 +165,9 @@ class NotionClient:
         results = payload.get("results")
         if not isinstance(results, list):
             raise NotionMalformedResponseError("Notion query response has invalid results")
-        pages = [self._parse_page(item, name_prop, date_prop) for item in results[:10]]
+        pages = [
+            self._parse_page(item, name_prop, date_prop, project_prop) for item in results[:10]
+        ]
         self._trace(
             "notion.query.result",
             database_id=database_id,
@@ -248,7 +255,7 @@ class NotionClient:
                         del self._inflight[key]
 
     async def _discover_source(self, key: SourceCacheKey) -> str:
-        database_id, name_prop, date_prop, recording_prop = key
+        database_id, name_prop, date_prop, recording_prop, project_prop = key
         try:
             response = await self._client.get(
                 f"{NOTION_API_BASE}/databases/{database_id}", headers=self._headers
@@ -269,7 +276,7 @@ class NotionClient:
         compatible: list[str] = []
         for source in sources:
             schema = await self._retrieve_schema(source.id)
-            if schema.is_compatible(name_prop, date_prop, recording_prop):
+            if schema.is_compatible(name_prop, date_prop, recording_prop, project_prop):
                 compatible.append(schema.id)
         if not compatible:
             raise NotionSchemaError("No Notion data source has the required schema")
@@ -404,7 +411,9 @@ class NotionClient:
             trace(self._settings, event, **fields)
 
     @staticmethod
-    def _parse_page(item: Any, name_prop: str, date_prop: str) -> NotionPage:
+    def _parse_page(
+        item: Any, name_prop: str, date_prop: str, project_prop: str = ""
+    ) -> NotionPage:
         if not isinstance(item, dict):
             raise NotionMalformedResponseError("Notion page payload must be an object")
         page_id = item.get("id")
@@ -428,6 +437,9 @@ class NotionClient:
             title=NotionClient._plain_text(properties.get(name_prop)),
             date_str=NotionClient._date_value(properties.get(date_prop)),
             email=email,
+            project_or_spot=(
+                NotionClient._plain_text(properties.get(project_prop)) if project_prop else None
+            ),
         )
 
     @staticmethod

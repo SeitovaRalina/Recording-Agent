@@ -483,7 +483,7 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         "page",
         Settings().notion_recording_prop,
         "https://share/video",
-        item.disk_filename,
+        "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm",
     )
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
 

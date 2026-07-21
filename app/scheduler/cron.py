@@ -16,6 +16,7 @@ from app.config import Settings, get_settings
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.candidate import CandidateService
+from app.services.filename import FilenameError, build_storage_identity
 from app.services.matching import (
     InterviewMatcher,
     ManualReviewReason,
@@ -23,11 +24,12 @@ from app.services.matching import (
     normalize_title,
 )
 from app.services.pipeline_trace import safe_url, trace
+from app.services.reviews import ReviewService
 from app.services.status import StatusService
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
-from app.tools.notion import NotionClient
+from app.tools.notion import NotionClient, NotionPage
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +64,10 @@ async def scan_recruiter(
     transfer_service: TransferService | None = None,
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
+    review_service: ReviewService | None = None,
 ) -> ScanSummary:
     active_settings = settings or get_settings()
+    _enforce_recruiter_scope(active_settings, recruiter)
     active_status = status_service or StatusService()
     summary = ScanSummary()
     try:
@@ -136,7 +140,12 @@ async def scan_recruiter(
                     await session.scalars(
                         select(Recording.id).where(
                             Recording.disk_owner_email == recruiter.email,
-                            Recording.status == RecordingStatus.CALENDAR_EVENT_FOUND,
+                            Recording.status.in_(
+                                [
+                                    RecordingStatus.CALENDAR_EVENT_FOUND,
+                                    RecordingStatus.CANDIDATE_MATCHED,
+                                ]
+                            ),
                         )
                     )
                 ).all()
@@ -168,6 +177,8 @@ async def scan_recruiter(
         summary.manual_review,
         summary.failed,
     )
+    if review_service is not None:
+        await _send_recruiter_notifications(recruiter, session_factory, review_service)
     return summary
 
 
@@ -184,68 +195,162 @@ async def _resume_transfer_recording(
 ) -> None:
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
-        if recording is None or recording.status != RecordingStatus.CALENDAR_EVENT_FOUND:
+        if recording is None or recording.status not in {
+            RecordingStatus.CALENDAR_EVENT_FOUND,
+            RecordingStatus.CANDIDATE_MATCHED,
+        }:
             return
-        trace(
-            settings,
-            "pipeline.candidate_match.start",
-            recording_id=recording.id,
-            calendar_summary=recording.calendar_event_summary,
-            calendar_start=recording.calendar_dtstart,
-            recruiter_database_id=recruiter.notion_database_id,
-        )
-        try:
-            match = await candidate_service.find_and_match(recording, recruiter, session)
-        except Exception as error:
+        already_matched = recording.status == RecordingStatus.CANDIDATE_MATCHED
+        match_confidence = 1.0
+        if already_matched:
+            if not recording.notion_page_id or not recording.candidate_name:
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.FAILED,
+                    error_step="review_resolution",
+                    error_message="Resolved candidate state is incomplete",
+                )
+                await session.commit()
+                return
+            page = NotionPage(
+                id=recording.notion_page_id,
+                url=recording.notion_page_url or "",
+                title=recording.candidate_name,
+                date_str=None,
+                email=recording.candidate_email,
+                project_or_spot=recording.project_or_spot,
+            )
+            candidate_name = recording.candidate_name
+        else:
+            trace(
+                settings,
+                "pipeline.candidate_match.start",
+                recording_id=recording.id,
+                calendar_summary=recording.calendar_event_summary,
+                calendar_start=recording.calendar_dtstart,
+                recruiter_database_id=recruiter.notion_database_id,
+            )
+            try:
+                match = await candidate_service.find_and_match(recording, recruiter, session)
+            except Exception as error:
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.FAILED,
+                    error_step="candidate_matching",
+                    error_message=str(error),
+                )
+                await session.commit()
+                return
+            if match.page is None:
+                trace(
+                    settings,
+                    "pipeline.candidate_match.manual_review",
+                    recording_id=recording.id,
+                    reason=match.reason,
+                    confidence=match.confidence,
+                    candidates=match.choices or match.candidates or [],
+                )
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason=match.reason,
+                    manual_review_candidates=match.choices or match.candidates or [],
+                )
+                await session.commit()
+                return
+            page = match.page
+            match_confidence = match.confidence
+            candidate_name = _candidate_name(recording.calendar_event_summary)
+        if not settings.notion_writes_enabled:
             await status.advance(
                 session,
                 recording,
                 RecordingStatus.FAILED,
-                error_step="candidate_matching",
-                error_message=str(error),
+                error_step="notion_preflight",
+                error_message="Notion writes are disabled until the runtime schema probe passes",
             )
             await session.commit()
             return
-        if match.page is None:
-            trace(
-                settings,
-                "pipeline.candidate_match.manual_review",
-                recording_id=recording.id,
-                reason=match.reason,
-                confidence=match.confidence,
-                candidates=match.candidates or [],
+        try:
+            identity = build_storage_identity(
+                event_date=recording.calendar_dtstart.astimezone(
+                    ZoneInfo(settings.scan_local_timezone)
+                ).date()
+                if recording.calendar_dtstart
+                else datetime.now(UTC).date(),
+                candidate_name=candidate_name,
+                project_or_spot=page.project_or_spot or "",
+                interview_type=settings.notion_interview_type,
+                original_filename=recording.disk_filename,
+                recruiter_prefix=recruiter.email,
             )
+        except FilenameError as error:
             await status.advance(
                 session,
                 recording,
                 RecordingStatus.MANUAL_REVIEW_REQUIRED,
-                manual_review_reason=match.reason,
-                manual_review_candidates=match.candidates or [],
+                manual_review_reason="invalid_storage_identity",
+                manual_review_candidates=[],
+                error_message=str(error),
             )
             await session.commit()
             return
-        page = match.page
-        candidate_name = _candidate_name(recording.calendar_event_summary)
+        collision = await session.scalar(
+            select(Recording.id).where(
+                Recording.storage_key == identity.key,
+                Recording.id != recording.id,
+            )
+        )
+        if collision is not None:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                manual_review_reason="storage_key_collision",
+                manual_review_candidates=[{"conflicting_recording_id": str(collision)}],
+            )
+            await session.commit()
+            return
         trace(
             settings,
             "pipeline.candidate_match.success",
             recording_id=recording.id,
-            confidence=match.confidence,
+            confidence=match_confidence,
             candidate_name=candidate_name,
             notion_page_id=page.id,
             notion_page_title=page.title,
             notion_page_url=page.url,
+            project_or_spot=page.project_or_spot,
+            generated_filename=identity.filename,
+            storage_key=identity.key,
+            content_identity=recording.disk_md5 or recording.disk_file_id,
+            version=recording.version + 1,
         )
-        await status.advance(
-            session,
-            recording,
-            RecordingStatus.CANDIDATE_MATCHED,
-            candidate_name=candidate_name,
-            candidate_email=page.email,
-            notion_database_id=recruiter.notion_database_id,
-            notion_page_id=page.id,
-            notion_page_url=page.url,
-        )
+        candidate_updates: dict[str, Any] = {
+            "candidate_name": candidate_name,
+            "candidate_email": page.email,
+            "notion_database_id": recruiter.notion_database_id,
+            "notion_page_id": page.id,
+            "notion_page_url": page.url,
+            "project_or_spot": page.project_or_spot,
+            "generated_filename": identity.filename,
+            "storage_key": identity.key,
+            "content_identity": recording.disk_md5 or recording.disk_file_id,
+        }
+        if already_matched:
+            for field, value in candidate_updates.items():
+                setattr(recording, field, value)
+        else:
+            candidate_updates["version"] = recording.version + 1
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.CANDIDATE_MATCHED,
+                **candidate_updates,
+            )
         await session.commit()
         await status.advance(session, recording, RecordingStatus.TRANSFER_STARTED)
         await session.commit()
@@ -314,7 +419,7 @@ async def _resume_transfer_recording(
                 page.id,
                 settings.notion_recording_prop,
                 share_url,
-                recording.disk_filename,
+                recording.generated_filename or recording.disk_filename,
             )
         except Exception as error:
             await status.advance(
@@ -337,6 +442,15 @@ async def _resume_transfer_recording(
             notion_page_id=page.id,
             notion_page_url=page.url,
         )
+        if not settings.yandex_source_mutation_enabled:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.COMPLETED,
+                completed_at=datetime.now(UTC),
+            )
+            await session.commit()
+            return
         try:
             await disk.mark_processed(recording.disk_path, recruiter.email)
         except Exception as error:
@@ -577,6 +691,7 @@ async def scan_all_recruiters(
     transfer_service: TransferService | None = None,
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
+    review_service: ReviewService | None = None,
 ) -> None:
     started_at = datetime.now(UTC)
     recruiters = await _active_recruiters(session_factory)
@@ -596,6 +711,7 @@ async def scan_all_recruiters(
                 transfer_service=transfer_service,
                 status_service=status_service,
                 notion=notion,
+                review_service=review_service,
             )
             for item in recruiters
         ),
@@ -684,8 +800,12 @@ def register_jobs(
     transfer_service: TransferService | None = None,
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
+    review_service: ReviewService | None = None,
 ) -> None:
     settings = get_settings()
+    if not settings.scheduler_enabled:
+        logger.info("Scheduled recording scan is disabled")
+        return
     scan_trigger = CronTrigger(
         hour=settings.scan_hour,
         minute=settings.scan_minute,
@@ -704,6 +824,7 @@ def register_jobs(
             transfer_service,
             status_service,
             notion,
+            review_service,
         ],
         max_instances=1,
         misfire_grace_time=3600,
@@ -716,6 +837,8 @@ def register_jobs(
         settings.scan_minute,
         _next_run_time(scan_trigger).isoformat(),
     )
+    if not settings.yandex_source_mutation_enabled:
+        return
     cleanup_trigger = CronTrigger(
         hour=settings.disk_cleanup_hour,
         minute=settings.disk_cleanup_minute,
@@ -773,3 +896,60 @@ def _integer(value: Any) -> int | None:
 
 def _optional_string(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+async def _send_recruiter_notifications(
+    recruiter: RecruiterConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    service: ReviewService,
+) -> None:
+    async with session_factory() as session:
+        pending = list(
+            (
+                await session.scalars(
+                    select(Recording).where(
+                        Recording.disk_owner_email == recruiter.email,
+                        Recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    )
+                )
+            ).all()
+        )
+        for recording in pending:
+            try:
+                await service.issue_review(session, recording, recruiter)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception("Failed to send review DM for recording %s", recording.id)
+        terminal = list(
+            (
+                await session.scalars(
+                    select(Recording).where(
+                        Recording.disk_owner_email == recruiter.email,
+                        Recording.status.in_([RecordingStatus.COMPLETED, RecordingStatus.FAILED]),
+                        Recording.terminal_notified_at.is_(None),
+                    )
+                )
+            ).all()
+        )
+        for recording in terminal:
+            try:
+                await service.notify_terminal(recording, recruiter)
+                recording.terminal_notified_at = datetime.now(UTC)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception("Failed to send terminal DM for recording %s", recording.id)
+
+
+def _enforce_recruiter_scope(settings: Settings, recruiter: RecruiterConfig) -> None:
+    if not settings.test_mode_enabled:
+        return
+    if recruiter.email not in settings.test_recruiter_allowlist:
+        raise PermissionError("Recruiter is outside the test-mode allowlist")
+    if recruiter.notion_database_id not in settings.test_notion_database_allowlist:
+        raise PermissionError("Notion database is outside the test-mode allowlist")
+    if not recruiter.mattermost_user_id or (
+        recruiter.mattermost_user_id not in settings.test_mattermost_user_allowlist
+    ):
+        raise PermissionError("Mattermost user is outside the test-mode allowlist")

@@ -1,3 +1,4 @@
+from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.processing_attempt import ProcessingAttempt
 from app.db.models.recording import Recording, RecordingStatus
@@ -8,6 +9,7 @@ from app.db.models.yandex_token import YandexToken
 __all__ = [
     "ManualReview",
     "ManualReviewStatus",
+    "IntentReplay",
     "ProcessingAttempt",
     "Recording",
     "RecordingStatus",

@@ -55,11 +55,17 @@ class TransferService:
         del session
         if recording.calendar_dtstart is None:
             raise TransferError("destination", ValueError("calendar start is missing"))
-        safe_name = re.sub(r'[/\\:*?"<>|]', "_", candidate_name)
-        folder = (
-            f"{recruiter.synology_base_folder.rstrip('/')}/"
-            f"{recording.calendar_dtstart:%Y-%m-%d}/{safe_name}"
-        )
+        if recording.storage_key and recording.generated_filename:
+            folder, _, filename = recording.storage_key.rpartition("/")
+            if not folder or filename != recording.generated_filename:
+                raise TransferError("destination", ValueError("persisted storage key is invalid"))
+        else:
+            safe_name = re.sub(r'[/\\:*?"<>|]', "_", candidate_name)
+            folder = (
+                f"{recruiter.synology_base_folder.rstrip('/')}/"
+                f"{recording.calendar_dtstart:%Y-%m-%d}/{safe_name}"
+            )
+            filename = recording.disk_filename
         try:
             await self._storage.ensure_folder(folder)
         except Exception as error:
@@ -77,10 +83,10 @@ class TransferService:
         except Exception as error:
             raise TransferError("download", error) from error
         try:
-            path = await self._stream_upload(href, folder, recording.disk_filename)
+            path = await self._stream_upload(href, folder, filename)
         except StreamingUnsupportedError:
             try:
-                path = await self._temp_upload(href, folder, recording.disk_filename)
+                path = await self._temp_upload(href, folder, filename)
             except Exception as error:
                 raise TransferError("upload", error) from error
         except Exception as error:

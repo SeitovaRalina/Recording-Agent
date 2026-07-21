@@ -73,6 +73,7 @@ class Recording(Base):
             RecordingStatus.FAILED,
         },
         RecordingStatus.MANUAL_REVIEW_REQUIRED: {
+            RecordingStatus.CALENDAR_EVENT_FOUND,
             RecordingStatus.CANDIDATE_MATCHED,
             RecordingStatus.IGNORED,
             RecordingStatus.FAILED,
@@ -91,6 +92,7 @@ class Recording(Base):
         },
         RecordingStatus.NOTION_UPDATED: {
             RecordingStatus.SOURCE_MARKED_PROCESSED,
+            RecordingStatus.COMPLETED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.SOURCE_MARKED_PROCESSED: {
@@ -130,12 +132,18 @@ class Recording(Base):
     manual_review_candidates: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
     candidate_name: Mapped[str | None] = mapped_column(Text)
     candidate_email: Mapped[str | None] = mapped_column(Text)
+    project_or_spot: Mapped[str | None] = mapped_column(Text)
     notion_database_id: Mapped[str | None] = mapped_column(Text)
     notion_page_id: Mapped[str | None] = mapped_column(Text)
     notion_page_url: Mapped[str | None] = mapped_column(Text)
     synology_folder_path: Mapped[str | None] = mapped_column(Text)
     synology_file_path: Mapped[str | None] = mapped_column(Text)
     synology_share_url: Mapped[str | None] = mapped_column(Text)
+    generated_filename: Mapped[str | None] = mapped_column(Text)
+    storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    content_identity: Mapped[str | None] = mapped_column(Text)
+    terminal_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(nullable=False, default=0, server_default=text("0"))
     status: Mapped[RecordingStatus] = mapped_column(
         Text,
         nullable=False,
