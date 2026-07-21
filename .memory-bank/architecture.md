@@ -23,7 +23,7 @@
 │    candidate.py    Notion card search + disambiguation   │
 │    transfer.py     streaming Disk → Synology             │
 │    status.py       PostgreSQL state machine ops          │
-│    openclaw.py     push events → OpenClaw Agent          │
+│    pipeline.py     deterministic scan/review execution   │
 └───┬────────┬────────┬────────┬────────┬──────────────────┘
     │        │        │        │        │
   Яндекс  Яндекс  Notion  Synology  Mattermost
@@ -32,7 +32,7 @@
   PostgreSQL                         OpenClaw
   (recording states + metadata)   Recording Agent
          ↑                              │
-         └──── event push (Backend) ────┘
+         └──── narrow loopback intents ─┘
                                         │
                                    tool calls
                                    back to Backend
@@ -40,8 +40,24 @@
 
 **Key principle:**
 - Backend = scheduler + executor. Scans Disk, owns PostgreSQL, runs all integrations.
-- OpenClaw = reasoning agent. Wakes only when Backend pushes an event (new recording / manual review). Forms decision or recruiter message. Calls Backend tools as needed.
-- OpenClaw is always running. Backend does NOT start OpenClaw — it sends events to the already-running process.
+- OpenClaw = recruiter interaction layer. Mila maps free-form Mattermost requests to narrow
+  Backend intents and presents manual-review choices; it never owns scheduling or integration
+  side effects.
+- Deterministic matches complete entirely in Backend without an LLM call. Mila is invoked only
+  for explicit recruiter interaction, bounded status reporting, or ambiguous review dialogue.
+
+## Phase 4 Mila canary boundary
+
+- Mila is the first OpenClaw canary; Sylvanas remains unchanged.
+- The version-controlled workspace skill calls authenticated FastAPI intents over loopback. It
+  contains no integration credentials and exposes no raw transfer, Notion, mark-processed, delete,
+  or purge primitive.
+- PostgreSQL is the durable source of truth for review correlation, expected versions, one-time
+  token consumption, idempotency replay, scheduler ownership, and notification state.
+- Canary storage is isolated MinIO and the selected Notion database is `Test Interviews`.
+  Production Notion databases, Synology, Yandex source mutation, cleanup, and purge are disabled.
+- Mattermost interaction is DM-only to the configured recruiter; no shared-channel fallback is
+  allowed.
 
 ## Data flow — happy path
 
@@ -63,22 +79,16 @@ TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │
 ├─ Case A: unique eligible compatible event, no outside collision,
 │  confidence >= threshold, AND len(cards) == 1
-│   └─ Backend pushes event to OpenClaw:
-│       {"type": "recording_ready", "recording": ..., "event": ..., "card": ...}
-│       → OpenClaw verifies, calls Backend tool: confirm_and_transfer()
-│       → HAPPY PATH below
+│   └─ Backend executes HAPPY PATH directly; no LLM call
 │
 └─ Case B: ambiguous (low confidence OR multiple cards OR no calendar event)
-    └─ Backend pushes event to OpenClaw:
-        {"type": "manual_review_required", "recording": ..., "candidates": [...]}
-        → OpenClaw composes recruiter message in Mattermost
-        → db.set_status("manual_review_required")
-        → awaits recruiter reply
-        → recruiter replies → Mattermost webhook → Backend → push event to OpenClaw
-        → OpenClaw parses reply (NLU) → calls confirm_and_transfer()
-        → HAPPY PATH below
+    └─ Backend persists a versioned manual review and sends a recruiter-only DM
+        → Mila presents bounded choices and accepts free-form recruiter language
+        → skill CLI submits one narrow resolve/ignore intent with review token,
+          expected version, thread binding, and idempotency key
+        → Backend consumes the token once and executes HAPPY PATH or marks ignored
 
-HAPPY PATH (Backend executes on OpenClaw tool call):
+HAPPY PATH (Backend executes from scheduler or a validated review resolution):
     db.set_status("transfer_started")
     transfer.stream(disk_download_url → synology_path)   # chunk-by-chunk
     db.set_status("uploaded_to_synology")
@@ -88,7 +98,7 @@ HAPPY PATH (Backend executes on OpenClaw tool call):
     db.set_status("notion_updated")
     disk.mark_processed(file_id)  # PATCH processed=true + processed_at=<UTC ISO 8601>
     db.set_status("source_marked_processed")
-    → Backend notifies OpenClaw → OpenClaw sends recruiter confirmation
+    → Backend persists notification state and sends a completion/error recruiter DM
 
 DAILY RETENTION CRON (soft delete only; separate from the happy path):
     disk.delete_expired() selects files with processed=true and processed_at >= 7 days old
@@ -211,4 +221,4 @@ Separate credentials + isolated data for every integration:
 - Яндекс.Календарь: test calendar
 - Notion: copied test database (same schema, dummy data)
 - Synology: `/test-recordings/` folder
-- Mattermost: `#recordings-test` channel or separate bot
+- Mattermost: allowlisted test recruiter DM only; no shared-channel fallback

@@ -41,8 +41,10 @@
 **Decision:** Backend runs full deterministic pipeline autonomously. OpenClaw invoked only when confidence low, multiple Notion cards match, or recruiter input needed.
 **Date:** 2026-07-13
 
-## ADR-010: OpenClaw is a running service — Backend sends events
-**Decision:** OpenClaw runs continuously. Backend emits events to the already-running process, does NOT launch it per cron tick.
+## ADR-010: OpenClaw is a running service — Backend exposes narrow intents
+**Decision:** OpenClaw runs continuously. Backend does not launch it per cron tick. Phase 4 uses a
+workspace-skill CLI to call authenticated loopback Backend intents; speculative generic event-push
+and tool-registration endpoints are not part of the Mila MVP.
 **Date:** 2026-07-13
 
 ## ADR-011: MVP tool list (10 tools)
@@ -74,9 +76,27 @@
 **Safety:** Discovery accepts only same-origin canonical HTTPS collections returned by CalDAV. Missing defaults, stale discovery, incomplete collection queries, malformed filenames, ambiguity, and collisions fail closed to a resumable or structured manual-review path. Only a recruiter can choose `ignored`.
 **Date:** 2026-07-15
 
-## ADR-009: Backend is the scheduler, OpenClaw is the reasoner
-**Decision:** APScheduler lives in Backend Tools Service, not in OpenClaw. Backend scans Yandex Disk on schedule, does all integrations, manages PostgreSQL state. When a decision point is reached (new recording found, ambiguity detected, manual review reply received), Backend pushes an event to OpenClaw. OpenClaw wakes up, reasons about the event, sends messages to recruiter, and calls Backend tools back as needed.
-**Why:** OpenClaw has no guaranteed cron capability. Backend already owns integrations and state. LLM reasoning (matching confidence, NLU, recruiter dialog) is the only part that belongs in OpenClaw. Clean separation: Backend = reliable executor, OpenClaw = intelligent reasoner.
-**Consequence:** Backend exposes two surfaces: (a) tool endpoints that OpenClaw calls, (b) event push endpoint that Backend uses to wake OpenClaw (`POST /openclaw/agents/recording/invoke` or equivalent).
-**Open question:** Exact OpenClaw event push API — confirm with developer (see Q10 in open-questions.md).
+## ADR-009B: Backend is the scheduler, OpenClaw is the interaction layer
+**Decision:** APScheduler lives in Backend Tools Service, not in OpenClaw. Backend scans Yandex
+Disk on schedule, performs deterministic matching, owns integrations, and manages PostgreSQL
+state. Mila provides natural-language entry and manual-review presentation through narrow Backend
+intents. Deterministic matches do not require an LLM call.
+**Why:** Backend already provides reliable state and side-effect ordering. OpenClaw is useful for
+free-form recruiter interaction, not as another scheduler or state owner.
+**Consequence:** Backend exposes only bounded scan, status, review-context, resolve, and ignore
+intents. Raw transfer, Notion update, source mutation, delete, and purge operations remain private.
 **Date:** 2026-07-13
+
+## ADR-015: Mila-first script-backed OpenClaw integration
+**Decision:** Phase 4 integrates the existing Mila `main` agent through a repository-owned
+workspace skill whose deterministic CLI calls narrow authenticated Backend intents over loopback.
+Backend remains the sole scheduler, PostgreSQL state owner, matcher, transfer executor, Notion
+client, storage client, and notification state owner. Normal deterministic processing does not
+invoke an LLM. Mila handles free-form request routing and manual-review presentation only.
+**Canary:** Use isolated PostgreSQL, MinIO, `Test Interviews`, and one allowlisted Mattermost DM
+identity. Keep scheduler disabled until the manual canary passes. Hard-disable Yandex source
+mutation, cleanup, purge, Synology, and production resources.
+**Compatibility:** Use OpenClaw `2026.4.22` workspace-skill conventions. Do not upgrade OpenClaw,
+change Gateway bind, or add a native plugin/MCP server without evidence that the script-backed
+contract is insufficient. Sylvanas is unchanged and can reuse the same skill later.
+**Date:** 2026-07-21
