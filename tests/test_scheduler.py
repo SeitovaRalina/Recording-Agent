@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,7 @@ from app.scheduler.cron import (
     _persist_found_recording,
     _resume_found_recording,
     _resume_transfer_recording,
+    _send_recruiter_notifications,
     local_today_start_utc,
     register_jobs,
     scan_all_recruiters,
@@ -25,6 +27,7 @@ from app.scheduler.cron import (
 from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
+from app.services.reviews import ReviewService
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
@@ -573,6 +576,152 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     assert transfer.create_share_link.await_count == share_calls
     assert notion.update_page_file.await_count == notion_calls
     candidate.find_and_match.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_concurrent_transfer_resume_has_single_side_effect_owner() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
+    item = found("concurrent-resume")
+    item.status = RecordingStatus.UPLOADED_TO_SYNOLOGY
+    item.candidate_name = "Candidate"
+    item.notion_page_id = "page"
+    item.generated_filename = "recording.webm"
+    item.storage_key = "recruiter/date/candidate/recording.webm"
+    item.content_identity = item.disk_file_id
+    item.synology_file_path = "/recording.webm"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    transfer = AsyncMock()
+
+    async def create_share_link(_path: str) -> str:
+        entered.set()
+        await release.wait()
+        return "https://share/video"
+
+    transfer.create_share_link.side_effect = create_share_link
+    args = (
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    first = asyncio.create_task(_resume_transfer_recording(*args))
+    await entered.wait()
+    second = asyncio.create_task(_resume_transfer_recording(*args))
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(first, second)
+    await engine.dispose()
+
+    assert transfer.create_share_link.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_terminal_notification_has_single_claim() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "mm-user"
+    item = found("concurrent-terminal")
+    item.status = RecordingStatus.COMPLETED
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    mattermost = AsyncMock()
+    durable_claim_seen = False
+
+    async def send_dm(_user_id: str, _message: str) -> object:
+        nonlocal durable_claim_seen
+        async with factory() as check_session:
+            claimed = await check_session.get(Recording, item.id)
+            durable_claim_seen = (
+                claimed is not None and claimed.terminal_notification_claim is not None
+            )
+        entered.set()
+        await release.wait()
+        return object()
+
+    mattermost.send_dm.side_effect = send_dm
+    service = ReviewService(mattermost, Settings())
+    first = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
+    await entered.wait()
+    second = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(first, second)
+    await engine.dispose()
+
+    assert mattermost.send_dm.await_count == 1
+    assert durable_claim_seen is True
+
+
+@pytest.mark.anyio
+async def test_concurrent_review_notification_has_single_claim() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "mm-user"
+    item = found("concurrent-review")
+    item.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    item.manual_review_reason = "multiple_candidates"
+    item.manual_review_candidates = [{"name": "Candidate"}]
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    mattermost = AsyncMock()
+    post = MagicMock(post_id="post", channel_id="channel", thread_id="thread")
+    durable_claim_seen = False
+
+    async def send_dm(_user_id: str, _message: str) -> object:
+        nonlocal durable_claim_seen
+        async with factory() as check_session:
+            claimed = await check_session.get(Recording, item.id)
+            durable_claim_seen = (
+                claimed is not None and claimed.review_notification_claim is not None
+            )
+        entered.set()
+        await release.wait()
+        return post
+
+    mattermost.send_dm.side_effect = send_dm
+    service = ReviewService(mattermost, Settings())
+    first = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
+    await entered.wait()
+    second = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(first, second)
+    await engine.dispose()
+
+    assert mattermost.send_dm.await_count == 1
+    assert durable_claim_seen is True
 
 
 @pytest.mark.anyio

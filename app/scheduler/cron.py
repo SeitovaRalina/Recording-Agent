@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
@@ -193,6 +193,63 @@ async def scan_recruiter(
 
 
 async def _resume_transfer_recording(
+    recording_id: uuid.UUID,
+    recruiter: RecruiterConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    disk: DiskScanner,
+    candidate_service: CandidateService,
+    transfer_service: TransferService,
+    status: StatusService,
+    notion: NotionClient,
+    settings: Settings,
+) -> None:
+    lease_token = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        claimed = await session.scalar(
+            update(Recording)
+            .where(
+                Recording.id == recording_id,
+                or_(
+                    Recording.processing_lease_token.is_(None),
+                    Recording.processing_lease_expires_at <= now,
+                ),
+            )
+            .values(
+                processing_lease_token=lease_token,
+                processing_lease_expires_at=now + timedelta(hours=6),
+            )
+            .returning(Recording.id)
+        )
+        await session.commit()
+    if claimed is None:
+        return
+    try:
+        await _run_transfer_recording(
+            recording_id,
+            recruiter,
+            session_factory,
+            disk,
+            candidate_service,
+            transfer_service,
+            status,
+            notion,
+            settings,
+        )
+    finally:
+        async with session_factory() as session:
+            await session.execute(
+                update(Recording)
+                .where(
+                    Recording.id == recording_id,
+                    Recording.processing_lease_token == lease_token,
+                )
+                .values(processing_lease_token=None, processing_lease_expires_at=None)
+            )
+            await session.commit()
+
+
+async def _run_transfer_recording(
     recording_id: uuid.UUID,
     recruiter: RecruiterConfig,
     session_factory: async_sessionmaker[AsyncSession],
@@ -1135,15 +1192,14 @@ async def _send_recruiter_notifications(
                         Recording.disk_owner_email == recruiter.email,
                         Recording.status.in_([RecordingStatus.COMPLETED, RecordingStatus.FAILED]),
                         Recording.terminal_notified_at.is_(None),
+                        Recording.terminal_notification_claim.is_(None),
                     )
                 )
             ).all()
         )
         for recording in terminal:
             try:
-                await service.notify_terminal(recording, recruiter)
-                recording.terminal_notified_at = datetime.now(UTC)
-                await session.commit()
+                await service.deliver_terminal(session, recording, recruiter)
             except Exception:
                 await session.rollback()
                 logger.exception("Failed to send terminal DM for recording %s", recording.id)

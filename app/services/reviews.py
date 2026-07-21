@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -61,11 +61,29 @@ class ReviewService:
                 ManualReview.status == ManualReviewStatus.PENDING,
             )
         )
-        if existing is not None:
+        if existing is not None and existing.delivery_sent_at is not None:
             return existing
         if not recruiter.mattermost_user_id:
             raise ReviewRejectedError("Recruiter has no Mattermost DM mapping")
         self._enforce_user(recruiter.mattermost_user_id)
+        claim = str(uuid.uuid4())
+        claimed = await session.scalar(
+            update(Recording)
+            .where(
+                Recording.id == recording.id,
+                Recording.review_notification_claim.is_(None),
+            )
+            .values(
+                review_notification_claim=claim,
+                review_notification_claimed_at=datetime.now(UTC),
+            )
+            .returning(Recording.id)
+        )
+        await session.commit()
+        if claimed is None:
+            if existing is not None:
+                return existing
+            raise ReviewRejectedError("Review notification is already claimed")
         token = secrets.token_urlsafe(32)
         choices = (recording.manual_review_candidates or [])[:10]
         rendered = "\n".join(
@@ -76,22 +94,36 @@ class ReviewService:
             f"Recording {recording.disk_filename} needs review.\n{rendered}\n"
             f"Reply with a choice or skip. Token: {token}"
         )
-        post = await self._mattermost.send_dm(recruiter.mattermost_user_id, message)
-        review = ManualReview(
+        review = existing or ManualReview(
             recording_id=recording.id,
             question_type=recording.manual_review_reason or "manual_review",
             question_context={"choices": choices},
-            mattermost_post_id=post.post_id,
-            mattermost_channel_id=post.channel_id,
-            mattermost_thread_id=post.thread_id,
             recruiter_user_id=recruiter.mattermost_user_id,
-            token_hash=self._hash_token(token),
-            token_expires_at=datetime.now(UTC)
-            + timedelta(seconds=self._settings.review_token_ttl_seconds),
             recording_version=recording.version,
         )
-        session.add(review)
-        await session.flush()
+        review.token_hash = self._hash_token(token)
+        review.token_expires_at = datetime.now(UTC) + timedelta(
+            seconds=self._settings.review_token_ttl_seconds
+        )
+        review.delivery_claim = claim
+        review.delivery_claimed_at = datetime.now(UTC)
+        if existing is None:
+            session.add(review)
+        await session.commit()
+        post = await self._mattermost.send_dm(recruiter.mattermost_user_id, message)
+        review.mattermost_post_id = post.post_id
+        review.mattermost_channel_id = post.channel_id
+        review.mattermost_thread_id = post.thread_id
+        review.delivery_sent_at = datetime.now(UTC)
+        await session.execute(
+            update(Recording)
+            .where(
+                Recording.id == recording.id,
+                Recording.review_notification_claim == claim,
+            )
+            .values(review_notification_claim=None, review_notification_claimed_at=None)
+        )
+        await session.commit()
         return review
 
     async def get_bound_review(
@@ -142,6 +174,46 @@ class ReviewService:
                 f"error={(recording.error_message or 'unknown')[:300]}"
             )
         await self._mattermost.send_dm(recruiter.mattermost_user_id, message)
+
+    async def deliver_terminal(
+        self,
+        session: AsyncSession,
+        recording: Recording,
+        recruiter: RecruiterConfig,
+    ) -> bool:
+        claim = str(uuid.uuid4())
+        claimed = await session.scalar(
+            update(Recording)
+            .where(
+                Recording.id == recording.id,
+                Recording.terminal_notified_at.is_(None),
+                Recording.terminal_notification_claim.is_(None),
+            )
+            .values(
+                terminal_notification_claim=claim,
+                terminal_notification_claimed_at=datetime.now(UTC),
+            )
+            .returning(Recording.id)
+        )
+        await session.commit()
+        if claimed is None:
+            return False
+        await self.notify_terminal(recording, recruiter)
+        completed = await session.scalar(
+            update(Recording)
+            .where(
+                Recording.id == recording.id,
+                Recording.terminal_notification_claim == claim,
+            )
+            .values(
+                terminal_notified_at=datetime.now(UTC),
+                terminal_notification_claim=None,
+                terminal_notification_claimed_at=None,
+            )
+            .returning(Recording.id)
+        )
+        await session.commit()
+        return completed is not None
 
     async def mutate(
         self,

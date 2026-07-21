@@ -300,10 +300,7 @@ async def _mutate_review(
                 )
                 await session.refresh(recording)
                 if recording.status in {RecordingStatus.COMPLETED, RecordingStatus.FAILED}:
-                    if recording.terminal_notified_at is None:
-                        await _review_service(request).notify_terminal(recording, recruiter)
-                        recording.terminal_notified_at = datetime.now(UTC)
-                    await session.commit()
+                    await _review_service(request).deliver_terminal(session, recording, recruiter)
                 mutation = type(mutation)(
                     review_id=mutation.review_id,
                     recording_id=mutation.recording_id,

@@ -144,6 +144,14 @@ class Recording(Base):
     storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
     content_identity: Mapped[str | None] = mapped_column(Text)
     terminal_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_notification_claim: Mapped[str | None] = mapped_column(Text)
+    terminal_notification_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    review_notification_claim: Mapped[str | None] = mapped_column(Text)
+    review_notification_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_lease_token: Mapped[str | None] = mapped_column(Text)
+    processing_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(nullable=False, default=0, server_default=text("0"))
     status: Mapped[RecordingStatus] = mapped_column(
         Text,

@@ -55,6 +55,9 @@ class ManualReview(Base):
     token_hash: Mapped[str | None] = mapped_column(Text)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     token_consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_claim: Mapped[str | None] = mapped_column(Text)
+    delivery_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recording_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
