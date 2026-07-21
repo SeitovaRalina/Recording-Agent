@@ -34,20 +34,17 @@ class NotionInspector:
         self._settings = settings
 
     async def inspect(self, database_id: str) -> DatabaseInspection:
-        source_id, _ = await self._notion._resolve_source(  # noqa: SLF001
-            (
-                database_id,
-                self._settings.notion_name_prop,
-                self._settings.notion_date_prop,
-                self._settings.notion_recording_prop,
-                self._settings.notion_project_prop,
-            )
+        inspection = await self._notion.inspect_database(
+            database_id,
+            self._settings.notion_name_prop,
+            self._settings.notion_date_prop,
+            self._settings.notion_recording_prop,
+            self._settings.notion_project_prop,
         )
-        schema = await self._notion._retrieve_schema(source_id)  # noqa: SLF001
         return DatabaseInspection(
             database_id=database_id,
-            title="explicit Notion database",
-            property_types=schema.property_types,
+            title=inspection.title,
+            property_types=inspection.schema.property_types,
         )
 
 
@@ -73,6 +70,7 @@ async def configure_recruiter(
     mattermost_user_id: str,
     storage_prefix: str,
     confirmed: bool,
+    inspection: DatabaseInspection | None = None,
 ) -> RecruiterConfig:
     normalized_email = email.strip().casefold()
     if normalized_email not in settings.yandex_refresh_tokens:
@@ -84,11 +82,11 @@ async def configure_recruiter(
     ):
         raise ValueError("Recruiter already exists")
     database_id = parse_notion_database_id(notion_target)
-    inspection = await inspector.inspect(database_id)
-    print(f"Database: {inspection.title} ({inspection.database_id})")
-    print(
-        "Schema: " + ", ".join(f"{name}:{kind}" for name, kind in inspection.property_types.items())
-    )
+    if inspection is None:
+        inspection = await inspector.inspect(database_id)
+        _display_inspection(inspection)
+    elif inspection.database_id != database_id:
+        raise ValueError("Database inspection does not match explicit Notion target")
     if not confirmed:
         raise ValueError("Operator confirmation is required")
     recruiter = RecruiterConfig(
@@ -103,6 +101,13 @@ async def configure_recruiter(
     return recruiter
 
 
+def _display_inspection(inspection: DatabaseInspection) -> None:
+    print(f"Database: {inspection.title} ({inspection.database_id})")
+    print(
+        "Schema: " + ", ".join(f"{name}:{kind}" for name, kind in inspection.property_types.items())
+    )
+
+
 async def _run(args: argparse.Namespace) -> None:
     settings = get_settings()
     engine = create_engine(settings)
@@ -115,13 +120,7 @@ async def _run(args: argparse.Namespace) -> None:
             async with factory() as session:
                 database_id = parse_notion_database_id(args.notion)
                 inspection = await inspector.inspect(database_id)
-                print(f"Database: {inspection.title} ({inspection.database_id})")
-                print(
-                    "Schema: "
-                    + ", ".join(
-                        f"{name}:{kind}" for name, kind in inspection.property_types.items()
-                    )
-                )
+                _display_inspection(inspection)
                 confirmed = input("Create inactive recruiter config? [yes/no] ").strip() == "yes"
                 await configure_recruiter(
                     session,
@@ -132,6 +131,7 @@ async def _run(args: argparse.Namespace) -> None:
                     mattermost_user_id=args.mattermost_user_id,
                     storage_prefix=args.storage_prefix,
                     confirmed=confirmed,
+                    inspection=inspection,
                 )
         finally:
             await engine.dispose()

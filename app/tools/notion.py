@@ -98,6 +98,13 @@ class NotionDataSourceSchema:
         )
 
 
+@dataclass(frozen=True)
+class NotionDatabaseInspection:
+    database_id: str
+    title: str
+    schema: NotionDataSourceSchema
+
+
 SourceCacheKey = tuple[str, str, str, str, str]
 
 
@@ -256,6 +263,33 @@ class NotionClient:
 
     async def _discover_source(self, key: SourceCacheKey) -> str:
         database_id, name_prop, date_prop, recording_prop, project_prop = key
+        database = await self._retrieve_database(database_id)
+        selected = await self._select_compatible_schema(
+            database, name_prop, date_prop, recording_prop, project_prop
+        )
+        self._trace_source_selection(database_id, database, selected.id)
+        return selected.id
+
+    async def inspect_database(
+        self,
+        database_id: str,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str = "",
+    ) -> NotionDatabaseInspection:
+        database = await self._retrieve_database(database_id)
+        selected = await self._select_compatible_schema(
+            database, name_prop, date_prop, recording_prop, project_prop
+        )
+        self._trace_source_selection(database_id, database, selected.id)
+        return NotionDatabaseInspection(
+            database_id=database_id,
+            title=self._database_title(database),
+            schema=selected,
+        )
+
+    async def _retrieve_database(self, database_id: str) -> dict[str, Any]:
         try:
             response = await self._client.get(
                 f"{NOTION_API_BASE}/databases/{database_id}", headers=self._headers
@@ -271,28 +305,40 @@ class NotionClient:
             raise NotionAPIError(
                 f"Notion database discovery failed with HTTP {response.status_code}"
             )
-        database = self._json_object(response, "database discovery")
+        return self._json_object(response, "database discovery")
+
+    async def _select_compatible_schema(
+        self,
+        database: dict[str, Any],
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str,
+    ) -> NotionDataSourceSchema:
         sources = self._parse_sources(database)
-        compatible: list[str] = []
+        compatible: list[NotionDataSourceSchema] = []
         for source in sources:
             schema = await self._retrieve_schema(source.id)
             if schema.is_compatible(name_prop, date_prop, recording_prop, project_prop):
-                compatible.append(schema.id)
+                compatible.append(schema)
         if not compatible:
             raise NotionSchemaError("No Notion data source has the required schema")
         if len(compatible) > 1:
             raise NotionSourceAmbiguityError(
                 "Multiple Notion data sources have the required schema"
             )
-        selected = compatible[0]
+        return compatible[0]
+
+    def _trace_source_selection(
+        self, database_id: str, database: dict[str, Any], source_id: str
+    ) -> None:
         self._trace(
             "notion.source_selected",
             database_id=database_id,
-            discovered_source_count=len(sources),
-            compatible_source_count=len(compatible),
-            data_source_id=selected,
+            discovered_source_count=len(self._parse_sources(database)),
+            compatible_source_count=1,
+            data_source_id=source_id,
         )
-        return selected
 
     async def _retrieve_schema(self, source_id: str) -> NotionDataSourceSchema:
         try:
@@ -362,6 +408,18 @@ class NotionClient:
                 raise NotionMalformedResponseError("Notion data-source descriptor is malformed")
             sources.append(NotionDataSource(id=item["id"]))
         return sources
+
+    @staticmethod
+    def _database_title(payload: dict[str, Any]) -> str:
+        entries = payload.get("title")
+        if not isinstance(entries, list):
+            raise NotionMalformedResponseError("Notion database response has invalid title")
+        title = "".join(
+            str(entry.get("plain_text", "")) for entry in entries if isinstance(entry, dict)
+        ).strip()
+        if not title:
+            raise NotionMalformedResponseError("Notion database response has empty title")
+        return title
 
     @classmethod
     def _json_object(cls, response: httpx.Response, operation: str) -> dict[str, Any]:
