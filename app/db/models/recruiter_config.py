@@ -19,6 +19,11 @@ class RecruiterConfig(Base):
     synology_base_folder: Mapped[str] = mapped_column(Text, nullable=False)
     mattermost_user_id: Mapped[str | None] = mapped_column(Text)
     mattermost_dm_channel: Mapped[str | None] = mapped_column(Text)
+    notion_preflight_token_hash: Mapped[str | None] = mapped_column(Text)
+    notion_preflight_database_id: Mapped[str | None] = mapped_column(Text)
+    notion_preflight_schema_hash: Mapped[str | None] = mapped_column(Text)
+    notion_preflight_synthetic_page_id: Mapped[str | None] = mapped_column(Text)
+    notion_preflight_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     caldav_calendar_url: Mapped[str | None] = mapped_column(Text)
     calendar_selection_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")

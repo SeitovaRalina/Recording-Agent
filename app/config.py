@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     mattermost_channel_id: str = ""
     mattermost_bot_user_id: str = ""
     review_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    intent_claim_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     minio_endpoint: str = "http://localhost:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: SecretStr = SecretStr("minioadmin")

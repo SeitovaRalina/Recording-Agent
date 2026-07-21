@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,7 @@ from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.canary import enforce_recruiter_scope
 from app.tools.mattermost import MattermostClient
 
 
@@ -108,6 +110,7 @@ class ReviewService:
         )
         if review is None:
             raise ReviewRejectedError("Review not found")
+        await self._enforce_authoritative_scope(session, review, recruiter_user_id)
         self._validate_binding(
             review,
             recruiter_user_id,
@@ -154,22 +157,26 @@ class ReviewService:
         choice: int | None = None,
     ) -> ReviewMutation:
         operation = f"review:{review_id}:{action}"
-        replay = await session.scalar(
-            select(IntentReplay).where(
-                IntentReplay.actor == recruiter_user_id,
-                IntentReplay.operation == operation,
-                IntentReplay.idempotency_key == idempotency_key,
-            )
+        fingerprint = self._request_fingerprint(
+            review_id=review_id,
+            action=action,
+            recruiter_user_id=recruiter_user_id,
+            thread_id=thread_id,
+            token=token,
+            expected_version=expected_version,
+            choice=choice,
         )
+        review = await session.scalar(
+            select(ManualReview)
+            .where(ManualReview.id == review_id)
+            .options(joinedload(ManualReview.recording))
+        )
+        if review is None:
+            raise ReviewRejectedError("Review not found")
+        await self._enforce_authoritative_scope(session, review, recruiter_user_id)
+        replay = await self._find_replay(session, recruiter_user_id, operation, idempotency_key)
         if replay is not None:
-            data = replay.response
-            return ReviewMutation(
-                review_id=uuid.UUID(str(data["review_id"])),
-                recording_id=uuid.UUID(str(data["recording_id"])),
-                status=str(data["status"]),
-                version=int(data["version"]),
-                replayed=True,
-            )
+            return self._mutation_from_replay(replay, fingerprint)
         review = await session.scalar(
             select(ManualReview)
             .where(ManualReview.id == review_id)
@@ -178,6 +185,10 @@ class ReviewService:
         )
         if review is None:
             raise ReviewRejectedError("Review not found")
+        await self._enforce_authoritative_scope(session, review, recruiter_user_id)
+        replay = await self._find_replay(session, recruiter_user_id, operation, idempotency_key)
+        if replay is not None:
+            return self._mutation_from_replay(replay, fingerprint)
         self._validate_binding(review, recruiter_user_id, thread_id, token, expected_version)
         recording = review.recording
         now = datetime.now(UTC)
@@ -233,11 +244,43 @@ class ReviewService:
                 actor=recruiter_user_id,
                 operation=operation,
                 idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                state="completed",
                 response=result.as_dict(),
             )
         )
         await session.flush()
         return result
+
+    @staticmethod
+    async def _find_replay(
+        session: AsyncSession, actor: str, operation: str, idempotency_key: str
+    ) -> IntentReplay | None:
+        return cast(
+            IntentReplay | None,
+            await session.scalar(
+                select(IntentReplay).where(
+                    IntentReplay.actor == actor,
+                    IntentReplay.operation == operation,
+                    IntentReplay.idempotency_key == idempotency_key,
+                )
+            ),
+        )
+
+    @staticmethod
+    def _mutation_from_replay(replay: IntentReplay, fingerprint: str) -> ReviewMutation:
+        if replay.request_fingerprint != fingerprint:
+            raise ReviewRejectedError("Review idempotency key was reused for another request")
+        data = replay.response
+        if data is None:
+            raise ReviewRejectedError("Review request is still in progress")
+        return ReviewMutation(
+            review_id=uuid.UUID(str(data["review_id"])),
+            recording_id=uuid.UUID(str(data["recording_id"])),
+            status=str(data["status"]),
+            version=int(data["version"]),
+            replayed=True,
+        )
 
     def _validate_binding(
         self,
@@ -277,6 +320,31 @@ class ReviewService:
             and user_id not in self._settings.test_mattermost_user_allowlist
         ):
             raise ReviewRejectedError("Mattermost user is outside the test-mode allowlist")
+
+    async def _enforce_authoritative_scope(
+        self, session: AsyncSession, review: ManualReview, requester_user_id: str
+    ) -> None:
+        recruiter = await session.scalar(
+            select(RecruiterConfig).where(
+                RecruiterConfig.email == review.recording.disk_owner_email,
+                RecruiterConfig.active.is_(True),
+            )
+        )
+        if recruiter is None:
+            raise ReviewRejectedError("Active recruiter not found")
+        if recruiter.mattermost_user_id != requester_user_id:
+            raise ReviewRejectedError("Review requester does not match recruiter configuration")
+        try:
+            enforce_recruiter_scope(self._settings, recruiter)
+        except PermissionError as error:
+            raise ReviewRejectedError(str(error)) from error
+
+    @classmethod
+    def _request_fingerprint(cls, **payload: object) -> str:
+        token = str(payload.pop("token"))
+        payload["token_hash"] = cls._hash_token(token)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     @staticmethod
     def _hash_token(token: str) -> str:

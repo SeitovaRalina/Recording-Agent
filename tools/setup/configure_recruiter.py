@@ -5,6 +5,7 @@ import asyncio
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 import httpx
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db.engine import create_engine, create_session_factory
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.canary import notion_schema_hash, notion_token_hash
 from app.tools.notion import NotionClient
 
 
@@ -97,6 +99,41 @@ async def configure_recruiter(
         active=False,
     )
     session.add(recruiter)
+    await session.commit()
+    return recruiter
+
+
+async def preflight_recruiter_notion(
+    session: AsyncSession,
+    notion: NotionClient,
+    settings: Settings,
+    *,
+    recruiter_email: str,
+    synthetic_page_id: str,
+) -> RecruiterConfig:
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(
+            RecruiterConfig.email == recruiter_email.strip().casefold(),
+            RecruiterConfig.active.is_(False),
+        )
+    )
+    if recruiter is None:
+        raise ValueError("Inactive recruiter config not found")
+    inspection = await notion.preflight_database(
+        recruiter.notion_database_id,
+        synthetic_page_id,
+        settings.notion_name_prop,
+        settings.notion_date_prop,
+        settings.notion_recording_prop,
+        settings.notion_project_prop,
+    )
+    if inspection.database_id != recruiter.notion_database_id:
+        raise ValueError("Notion preflight returned another database")
+    recruiter.notion_preflight_token_hash = notion_token_hash(settings)
+    recruiter.notion_preflight_database_id = recruiter.notion_database_id
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(settings)
+    recruiter.notion_preflight_synthetic_page_id = synthetic_page_id
+    recruiter.notion_preflight_completed_at = datetime.now(UTC)
     await session.commit()
     return recruiter
 

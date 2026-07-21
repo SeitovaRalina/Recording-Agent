@@ -22,8 +22,12 @@ class IntentReplay(Base):
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     operation: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
-    response: Mapped[dict[str, Any]] = mapped_column(
-        JSON().with_variant(JSONB, "postgresql"), nullable=False
+    request_fingerprint: Mapped[str] = mapped_column(Text, nullable=False, default="legacy")
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="completed")
+    claim_owner: Mapped[str | None] = mapped_column(Text)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    response: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")

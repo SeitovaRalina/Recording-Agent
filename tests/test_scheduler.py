@@ -22,6 +22,7 @@ from app.scheduler.cron import (
     scan_all_recruiters,
     scan_recruiter,
 )
+from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
 from app.services.status import StatusService
@@ -439,6 +440,12 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     owner = recruiter()
+    settings = Settings()
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("pipeline")
     item.status = RecordingStatus.CALENDAR_EVENT_FOUND
     item.calendar_event_summary = "Interview (Ivan Ivanov)"
@@ -468,7 +475,7 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         transfer,
         StatusService(),
         notion,
-        Settings(),
+        settings,
     )
     async with factory() as session:
         loaded = await session.get(Recording, recording_id)
@@ -510,6 +517,12 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     owner = recruiter()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found(f"restart-{initial_status.value}")
     item.status = initial_status
     item.calendar_event_summary = "Interview (Ivan Ivanov)"
@@ -548,7 +561,7 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
         transfer,
         StatusService(),
         notion,
-        Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False),
+        settings,
     )
     async with factory() as session:
         loaded = await session.get(Recording, recording_id)
@@ -805,6 +818,13 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
             email="second@example.com", notion_database_id="two", synology_base_folder="/two"
         ),
     ]
+    settings = Settings()
+    for owner in owners:
+        owner.notion_preflight_token_hash = notion_token_hash(settings)
+        owner.notion_preflight_database_id = owner.notion_database_id
+        owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+        owner.notion_preflight_synthetic_page_id = "synthetic-page"
+        owner.notion_preflight_completed_at = datetime.now(UTC)
     items: list[Recording] = []
     for index, owner in enumerate(owners):
         item = found(f"isolation-{index}")
@@ -838,8 +858,8 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
         factory,
         disk,
         AsyncMock(),
-        InterviewMatcher(Settings()),
-        Settings(),
+        InterviewMatcher(settings),
+        settings,
         candidate,
         transfer,
         StatusService(),

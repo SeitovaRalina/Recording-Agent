@@ -17,6 +17,13 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.routers.calendars import verify_internal_request
 from app.routers.events import verify_openclaw_secret
 from app.scheduler.cron import ScanSummary, _resume_transfer_recording, scan_recruiter
+from app.services.canary import enforce_recruiter_scope
+from app.services.intents import (
+    IntentRejectedError,
+    claim_intent,
+    complete_intent,
+    request_fingerprint,
+)
 from app.services.reviews import ReviewRejectedError, ReviewService
 
 router = APIRouter(
@@ -102,15 +109,6 @@ async def trigger_scan(
     if settings.test_mode_enabled and body.scope != "test":
         raise HTTPException(status_code=403, detail="Production scan is forbidden in test mode")
     operation = f"scan:{body.scope}"
-    replay = await session.scalar(
-        select(IntentReplay).where(
-            IntentReplay.actor == body.recruiter_email,
-            IntentReplay.operation == operation,
-            IntentReplay.idempotency_key == body.idempotency_key,
-        )
-    )
-    if replay is not None:
-        return ScanResponse.model_validate(replay.response)
     recruiter = await session.scalar(
         select(RecruiterConfig).where(
             RecruiterConfig.email == body.recruiter_email,
@@ -119,6 +117,20 @@ async def trigger_scan(
     )
     if recruiter is None:
         raise HTTPException(status_code=404, detail="Active recruiter not found")
+    try:
+        enforce_recruiter_scope(settings, recruiter)
+        claim = await claim_intent(
+            session,
+            actor=recruiter.email,
+            operation=operation,
+            idempotency_key=body.idempotency_key,
+            fingerprint=request_fingerprint(body.model_dump(mode="json")),
+            ttl_seconds=settings.intent_claim_ttl_seconds,
+        )
+    except (PermissionError, IntentRejectedError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if claim.completed_response is not None:
+        return ScanResponse.model_validate(claim.completed_response)
     try:
         result = await scan_recruiter(
             recruiter,
@@ -131,19 +143,12 @@ async def trigger_scan(
             transfer_service=request.app.state.transfer_service,
             status_service=request.app.state.status_service,
             notion=request.app.state.notion_client,
+            review_service=request.app.state.review_service,
         )
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
     response = _scan_response(recruiter.email, result)
-    session.add(
-        IntentReplay(
-            actor=body.recruiter_email,
-            operation=operation,
-            idempotency_key=body.idempotency_key,
-            response=response.model_dump(mode="json"),
-        )
-    )
-    await session.commit()
+    await complete_intent(session, claim, response.model_dump(mode="json"))
     return response
 
 
@@ -158,16 +163,18 @@ async def recording_status(
     recording_status: Annotated[RecordingStatus | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ) -> RecordingStatusResponse:
-    if (
-        settings.test_mode_enabled
-        and recruiter_user_id not in settings.test_mattermost_user_allowlist
-    ):
-        raise HTTPException(status_code=403, detail="Mattermost user is outside test scope")
     recruiter = await session.scalar(
-        select(RecruiterConfig).where(RecruiterConfig.mattermost_user_id == recruiter_user_id)
+        select(RecruiterConfig).where(
+            RecruiterConfig.mattermost_user_id == recruiter_user_id,
+            RecruiterConfig.active.is_(True),
+        )
     )
     if recruiter is None:
         raise HTTPException(status_code=404, detail="Recruiter not found")
+    try:
+        enforce_recruiter_scope(settings, recruiter)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
     statement: Select[tuple[Recording]] = select(Recording).where(
         Recording.disk_owner_email == recruiter.email
     )
@@ -273,7 +280,7 @@ async def _mutate_review(
     except ReviewRejectedError as error:
         await session.rollback()
         raise HTTPException(status_code=409, detail=str(error)) from error
-    if action == "resolve" and not mutation.replayed:
+    if action == "resolve":
         recording = await session.get(Recording, mutation.recording_id)
         if recording is not None:
             recruiter = await session.scalar(
@@ -293,8 +300,26 @@ async def _mutate_review(
                 )
                 await session.refresh(recording)
                 if recording.status in {RecordingStatus.COMPLETED, RecordingStatus.FAILED}:
-                    await _review_service(request).notify_terminal(recording, recruiter)
-                    recording.terminal_notified_at = datetime.now(UTC)
+                    if recording.terminal_notified_at is None:
+                        await _review_service(request).notify_terminal(recording, recruiter)
+                        recording.terminal_notified_at = datetime.now(UTC)
+                    await session.commit()
+                mutation = type(mutation)(
+                    review_id=mutation.review_id,
+                    recording_id=mutation.recording_id,
+                    status=recording.status.value,
+                    version=recording.version,
+                    replayed=mutation.replayed,
+                )
+                replay = await session.scalar(
+                    select(IntentReplay).where(
+                        IntentReplay.actor == body.recruiter_user_id,
+                        IntentReplay.operation == f"review:{review_id}:{action}",
+                        IntentReplay.idempotency_key == body.idempotency_key,
+                    )
+                )
+                if replay is not None:
+                    replay.response = mutation.as_dict()
                     await session.commit()
     return ReviewMutationResponse(**mutation.as_dict())
 

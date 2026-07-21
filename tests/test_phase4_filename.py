@@ -20,6 +20,22 @@ def test_filename_and_key_are_deterministic() -> None:
     assert identity.key.endswith("/Иван___Иванов/" + identity.filename)
 
 
+def test_canary_key_keeps_logical_suffix_under_test_prefix() -> None:
+    identity = build_storage_identity(
+        event_date=date(2026, 7, 21),
+        candidate_name="Candidate",
+        project_or_spot="Spot",
+        interview_type="general_interview",
+        original_filename="call.webm",
+        recruiter_prefix="r@example.com",
+        key_prefix="test-interviews",
+    )
+    assert identity.key == (
+        "test-interviews/r@example.com/2026-07-21/Candidate/"
+        "2026-07-21_Candidate_Spot_general_interview.webm"
+    )
+
+
 def test_filename_rejects_empty_component_and_extension() -> None:
     with pytest.raises(FilenameError):
         build_storage_identity(

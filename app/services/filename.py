@@ -41,6 +41,7 @@ def build_storage_identity(
     interview_type: str,
     original_filename: str,
     recruiter_prefix: str,
+    key_prefix: str | None = None,
 ) -> StorageIdentity:
     extension = PurePath(original_filename).suffix.lstrip(".").lower()
     if extension not in ALLOWED_EXTENSIONS:
@@ -51,7 +52,14 @@ def build_storage_identity(
     recruiter = sanitize_component(recruiter_prefix)
     stamp = event_date.isoformat()
     filename = f"{stamp}_{candidate}_{project}_{kind}.{extension}"
-    key = f"{recruiter}/{stamp}/{candidate}/{filename}"
+    logical_key = f"{recruiter}/{stamp}/{candidate}/{filename}"
+    if key_prefix:
+        prefix = "/".join(sanitize_component(part) for part in key_prefix.split("/") if part)
+        if not prefix:
+            raise FilenameError("Storage key prefix is empty after sanitization")
+        key = f"{prefix}/{logical_key}"
+    else:
+        key = logical_key
     if len(key.encode("utf-8")) > MAX_KEY:
         raise FilenameError("Storage key is too long")
     return StorageIdentity(filename=filename, key=key)

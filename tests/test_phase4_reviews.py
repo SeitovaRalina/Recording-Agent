@@ -3,10 +3,13 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
 from app.config import Settings
+from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview
 from app.db.models.recording import Recording, RecordingStatus
+from app.db.models.recruiter_config import RecruiterConfig
 from app.services.reviews import ReviewRejectedError, ReviewService
 
 
@@ -45,7 +48,17 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
         token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
         recording_version=3,
     )
-    session.add(review)  # type: ignore[attr-defined]
+    session.add_all(  # type: ignore[attr-defined]
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="prefix",
+                mattermost_user_id="mm-user",
+            ),
+            review,
+        ]
+    )
     await session.commit()  # type: ignore[attr-defined]
     service = ReviewService(AsyncMock(), Settings())
     first = await service.mutate(
@@ -76,6 +89,37 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
     assert replay.replayed is True
     assert replay.version == 4
 
+    persisted = await session.scalar(select(IntentReplay))  # type: ignore[attr-defined]
+    race_service = ReviewService(AsyncMock(), Settings())
+    race_service._find_replay = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[None, persisted]
+    )
+    post_lock_replay = await race_service.mutate(
+        session,  # type: ignore[arg-type]
+        review_id=review.id,
+        action="resolve",
+        recruiter_user_id="mm-user",
+        thread_id="thread",
+        token=token,
+        expected_version=3,
+        idempotency_key="request-123",
+        choice=1,
+    )
+    assert post_lock_replay.replayed is True
+
+    with pytest.raises(ReviewRejectedError, match="idempotency key was reused"):
+        await service.mutate(
+            session,  # type: ignore[arg-type]
+            review_id=review.id,
+            action="resolve",
+            recruiter_user_id="mm-user",
+            thread_id="different-thread",
+            token="different-token",
+            expected_version=99,
+            idempotency_key="request-123",
+            choice=1,
+        )
+
 
 @pytest.mark.anyio
 async def test_review_rejects_wrong_thread_before_consuming(session: object) -> None:
@@ -92,7 +136,17 @@ async def test_review_rejects_wrong_thread_before_consuming(session: object) -> 
         token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
         recording_version=3,
     )
-    session.add(review)  # type: ignore[attr-defined]
+    session.add_all(  # type: ignore[attr-defined]
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="prefix",
+                mattermost_user_id="mm-user",
+            ),
+            review,
+        ]
+    )
     await session.commit()  # type: ignore[attr-defined]
     with pytest.raises(ReviewRejectedError, match="another Mattermost thread"):
         await ReviewService(AsyncMock(), Settings()).mutate(

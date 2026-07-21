@@ -15,6 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, get_settings
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.canary import (
+    enforce_recruiter_scope,
+    enforce_storage_key_scope,
+    require_notion_preflight,
+)
 from app.services.candidate import CandidateService
 from app.services.filename import FilenameError, build_storage_identity
 from app.services.matching import (
@@ -281,16 +286,6 @@ async def _resume_transfer_recording(
             page = match.page
             match_confidence = match.confidence
             candidate_name = _candidate_name(recording.calendar_event_summary)
-        if not settings.notion_writes_enabled:
-            await status.advance(
-                session,
-                recording,
-                RecordingStatus.FAILED,
-                error_step="notion_preflight",
-                error_message="Notion writes are disabled until the runtime schema probe passes",
-            )
-            await session.commit()
-            return
         try:
             identity = build_storage_identity(
                 event_date=recording.calendar_dtstart.astimezone(
@@ -303,7 +298,9 @@ async def _resume_transfer_recording(
                 interview_type=settings.notion_interview_type,
                 original_filename=recording.disk_filename,
                 recruiter_prefix=recruiter.email,
+                key_prefix=recruiter.synology_base_folder if settings.test_mode_enabled else None,
             )
+            enforce_storage_key_scope(settings, recruiter, identity.key)
         except FilenameError as error:
             await status.advance(
                 session,
@@ -442,6 +439,18 @@ async def _resume_transfer_recording(
             storage_path=result.file_path,
             share_url=safe_url(share_url),
         )
+        try:
+            require_notion_preflight(settings, recruiter)
+        except PermissionError as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="notion_preflight",
+                error_message=str(error),
+            )
+            await session.commit()
+            return
         try:
             await notion.update_page_file(
                 page.id,
@@ -603,13 +612,15 @@ async def _resume_committed_transfer_steps(
         await session.commit()
 
     if recording.status == RecordingStatus.SYNOLOGY_LINK_CREATED:
-        if not settings.notion_writes_enabled:
+        try:
+            require_notion_preflight(settings, recruiter)
+        except PermissionError as error:
             await status.advance(
                 session,
                 recording,
                 RecordingStatus.FAILED,
                 error_step="notion_preflight",
-                error_message="Notion writes are disabled until the runtime schema probe passes",
+                error_message=str(error),
             )
             await session.commit()
             return
@@ -1139,13 +1150,4 @@ async def _send_recruiter_notifications(
 
 
 def _enforce_recruiter_scope(settings: Settings, recruiter: RecruiterConfig) -> None:
-    if not settings.test_mode_enabled:
-        return
-    if recruiter.email not in settings.test_recruiter_allowlist:
-        raise PermissionError("Recruiter is outside the test-mode allowlist")
-    if recruiter.notion_database_id not in settings.test_notion_database_allowlist:
-        raise PermissionError("Notion database is outside the test-mode allowlist")
-    if not recruiter.mattermost_user_id or (
-        recruiter.mattermost_user_id not in settings.test_mattermost_user_allowlist
-    ):
-        raise PermissionError("Mattermost user is outside the test-mode allowlist")
+    enforce_recruiter_scope(settings, recruiter)

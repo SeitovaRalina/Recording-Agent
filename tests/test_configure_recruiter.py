@@ -6,12 +6,13 @@ import respx
 from pydantic import SecretStr
 
 from app.config import Settings
-from app.tools.notion import NotionClient
+from app.tools.notion import NotionClient, NotionDatabaseInspection, NotionDataSourceSchema
 from tools.setup.configure_recruiter import (
     DatabaseInspection,
     NotionInspector,
     configure_recruiter,
     parse_notion_database_id,
+    preflight_recruiter_notion,
 )
 
 
@@ -122,3 +123,42 @@ async def test_bootstrap_reuses_confirmed_database_inspection(session: object) -
     )
 
     inspector.inspect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_operator_preflight_persists_backend_token_and_synthetic_row_proof(
+    session: object,
+) -> None:
+    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    settings = Settings(notion_token=SecretStr("backend-token"))
+    recruiter = await configure_recruiter(
+        session,  # type: ignore[arg-type]
+        AsyncMock(),
+        Settings(
+            yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
+            yandex_caldav_passwords={"r@example.com": SecretStr("password")},
+        ),
+        email="r@example.com",
+        notion_target=database_id,
+        mattermost_user_id="mm-user",
+        storage_prefix="test-prefix",
+        confirmed=True,
+        inspection=DatabaseInspection(database_id, "Test Interviews", {}),
+    )
+    notion = AsyncMock(spec=NotionClient)
+    notion.preflight_database.return_value = NotionDatabaseInspection(
+        database_id, "Test Interviews", NotionDataSourceSchema("runtime-only", {})
+    )
+
+    await preflight_recruiter_notion(
+        session,  # type: ignore[arg-type]
+        notion,
+        settings,
+        recruiter_email=recruiter.email,
+        synthetic_page_id="synthetic-page",
+    )
+
+    assert recruiter.notion_preflight_token_hash
+    assert recruiter.notion_preflight_database_id == database_id
+    assert recruiter.notion_preflight_synthetic_page_id == "synthetic-page"
+    assert recruiter.notion_preflight_completed_at is not None

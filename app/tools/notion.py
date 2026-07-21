@@ -289,6 +289,42 @@ class NotionClient:
             schema=selected,
         )
 
+    async def preflight_database(
+        self,
+        database_id: str,
+        synthetic_page_id: str,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str = "",
+    ) -> NotionDatabaseInspection:
+        inspection = await self.inspect_database(
+            database_id, name_prop, date_prop, recording_prop, project_prop
+        )
+        try:
+            response = await self._client.post(
+                f"{NOTION_API_BASE}/data_sources/{inspection.schema.id}/query",
+                headers=self._headers,
+                json={"page_size": 100},
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion synthetic-row query transport failed") from None
+        self._raise_query_error(response)
+        payload = self._json_object(response, "synthetic-row query")
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise NotionMalformedResponseError("Notion synthetic-row query has invalid results")
+        expected = synthetic_page_id.replace("-", "").casefold()
+        found = any(
+            isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and item["id"].replace("-", "").casefold() == expected
+            for item in results
+        )
+        if not found:
+            raise NotionQueryError("Selected synthetic Notion row was not returned by query")
+        return inspection
+
     async def _retrieve_database(self, database_id: str) -> dict[str, Any]:
         try:
             response = await self._client.get(
