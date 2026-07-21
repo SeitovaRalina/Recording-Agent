@@ -26,6 +26,7 @@ from app.services.matching import (
 from app.services.pipeline_trace import safe_url, trace
 from app.services.reviews import ReviewService
 from app.services.status import StatusService
+from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
@@ -144,6 +145,10 @@ async def scan_recruiter(
                                 [
                                     RecordingStatus.CALENDAR_EVENT_FOUND,
                                     RecordingStatus.CANDIDATE_MATCHED,
+                                    RecordingStatus.TRANSFER_STARTED,
+                                    RecordingStatus.UPLOADED_TO_SYNOLOGY,
+                                    RecordingStatus.SYNOLOGY_LINK_CREATED,
+                                    RecordingStatus.NOTION_UPDATED,
                                 ]
                             ),
                         )
@@ -194,7 +199,19 @@ async def _resume_transfer_recording(
     settings: Settings,
 ) -> None:
     async with session_factory() as session:
-        recording = await session.get(Recording, recording_id)
+        recording = await session.scalar(
+            select(Recording).where(Recording.id == recording_id).with_for_update()
+        )
+        if recording is not None and recording.status in {
+            RecordingStatus.TRANSFER_STARTED,
+            RecordingStatus.UPLOADED_TO_SYNOLOGY,
+            RecordingStatus.SYNOLOGY_LINK_CREATED,
+            RecordingStatus.NOTION_UPDATED,
+        }:
+            await _resume_committed_transfer_steps(
+                session, recording, recruiter, disk, transfer_service, status, notion, settings
+            )
+            return
         if recording is None or recording.status not in {
             RecordingStatus.CALENDAR_EVENT_FOUND,
             RecordingStatus.CANDIDATE_MATCHED,
@@ -364,6 +381,17 @@ async def _resume_transfer_recording(
         try:
             result = await transfer_service.transfer(recording, recruiter, candidate_name, session)
         except TransferError as error:
+            if isinstance(error.cause, StorageCollisionError):
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason="storage_key_collision",
+                    manual_review_candidates=[],
+                    error_message=str(error.cause),
+                )
+                await session.commit()
+                return
             await status.advance(
                 session,
                 recording,
@@ -478,6 +506,174 @@ async def _resume_transfer_recording(
             disk_path=recording.disk_path,
             deletable_after=recording.disk_deletable_after,
         )
+
+
+async def _resume_committed_transfer_steps(
+    session: AsyncSession,
+    recording: Recording,
+    recruiter: RecruiterConfig,
+    disk: DiskScanner,
+    transfer_service: TransferService,
+    status: StatusService,
+    notion: NotionClient,
+    settings: Settings,
+) -> None:
+    required = {
+        "candidate_name": recording.candidate_name,
+        "notion_page_id": recording.notion_page_id,
+        "generated_filename": recording.generated_filename,
+        "storage_key": recording.storage_key,
+        "content_identity": recording.content_identity,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.FAILED,
+            error_step="restart_recovery",
+            error_message=f"Committed transfer state is incomplete: {', '.join(missing)}",
+        )
+        await session.commit()
+        return
+
+    if recording.status == RecordingStatus.TRANSFER_STARTED:
+        try:
+            result = await transfer_service.transfer(
+                recording, recruiter, cast(str, recording.candidate_name), session
+            )
+        except TransferError as error:
+            if isinstance(error.cause, StorageCollisionError):
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason="storage_key_collision",
+                    manual_review_candidates=[],
+                    error_message=str(error.cause),
+                )
+            else:
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.FAILED,
+                    error_step=error.step,
+                    error_message=str(error.cause),
+                )
+            await session.commit()
+            return
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.UPLOADED_TO_SYNOLOGY,
+            synology_folder_path=result.folder_path,
+            synology_file_path=result.file_path,
+        )
+        await session.commit()
+
+    if recording.status == RecordingStatus.UPLOADED_TO_SYNOLOGY:
+        if not recording.synology_file_path:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="restart_recovery",
+                error_message="Committed upload has no storage path",
+            )
+            await session.commit()
+            return
+        try:
+            share_url = await transfer_service.create_share_link(recording.synology_file_path)
+        except TransferError as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step=error.step,
+                error_message=str(error.cause),
+            )
+            await session.commit()
+            return
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.SYNOLOGY_LINK_CREATED,
+            synology_share_url=share_url,
+        )
+        await session.commit()
+
+    if recording.status == RecordingStatus.SYNOLOGY_LINK_CREATED:
+        if not settings.notion_writes_enabled:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="notion_preflight",
+                error_message="Notion writes are disabled until the runtime schema probe passes",
+            )
+            await session.commit()
+            return
+        if not recording.synology_share_url:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="restart_recovery",
+                error_message="Committed share-link state has no URL",
+            )
+            await session.commit()
+            return
+        try:
+            await notion.update_page_file(
+                cast(str, recording.notion_page_id),
+                settings.notion_recording_prop,
+                recording.synology_share_url,
+                cast(str, recording.generated_filename),
+            )
+        except Exception as error:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="notion_update",
+                error_message=str(error),
+            )
+            await session.commit()
+            return
+        await status.advance(session, recording, RecordingStatus.NOTION_UPDATED)
+        await session.commit()
+
+    if recording.status != RecordingStatus.NOTION_UPDATED:
+        return
+    if not settings.yandex_source_mutation_enabled:
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.COMPLETED,
+            completed_at=datetime.now(UTC),
+        )
+        await session.commit()
+        return
+    try:
+        await disk.mark_processed(recording.disk_path, recruiter.email)
+    except Exception as error:
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.FAILED,
+            error_step="mark_processed",
+            error_message=str(error),
+        )
+        await session.commit()
+        return
+    await status.advance(
+        session,
+        recording,
+        RecordingStatus.SOURCE_MARKED_PROCESSED,
+        source_processed=True,
+        disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
+    )
+    await session.commit()
 
 
 def _candidate_name(summary: str | None) -> str:

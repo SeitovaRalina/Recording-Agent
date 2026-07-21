@@ -80,6 +80,7 @@ class Recording(Base):
         },
         RecordingStatus.TRANSFER_STARTED: {
             RecordingStatus.UPLOADED_TO_SYNOLOGY,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.UPLOADED_TO_SYNOLOGY: {

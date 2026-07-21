@@ -25,6 +25,7 @@ from app.scheduler.cron import (
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
 from app.services.status import StatusService
+from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 from app.tools.notion import NotionPage
@@ -486,6 +487,169 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm",
     )
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("initial_status", "transfer_calls", "share_calls", "notion_calls"),
+    [
+        (RecordingStatus.TRANSFER_STARTED, 1, 1, 1),
+        (RecordingStatus.UPLOADED_TO_SYNOLOGY, 0, 1, 1),
+        (RecordingStatus.SYNOLOGY_LINK_CREATED, 0, 0, 1),
+        (RecordingStatus.NOTION_UPDATED, 0, 0, 0),
+    ],
+)
+async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
+    initial_status: RecordingStatus,
+    transfer_calls: int,
+    share_calls: int,
+    notion_calls: int,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found(f"restart-{initial_status.value}")
+    item.status = initial_status
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.project_or_spot = "Project"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.storage_key = f"recruiter/2026-07-16/Ivan_Ivanov/{item.generated_filename}"
+    item.content_identity = item.disk_file_id
+    if initial_status != RecordingStatus.TRANSFER_STARTED:
+        item.synology_folder_path = "/folder"
+        item.synology_file_path = f"/{item.storage_key}"
+    if initial_status in {
+        RecordingStatus.SYNOLOGY_LINK_CREATED,
+        RecordingStatus.NOTION_UPDATED,
+    }:
+        item.synology_share_url = "https://share/video"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    transfer = AsyncMock()
+    transfer.transfer.return_value = TransferResult("/folder", f"/{item.storage_key}")
+    transfer.create_share_link.return_value = "https://share/video"
+    notion = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        notion,
+        Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.COMPLETED
+    assert transfer.transfer.await_count == transfer_calls
+    assert transfer.create_share_link.await_count == share_calls
+    assert notion.update_page_file.await_count == notion_calls
+    candidate.find_and_match.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_scan_selects_every_committed_restart_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    statuses = [
+        RecordingStatus.TRANSFER_STARTED,
+        RecordingStatus.UPLOADED_TO_SYNOLOGY,
+        RecordingStatus.SYNOLOGY_LINK_CREATED,
+        RecordingStatus.NOTION_UPDATED,
+    ]
+    items = [found(f"scan-restart-{status.value}") for status in statuses]
+    for item, item_status in zip(items, statuses, strict=True):
+        item.status = item_status
+    async with factory() as session:
+        session.add_all(items)
+        await session.commit()
+        expected_ids = {item.id for item in items}
+    resumed: list[uuid.UUID] = []
+
+    async def capture(recording_id: uuid.UUID, *_args: object, **_kwargs: object) -> None:
+        resumed.append(recording_id)
+
+    monkeypatch.setattr("app.scheduler.cron._resume_transfer_recording", capture)
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    await scan_recruiter(
+        owner,
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        candidate_service=AsyncMock(),
+        transfer_service=AsyncMock(),
+        status_service=StatusService(),
+        notion=AsyncMock(),
+    )
+    await engine.dispose()
+
+    assert set(resumed) == expected_ids
+
+
+@pytest.mark.anyio
+async def test_restart_storage_collision_routes_to_manual_review() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("restart-collision")
+    item.status = RecordingStatus.TRANSFER_STARTED
+    item.candidate_name = "Ivan Ivanov"
+    item.notion_page_id = "page"
+    item.generated_filename = "recording.webm"
+    item.storage_key = "recruiter/date/candidate/recording.webm"
+    item.content_identity = "md5"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    transfer = AsyncMock()
+    transfer.transfer.side_effect = TransferError(
+        "upload", StorageCollisionError("Storage key already exists")
+    )
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "storage_key_collision"
 
 
 @pytest.mark.anyio

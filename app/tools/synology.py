@@ -60,8 +60,11 @@ class SynologyBackend:
         filename: str,
         stream: AsyncIterator[bytes],
         size: int | None,
+        *,
+        recording_id: str,
+        content_identity: str,
     ) -> str:
-        del size
+        del size, recording_id, content_identity
         boundary = f"recording-agent-{uuid.uuid4().hex}"
         response = await self._client.post(
             f"{self._base_url}/webapi/entry.cgi",

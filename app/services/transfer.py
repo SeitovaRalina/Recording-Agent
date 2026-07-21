@@ -83,10 +83,10 @@ class TransferService:
         except Exception as error:
             raise TransferError("download", error) from error
         try:
-            path = await self._stream_upload(href, folder, filename)
+            path = await self._stream_upload(href, folder, filename, recording)
         except StreamingUnsupportedError:
             try:
-                path = await self._temp_upload(href, folder, filename)
+                path = await self._temp_upload(href, folder, filename, recording)
             except Exception as error:
                 raise TransferError("upload", error) from error
         except Exception as error:
@@ -99,16 +99,27 @@ class TransferService:
         except Exception as error:
             raise TransferError("share_link", error) from error
 
-    async def _stream_upload(self, href: str, folder: str, filename: str) -> str:
+    async def _stream_upload(
+        self, href: str, folder: str, filename: str, recording: Recording
+    ) -> str:
         async with self._client.stream("GET", href, follow_redirects=True) as response:
             response.raise_for_status()
             size_value = response.headers.get("Content-Length")
             size = int(size_value) if size_value and int(size_value) > 0 else None
             return await self._storage.upload(
-                folder, filename, response.aiter_bytes(1024 * 1024), size
+                folder,
+                filename,
+                response.aiter_bytes(1024 * 1024),
+                size,
+                recording_id=str(recording.id),
+                content_identity=recording.content_identity
+                or recording.disk_md5
+                or recording.disk_file_id,
             )
 
-    async def _temp_upload(self, href: str, folder: str, filename: str) -> str:
+    async def _temp_upload(
+        self, href: str, folder: str, filename: str, recording: Recording
+    ) -> str:
         temp_dir = TEMP_ROOT / str(uuid.uuid4())
         temp_path = temp_dir / filename
         await anyio.to_thread.run_sync(temp_dir.mkdir, 0o700, True, True)
@@ -119,7 +130,16 @@ class TransferService:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         await target.write(chunk)
             size = (await anyio.to_thread.run_sync(temp_path.stat)).st_size
-            return await self._storage.upload(folder, filename, _file_chunks(temp_path), size)
+            return await self._storage.upload(
+                folder,
+                filename,
+                _file_chunks(temp_path),
+                size,
+                recording_id=str(recording.id),
+                content_identity=recording.content_identity
+                or recording.disk_md5
+                or recording.disk_file_id,
+            )
         finally:
             await anyio.to_thread.run_sync(shutil.rmtree, temp_dir, True)
 

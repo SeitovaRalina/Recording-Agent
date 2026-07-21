@@ -50,7 +50,14 @@ async def test_upload_streams_multipart_and_returns_path() -> None:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
         with respx.mock(assert_all_called=True) as router:
             route = router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
-            path = await backend.upload("/base", "video.webm", chunks(), 10)
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
         request = route.calls.last.request
         assert path == "/base/video.webm"
         assert request.headers["X-SYNO-Token"] == "key"

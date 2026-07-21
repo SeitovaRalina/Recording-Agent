@@ -32,9 +32,14 @@ class FakeStorage:
         self.folder = path
 
     async def upload(
-        self, folder: str, filename: str, stream: AsyncIterator[bytes], size: int | None
+        self,
+        folder: str,
+        filename: str,
+        stream: AsyncIterator[bytes],
+        size: int | None,
+        **identity: str,
     ) -> str:
-        del size
+        del size, identity
         self.uploads += 1
         if self.fail:
             raise RuntimeError("upload failed")
