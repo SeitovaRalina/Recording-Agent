@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings, get_settings
 from app.db.base import Base
+from app.db.models.manual_review import ManualReview
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
@@ -32,6 +33,7 @@ from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
+from app.tools.mattermost import MattermostError, MattermostPost
 from app.tools.notion import NotionPage
 
 
@@ -653,7 +655,7 @@ async def test_concurrent_terminal_notification_has_single_claim() -> None:
     mattermost = AsyncMock()
     durable_claim_seen = False
 
-    async def send_dm(_user_id: str, _message: str) -> object:
+    async def send_dm(_user_id: str, _message: str, **_kwargs: object) -> object:
         nonlocal durable_claim_seen
         async with factory() as check_session:
             claimed = await check_session.get(Recording, item.id)
@@ -665,7 +667,7 @@ async def test_concurrent_terminal_notification_has_single_claim() -> None:
         return object()
 
     mattermost.send_dm.side_effect = send_dm
-    service = ReviewService(mattermost, Settings())
+    service = ReviewService(mattermost, Settings(openclaw_secret="test-secret"))
     first = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
     await entered.wait()
     second = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
@@ -699,7 +701,7 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
     post = MagicMock(post_id="post", channel_id="channel", thread_id="thread")
     durable_claim_seen = False
 
-    async def send_dm(_user_id: str, _message: str) -> object:
+    async def send_dm(_user_id: str, _message: str, **_kwargs: object) -> object:
         nonlocal durable_claim_seen
         async with factory() as check_session:
             claimed = await check_session.get(Recording, item.id)
@@ -711,7 +713,7 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
         return post
 
     mattermost.send_dm.side_effect = send_dm
-    service = ReviewService(mattermost, Settings())
+    service = ReviewService(mattermost, Settings(openclaw_secret="test-secret"))
     first = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
     await entered.wait()
     second = asyncio.create_task(_send_recruiter_notifications(owner, factory, service))
@@ -722,6 +724,98 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
 
     assert mattermost.send_dm.await_count == 1
     assert durable_claim_seen is True
+
+
+@pytest.mark.anyio
+async def test_stale_terminal_notification_reclaims_with_same_pending_post_id() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "mm-user"
+    item = found("stale-terminal")
+    item.status = RecordingStatus.COMPLETED
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    mattermost = AsyncMock()
+    mattermost.send_dm.side_effect = [
+        MattermostError("timeout after acceptance"),
+        MattermostPost(channel_id="dm", post_id="post", thread_id="post"),
+    ]
+    service = ReviewService(mattermost, Settings(intent_claim_ttl_seconds=60))
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        assert loaded is not None
+        with pytest.raises(MattermostError, match="timeout after acceptance"):
+            await service.deliver_terminal(session, loaded, owner)
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        assert loaded is not None
+        loaded.terminal_notification_claimed_at = datetime.now(UTC) - timedelta(seconds=61)
+        await session.commit()
+        delivered = await service.deliver_terminal(session, loaded, owner)
+    await engine.dispose()
+
+    assert delivered is True
+    assert mattermost.send_dm.await_count == 2
+    assert (
+        mattermost.send_dm.await_args_list[0].kwargs["pending_post_id"]
+        == mattermost.send_dm.await_args_list[1].kwargs["pending_post_id"]
+    )
+
+
+@pytest.mark.anyio
+async def test_stale_review_notification_reclaims_same_token_and_pending_post_id() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "mm-user"
+    item = found("stale-review")
+    item.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    item.manual_review_reason = "multiple_candidates"
+    item.manual_review_candidates = [{"name": "Candidate"}]
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    mattermost = AsyncMock()
+    mattermost.send_dm.side_effect = [
+        MattermostError("timeout after acceptance"),
+        MattermostPost(channel_id="dm", post_id="post", thread_id="post"),
+    ]
+    settings = Settings(openclaw_secret="test-secret", intent_claim_ttl_seconds=60)
+    service = ReviewService(mattermost, settings)
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        assert loaded is not None
+        with pytest.raises(MattermostError, match="timeout after acceptance"):
+            await service.issue_review(session, loaded, owner)
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        review = await session.scalar(
+            select(ManualReview).where(ManualReview.recording_id == recording_id)
+        )
+        assert loaded is not None
+        assert review is not None
+        loaded.review_notification_claimed_at = datetime.now(UTC) - timedelta(seconds=61)
+        await session.commit()
+        await service.issue_review(session, loaded, owner)
+    await engine.dispose()
+
+    assert mattermost.send_dm.await_count == 2
+    assert (
+        mattermost.send_dm.await_args_list[0].args[1]
+        == mattermost.send_dm.await_args_list[1].args[1]
+    )
+    assert (
+        mattermost.send_dm.await_args_list[0].kwargs["pending_post_id"]
+        == mattermost.send_dm.await_args_list[1].kwargs["pending_post_id"]
+    )
 
 
 @pytest.mark.anyio

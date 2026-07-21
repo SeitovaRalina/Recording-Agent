@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -66,25 +66,35 @@ class ReviewService:
         if not recruiter.mattermost_user_id:
             raise ReviewRejectedError("Recruiter has no Mattermost DM mapping")
         self._enforce_user(recruiter.mattermost_user_id)
+        self._review_token_secret()
         claim = str(uuid.uuid4())
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=self._settings.intent_claim_ttl_seconds)
         claimed = await session.scalar(
             update(Recording)
             .where(
                 Recording.id == recording.id,
-                Recording.review_notification_claim.is_(None),
+                or_(
+                    Recording.review_notification_claim.is_(None),
+                    Recording.review_notification_claimed_at <= stale_before,
+                ),
             )
             .values(
                 review_notification_claim=claim,
-                review_notification_claimed_at=datetime.now(UTC),
+                review_notification_claimed_at=now,
             )
             .returning(Recording.id)
+            .execution_options(synchronize_session=False)
         )
         await session.commit()
         if claimed is None:
             if existing is not None:
                 return existing
             raise ReviewRejectedError("Review notification is already claimed")
-        token = secrets.token_urlsafe(32)
+        review_id = existing.id if existing is not None else uuid.uuid4()
+        delivery_nonce = existing.delivery_nonce if existing is not None else None
+        delivery_nonce = delivery_nonce or secrets.token_urlsafe(16)
+        token = self._derive_review_token(review_id, delivery_nonce, recording.version)
         choices = (recording.manual_review_candidates or [])[:10]
         rendered = "\n".join(
             f"{index}. {str(choice.get('name') or choice.get('event_summary') or 'option')[:160]}"
@@ -95,6 +105,7 @@ class ReviewService:
             f"Reply with a choice or skip. Token: {token}"
         )
         review = existing or ManualReview(
+            id=review_id,
             recording_id=recording.id,
             question_type=recording.manual_review_reason or "manual_review",
             question_context={"choices": choices},
@@ -106,11 +117,16 @@ class ReviewService:
             seconds=self._settings.review_token_ttl_seconds
         )
         review.delivery_claim = claim
+        review.delivery_nonce = delivery_nonce
         review.delivery_claimed_at = datetime.now(UTC)
         if existing is None:
             session.add(review)
         await session.commit()
-        post = await self._mattermost.send_dm(recruiter.mattermost_user_id, message)
+        post = await self._mattermost.send_dm(
+            recruiter.mattermost_user_id,
+            message,
+            pending_post_id=self._pending_post_id("review", review.id),
+        )
         review.mattermost_post_id = post.post_id
         review.mattermost_channel_id = post.channel_id
         review.mattermost_thread_id = post.thread_id
@@ -173,7 +189,11 @@ class ReviewService:
                 f"{filename}; step={recording.error_step or 'unknown'}; "
                 f"error={(recording.error_message or 'unknown')[:300]}"
             )
-        await self._mattermost.send_dm(recruiter.mattermost_user_id, message)
+        await self._mattermost.send_dm(
+            recruiter.mattermost_user_id,
+            message,
+            pending_post_id=self._pending_post_id("terminal", recording.id, recording.version),
+        )
 
     async def deliver_terminal(
         self,
@@ -182,18 +202,24 @@ class ReviewService:
         recruiter: RecruiterConfig,
     ) -> bool:
         claim = str(uuid.uuid4())
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=self._settings.intent_claim_ttl_seconds)
         claimed = await session.scalar(
             update(Recording)
             .where(
                 Recording.id == recording.id,
                 Recording.terminal_notified_at.is_(None),
-                Recording.terminal_notification_claim.is_(None),
+                or_(
+                    Recording.terminal_notification_claim.is_(None),
+                    Recording.terminal_notification_claimed_at <= stale_before,
+                ),
             )
             .values(
                 terminal_notification_claim=claim,
-                terminal_notification_claimed_at=datetime.now(UTC),
+                terminal_notification_claimed_at=now,
             )
             .returning(Recording.id)
+            .execution_options(synchronize_session=False)
         )
         await session.commit()
         if claimed is None:
@@ -421,3 +447,20 @@ class ReviewService:
     @staticmethod
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
+
+    def _review_token_secret(self) -> bytes:
+        secret = self._settings.openclaw_secret.get_secret_value()
+        if not secret:
+            raise ReviewRejectedError("OpenClaw secret is required for review token delivery")
+        return secret.encode()
+
+    def _derive_review_token(
+        self, review_id: uuid.UUID, delivery_nonce: str, recording_version: int
+    ) -> str:
+        payload = f"{review_id}:{delivery_nonce}:{recording_version}".encode()
+        return hmac.new(self._review_token_secret(), payload, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _pending_post_id(kind: str, entity_id: uuid.UUID, version: int | None = None) -> str:
+        payload = f"recording-agent:{kind}:{entity_id}:{version or 0}"
+        return f"{hashlib.sha256(payload.encode()).hexdigest()[:26]}:0"

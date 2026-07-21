@@ -30,6 +30,7 @@ def upgrade() -> None:
     op.add_column(
         "recordings", sa.Column("review_notification_claimed_at", sa.DateTime(timezone=True))
     )
+    op.add_column("manual_reviews", sa.Column("delivery_nonce", sa.Text()))
     op.add_column("manual_reviews", sa.Column("delivery_claim", sa.Text()))
     op.add_column("manual_reviews", sa.Column("delivery_claimed_at", sa.DateTime(timezone=True)))
     op.add_column("manual_reviews", sa.Column("delivery_sent_at", sa.DateTime(timezone=True)))
@@ -40,6 +41,7 @@ def downgrade() -> None:
         "delivery_sent_at",
         "delivery_claimed_at",
         "delivery_claim",
+        "delivery_nonce",
     ):
         op.drop_column("manual_reviews", column)
     for column in (
