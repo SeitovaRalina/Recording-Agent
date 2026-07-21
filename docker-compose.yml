@@ -1,18 +1,24 @@
+name: recording-agent-test
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB:-recording_agent_test}
+      POSTGRES_USER: ${POSTGRES_USER:-recording_agent}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
       - recording-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-recording_agent} -d ${POSTGRES_DB:-recording_agent_test}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -23,8 +29,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     command: server /data --console-address :9001
     volumes:
       - miniodata:/data
@@ -36,14 +42,31 @@ services:
       timeout: 5s
       retries: 5
 
+  minio-init:
+    image: minio/mc:latest
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-recording-agent-test}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - >-
+        mc alias set canary http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
+        mc mb --ignore-existing "canary/$${MINIO_BUCKET}"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - recording-net
+    restart: "no"
+
   migrate:
     build:
       context: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-recording_agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-recording_agent_test}
     command: poetry run alembic upgrade head
-    volumes:
-      - .:/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,12 +77,50 @@ services:
     build:
       context: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      APP_ENVIRONMENT: test
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-recording_agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-recording_agent_test}
+      TEST_MODE_ENABLED: "true"
+      SCHEDULER_ENABLED: "false"
+      YANDEX_SOURCE_MUTATION_ENABLED: "false"
+      NOTION_WRITES_ENABLED: ${NOTION_WRITES_ENABLED:-false}
+      TEST_RECRUITER_ALLOWLIST: ${TEST_RECRUITER_ALLOWLIST:-[]}
+      TEST_NOTION_DATABASE_ALLOWLIST: ${TEST_NOTION_DATABASE_ALLOWLIST:-[]}
+      TEST_MATTERMOST_USER_ALLOWLIST: ${TEST_MATTERMOST_USER_ALLOWLIST:-[]}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET}
+      YANDEX_REFRESH_TOKENS: ${YANDEX_REFRESH_TOKENS:-{}}
+      YANDEX_CALDAV_PASSWORDS: ${YANDEX_CALDAV_PASSWORDS:-{}}
+      CALDAV_BASE_URL: ${CALDAV_BASE_URL:-https://caldav.yandex.ru}
+      SCAN_HOUR: ${SCAN_HOUR:-2}
+      SCAN_MINUTE: ${SCAN_MINUTE:-0}
+      SCAN_IGNORE_BEFORE_TODAY: ${SCAN_IGNORE_BEFORE_TODAY:-true}
+      SCAN_LOCAL_TIMEZONE: ${SCAN_LOCAL_TIMEZONE:-Asia/Omsk}
+      RECORDING_FILENAME_TIMEZONE: ${RECORDING_FILENAME_TIMEZONE:-Europe/Moscow}
+      NOTION_TOKEN: ${NOTION_TOKEN}
+      NOTION_NAME_PROP: ${NOTION_NAME_PROP:-Name}
+      NOTION_DATE_PROP: ${NOTION_DATE_PROP:-General Interview Date}
+      NOTION_RECORDING_PROP: ${NOTION_RECORDING_PROP:-General Interview recording}
+      NOTION_PROJECT_PROP: ${NOTION_PROJECT_PROP:-Spot Client}
+      NOTION_INTERVIEW_TYPE: ${NOTION_INTERVIEW_TYPE:-general_interview}
+      STORAGE_PROVIDER: minio
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-recording-agent-test}
+      MINIO_TEST_PREFIX: ${MINIO_TEST_PREFIX:-test-interviews}
+      MATTERMOST_URL: ${MATTERMOST_URL}
+      MATTERMOST_BOT_TOKEN: ${MATTERMOST_BOT_TOKEN}
+      MATTERMOST_BOT_USER_ID: ${MATTERMOST_BOT_USER_ID}
+      REVIEW_TOKEN_TTL_SECONDS: ${REVIEW_TOKEN_TTL_SECONDS:-900}
       OPENCLAW_SECRET: ${OPENCLAW_SECRET}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.7}
+      PIPELINE_TRACE_ENABLED: "false"
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "127.0.0.1:${APP_PORT:-18000}:8000"
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -71,7 +132,9 @@ services:
 
 volumes:
   pgdata:
+    name: recording-agent-test-postgres
   miniodata:
+    name: recording-agent-test-minio
 
 networks:
   recording-net:
