@@ -13,7 +13,10 @@ from app.routers.health import router as health_router
 from app.routers.tools import router as tools_router
 from app.scheduler.cron import register_jobs
 from app.services.candidate import CandidateService
+from app.services.cleanup import CleanupService
+from app.services.destinations import DestinationService
 from app.services.matching import InterviewMatcher
+from app.services.non_interview import NonInterviewService
 from app.services.question_queue import QuestionQueueService
 from app.services.reviews import ReviewService
 from app.services.status import StatusService
@@ -24,6 +27,7 @@ from app.tools.calendar import CalDAVClient
 from app.tools.disk import DiskScanner
 from app.tools.mattermost import MattermostClient
 from app.tools.notion import NotionClient
+from app.tools.synology import SynologyBackend
 
 
 @asynccontextmanager
@@ -56,6 +60,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     review_service = ReviewService(mattermost, settings)
     question_queue_service = QuestionQueueService(review_service, mattermost, settings)
+    cleanup_service = CleanupService(disk, settings)
+    destination_service = (
+        DestinationService(storage, settings) if isinstance(storage, SynologyBackend) else None
+    )
+    non_interview_service = (
+        NonInterviewService(session_factory, destination_service, transfer_service)
+        if destination_service is not None
+        else None
+    )
     app.state.notion_client = notion
     app.state.storage_backend = storage
     app.state.candidate_service = candidate_service
@@ -63,6 +76,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.status_service = status_service
     app.state.review_service = review_service
     app.state.question_queue_service = question_queue_service
+    app.state.cleanup_service = cleanup_service
+    app.state.destination_service = destination_service
+    app.state.non_interview_service = non_interview_service
     register_jobs(
         scheduler,
         session_factory,

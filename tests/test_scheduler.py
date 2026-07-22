@@ -443,11 +443,12 @@ def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     scheduler = MagicMock()
     register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
-    assert scheduler.add_job.call_count == 3
-    cleanup_call = scheduler.add_job.call_args_list[1]
-    assert cleanup_call.kwargs["id"] == "cleanup_expired_recordings"
-    assert len(cleanup_call.kwargs["args"]) == 2
-    assert scheduler.add_job.call_args_list[2].kwargs["id"] == "cleanup_stale_transfer_files"
+    assert scheduler.add_job.call_count == 2
+    assert scheduler.add_job.call_args_list[1].kwargs["id"] == "cleanup_stale_transfer_files"
+    assert all(
+        call.kwargs["id"] != "cleanup_expired_recordings"
+        for call in scheduler.add_job.call_args_list
+    )
     get_settings.cache_clear()
 
 
@@ -465,11 +466,10 @@ async def test_real_scheduler_registers_jobs_before_start_with_next_run_logs(
         scan_job = scheduler.get_job("scan_all_recruiters")
         cleanup_job = scheduler.get_job("cleanup_expired_recordings")
         assert scan_job is not None
-        assert cleanup_job is not None
+        assert cleanup_job is None
         assert scan_job.next_run_time is not None
-        assert cleanup_job.next_run_time is not None
         assert "scan_all_recruiters registered:" in caplog.text
-        assert "cleanup_expired_recordings registered:" in caplog.text
+        assert "cleanup_expired_recordings registered:" not in caplog.text
         assert "next_run=None" not in caplog.text
     finally:
         scheduler.shutdown(wait=False)
@@ -482,7 +482,7 @@ async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
     async with app.router.lifespan_context(app):
         assert app.state.scheduler.running is True
         assert app.state.scheduler.get_job("scan_all_recruiters") is not None
-        assert app.state.scheduler.get_job("cleanup_expired_recordings") is not None
+        assert app.state.scheduler.get_job("cleanup_expired_recordings") is None
     get_settings.cache_clear()
 
 

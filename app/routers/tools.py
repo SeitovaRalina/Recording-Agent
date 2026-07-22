@@ -17,12 +17,15 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.routers.events import verify_openclaw_secret
 from app.scheduler.cron import ScanSummary, _resume_transfer_recording, scan_recruiter
 from app.services.canary import enforce_recruiter_scope
+from app.services.cleanup import CleanupRejectedError, CleanupService
+from app.services.destinations import DestinationRejectedError, DestinationService
 from app.services.intents import (
     IntentRejectedError,
     claim_intent,
     complete_intent,
     request_fingerprint,
 )
+from app.services.non_interview import NonInterviewRejectedError, NonInterviewService
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
 from app.services.reviews import ReviewRejectedError, ReviewService
 
@@ -176,6 +179,233 @@ class QuestionBatchResponse(BaseModel):
     accepted: list[QuestionAccepted]
     rejected: list[QuestionRejected]
     pending: list[uuid.UUID]
+
+
+class DestinationItem(BaseModel):
+    id: uuid.UUID
+    display_name: str
+    writable: bool
+
+
+class DestinationListResponse(BaseModel):
+    items: list[DestinationItem]
+    count: int
+
+
+class DestinationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    parent_destination_id: uuid.UUID
+    name: str = Field(min_length=1, max_length=200)
+
+
+class NonInterviewRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    destination_id: uuid.UUID
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class NonInterviewRouteResponse(BaseModel):
+    recording_id: uuid.UUID
+    status: RecordingStatus
+    version: int
+    safe_link: str
+    replayed: bool = False
+
+
+class CleanupPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class CleanupPreviewItem(BaseModel):
+    recording_id: uuid.UUID
+    disk_file_id: str
+    filename: str
+    version: int
+
+
+class CleanupPreviewResponse(BaseModel):
+    preview_id: uuid.UUID
+    snapshot_hash: str
+    capability: str
+    expires_at: str
+    items: list[CleanupPreviewItem]
+
+
+class CleanupConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    capability: SecretStr
+    snapshot_hash: str = Field(min_length=64, max_length=64)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class CleanupResultItem(BaseModel):
+    recording_id: uuid.UUID
+    state: str
+
+
+class CleanupConfirmResponse(BaseModel):
+    preview_id: uuid.UUID
+    items: list[CleanupResultItem]
+
+
+@router.get("/storage/destinations", response_model=DestinationListResponse)
+async def list_storage_destinations(
+    session: Session,
+    request: Request,
+    recruiter_user_id: Annotated[str, Query(min_length=1, max_length=200)],
+    mattermost_dm_channel_id: Annotated[str, Query(min_length=1, max_length=200)],
+) -> DestinationListResponse:
+    recruiter = await _bound_recruiter(session, recruiter_user_id, mattermost_dm_channel_id)
+    service = _destination_service(request)
+    try:
+        rows = await service.discover(session, recruiter)
+    except (DestinationRejectedError, PermissionError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    items = [
+        DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
+        for row in rows
+    ]
+    return DestinationListResponse(items=items, count=len(items))
+
+
+@router.post("/storage/destinations", response_model=DestinationItem)
+async def create_storage_destination(
+    body: DestinationCreateRequest, session: Session, request: Request
+) -> DestinationItem:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    try:
+        row = await _destination_service(request).create(
+            session,
+            recruiter,
+            parent_id=body.parent_destination_id,
+            name=body.name,
+        )
+    except (DestinationRejectedError, PermissionError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
+
+
+@router.post(
+    "/recordings/{recording_id}/route-non-interview",
+    response_model=NonInterviewRouteResponse,
+)
+async def route_non_interview(
+    recording_id: uuid.UUID,
+    body: NonInterviewRouteRequest,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
+) -> NonInterviewRouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    payload = body.model_dump(mode="json") | {"recording_id": str(recording_id)}
+    try:
+        claim = await claim_intent(
+            session,
+            actor=body.recruiter_user_id,
+            operation=f"route-non-interview:{recording_id}",
+            idempotency_key=body.idempotency_key,
+            fingerprint=request_fingerprint(payload),
+            ttl_seconds=settings.intent_claim_ttl_seconds,
+        )
+    except IntentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if claim.completed_response is not None:
+        return NonInterviewRouteResponse.model_validate(
+            claim.completed_response | {"replayed": True}
+        )
+    try:
+        recording = await _non_interview_service(request).route(
+            recording_id=recording_id,
+            recruiter=recruiter,
+            destination_id=body.destination_id,
+            expected_version=body.expected_version,
+        )
+    except NonInterviewRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    response = NonInterviewRouteResponse(
+        recording_id=recording.id,
+        status=recording.status,
+        version=recording.version,
+        safe_link=recording.synology_share_url or "",
+    )
+    await complete_intent(session, claim, response.model_dump(mode="json"))
+    return response
+
+
+@router.post("/cleanup/previews", response_model=CleanupPreviewResponse)
+async def create_cleanup_preview(
+    body: CleanupPreviewRequest, session: Session, request: Request
+) -> CleanupPreviewResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    issued = await _cleanup_service(request).preview(
+        session,
+        recruiter,
+        recruiter_user_id=body.recruiter_user_id,
+        dm_channel_id=body.mattermost_dm_channel_id,
+        limit=body.limit,
+    )
+    items = [
+        CleanupPreviewItem(
+            recording_id=uuid.UUID(str(item["recording_id"])),
+            disk_file_id=str(item["disk_file_id"]),
+            filename=str(item["filename"]),
+            version=int(item["version"]),
+        )
+        for item in issued.preview.snapshot
+    ]
+    return CleanupPreviewResponse(
+        preview_id=issued.preview.id,
+        snapshot_hash=issued.preview.snapshot_hash,
+        capability=issued.capability,
+        expires_at=issued.preview.capability_expires_at.isoformat(),
+        items=items,
+    )
+
+
+@router.post("/cleanup/previews/{preview_id}/confirm", response_model=CleanupConfirmResponse)
+async def confirm_cleanup_preview(
+    preview_id: uuid.UUID,
+    body: CleanupConfirmRequest,
+    session: Session,
+    request: Request,
+) -> CleanupConfirmResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    try:
+        result = await _cleanup_service(request).confirm(
+            session,
+            recruiter,
+            preview_id=preview_id,
+            recruiter_user_id=body.recruiter_user_id,
+            dm_channel_id=body.mattermost_dm_channel_id,
+            capability=body.capability.get_secret_value(),
+            snapshot_hash=body.snapshot_hash,
+            idempotency_key=body.idempotency_key,
+        )
+    except CleanupRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return CleanupConfirmResponse.model_validate(result)
 
 
 @router.post("/scans/trigger", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -515,6 +745,43 @@ def _review_service(request: Request) -> ReviewService:
 
 def _question_queue_service(request: Request) -> QuestionQueueService:
     return cast(QuestionQueueService, request.app.state.question_queue_service)
+
+
+def _destination_service(request: Request) -> DestinationService:
+    service = getattr(request.app.state, "destination_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="Synology destinations are disabled")
+    return cast(DestinationService, service)
+
+
+def _non_interview_service(request: Request) -> NonInterviewService:
+    service = getattr(request.app.state, "non_interview_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="Non-interview routing is disabled")
+    return cast(NonInterviewService, service)
+
+
+def _cleanup_service(request: Request) -> CleanupService:
+    return cast(CleanupService, request.app.state.cleanup_service)
+
+
+async def _bound_recruiter(
+    session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
+) -> RecruiterConfig:
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(
+            RecruiterConfig.mattermost_user_id == recruiter_user_id,
+            RecruiterConfig.mattermost_dm_channel == dm_channel_id,
+            RecruiterConfig.active.is_(True),
+        )
+    )
+    if recruiter is None:
+        raise HTTPException(status_code=404, detail="Active recruiter DM binding not found")
+    try:
+        enforce_recruiter_scope(get_settings(), recruiter)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    return recruiter
 
 
 def _scan_response(

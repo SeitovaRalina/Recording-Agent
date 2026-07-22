@@ -45,6 +45,9 @@ class Recording(Base):
     __tablename__ = "recordings"
     __table_args__ = (
         CheckConstraint(STATUS_CHECK_SQL, name="ck_recordings_status"),
+        CheckConstraint(
+            "route_type IN ('interview', 'non_interview')", name="ck_recordings_route_type"
+        ),
         Index("idx_recordings_status", "status"),
         Index("idx_recordings_disk_owner", "disk_owner_email"),
         Index(
@@ -75,6 +78,7 @@ class Recording(Base):
         RecordingStatus.MANUAL_REVIEW_REQUIRED: {
             RecordingStatus.CALENDAR_EVENT_FOUND,
             RecordingStatus.CANDIDATE_MATCHED,
+            RecordingStatus.TRANSFER_STARTED,
             RecordingStatus.IGNORED,
             RecordingStatus.FAILED,
         },
@@ -89,6 +93,7 @@ class Recording(Base):
         },
         RecordingStatus.SYNOLOGY_LINK_CREATED: {
             RecordingStatus.NOTION_UPDATED,
+            RecordingStatus.COMPLETED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.NOTION_UPDATED: {
@@ -171,6 +176,15 @@ class Recording(Base):
     deleted_from_disk_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disk_deletable_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_processed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    route_type: Mapped[str] = mapped_column(
+        Text, nullable=False, default="interview", server_default="interview"
+    )
+    storage_destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("storage_destinations.id", ondelete="SET NULL")
+    )
+    storage_is_durable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
 

@@ -498,6 +498,7 @@ async def _run_transfer_recording(
             recording,
             RecordingStatus.SYNOLOGY_LINK_CREATED,
             synology_share_url=share_url,
+            storage_is_durable=settings.storage_provider == "synology",
         )
         await session.commit()
         trace(
@@ -602,12 +603,15 @@ async def _resume_committed_transfer_steps(
     settings: Settings,
 ) -> None:
     required = {
-        "candidate_name": recording.candidate_name,
-        "notion_page_id": recording.notion_page_id,
         "generated_filename": recording.generated_filename,
         "storage_key": recording.storage_key,
         "content_identity": recording.content_identity,
     }
+    if recording.route_type == "interview":
+        required |= {
+            "candidate_name": recording.candidate_name,
+            "notion_page_id": recording.notion_page_id,
+        }
     missing = [name for name, value in required.items() if not value]
     if missing:
         await status.advance(
@@ -686,6 +690,16 @@ async def _resume_committed_transfer_steps(
         await session.commit()
 
     if recording.status == RecordingStatus.SYNOLOGY_LINK_CREATED:
+        if recording.route_type == "non_interview":
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.COMPLETED,
+                storage_is_durable=True,
+                completed_at=datetime.now(UTC),
+            )
+            await session.commit()
+            return
         try:
             require_notion_preflight(settings, recruiter)
         except PermissionError as error:
@@ -1182,28 +1196,6 @@ def register_jobs(
         settings.scan_hour,
         settings.scan_minute,
         _next_run_time(scan_trigger).isoformat(),
-    )
-    if not settings.yandex_source_mutation_enabled:
-        return
-    cleanup_trigger = CronTrigger(
-        hour=settings.disk_cleanup_hour,
-        minute=settings.disk_cleanup_minute,
-        timezone=UTC,
-    )
-    scheduler.add_job(
-        cleanup_expired_recordings,
-        cleanup_trigger,
-        args=[session_factory, disk],
-        max_instances=1,
-        misfire_grace_time=3600,
-        id="cleanup_expired_recordings",
-        replace_existing=True,
-    )
-    logger.info(
-        "cleanup_expired_recordings registered: hour=%d minute=%d next_run=%s",
-        settings.disk_cleanup_hour,
-        settings.disk_cleanup_minute,
-        _next_run_time(cleanup_trigger).isoformat(),
     )
     scheduler.add_job(
         cleanup_stale_temp_files,

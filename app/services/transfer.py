@@ -53,13 +53,13 @@ class TransferService:
         session: AsyncSession,
     ) -> TransferResult:
         del session
-        if recording.calendar_dtstart is None:
-            raise TransferError("destination", ValueError("calendar start is missing"))
         if recording.storage_key and recording.generated_filename:
             folder, _, filename = recording.storage_key.rpartition("/")
             if not folder or filename != recording.generated_filename:
                 raise TransferError("destination", ValueError("persisted storage key is invalid"))
         else:
+            if recording.calendar_dtstart is None:
+                raise TransferError("destination", ValueError("calendar start is missing"))
             safe_name = re.sub(r'[/\\:*?"<>|]', "_", candidate_name)
             folder = (
                 f"{recruiter.synology_base_folder.rstrip('/')}/"

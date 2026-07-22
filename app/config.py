@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     test_mode_enabled: bool = False
     scheduler_enabled: bool = True
     yandex_source_mutation_enabled: bool = True
+    cleanup_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    cleanup_preview_max_items: int = Field(default=50, ge=1, le=100)
     notion_writes_enabled: bool = True
     test_recruiter_allowlist: set[str] = Field(default_factory=set)
     test_notion_database_allowlist: set[str] = Field(default_factory=set)
@@ -85,6 +87,9 @@ class Settings(BaseSettings):
     minio_bucket: str = "recordings"
     minio_test_prefix: str = "test-interviews"
     storage_provider: Literal["minio", "synology"] = "minio"
+    synology_discovery_max_depth: int = Field(default=3, ge=0, le=8)
+    synology_discovery_max_pages: int = Field(default=10, ge=1, le=50)
+    synology_discovery_max_results: int = Field(default=100, ge=1, le=500)
     openclaw_events_url: str = "http://localhost:8001/events"
     openclaw_secret: SecretStr = SecretStr("")
     confidence_threshold: float = Field(
