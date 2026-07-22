@@ -49,6 +49,51 @@ class ReviewService:
         self._mattermost = mattermost
         self._settings = settings
 
+    def capability_token(self, review: ManualReview) -> str:
+        if not review.delivery_nonce:
+            raise ReviewRejectedError("Question capability is not initialized")
+        return self._derive_review_token(review.id, review.delivery_nonce, review.recording_version)
+
+    async def enqueue_review(
+        self,
+        session: AsyncSession,
+        recording: Recording,
+        recruiter: RecruiterConfig,
+    ) -> ManualReview:
+        """Create a durable DM-bound question without sending an individual post."""
+        existing = await session.scalar(
+            select(ManualReview).where(
+                ManualReview.recording_id == recording.id,
+                ManualReview.status == ManualReviewStatus.PENDING,
+            )
+        )
+        if existing is not None:
+            return existing
+        if not recruiter.mattermost_user_id or not recruiter.mattermost_dm_channel:
+            raise ReviewRejectedError("Recruiter has no exact Mattermost DM mapping")
+        self._enforce_user(recruiter.mattermost_user_id)
+        await self._mattermost.validate_direct_channel(
+            recruiter.mattermost_user_id, recruiter.mattermost_dm_channel
+        )
+        review = ManualReview(
+            id=uuid.uuid4(),
+            recording_id=recording.id,
+            question_type=recording.manual_review_reason or "manual_review",
+            question_context={"choices": (recording.manual_review_candidates or [])[:10]},
+            recruiter_user_id=recruiter.mattermost_user_id,
+            mattermost_channel_id=recruiter.mattermost_dm_channel,
+            recording_version=recording.version,
+            delivery_nonce=secrets.token_urlsafe(16),
+        )
+        token = self.capability_token(review)
+        review.token_hash = self._hash_token(token)
+        review.token_expires_at = datetime.now(UTC) + timedelta(
+            seconds=self._settings.review_token_ttl_seconds
+        )
+        session.add(review)
+        await session.flush()
+        return review
+
     async def issue_review(
         self,
         session: AsyncSession,
@@ -258,6 +303,7 @@ class ReviewService:
         expected_version: int,
         idempotency_key: str,
         choice: int | None = None,
+        bind_dm: bool = False,
     ) -> ReviewMutation:
         operation = f"review:{review_id}:{action}"
         fingerprint = self._request_fingerprint(
@@ -268,6 +314,7 @@ class ReviewService:
             token=token,
             expected_version=expected_version,
             choice=choice,
+            bind_dm=bind_dm,
         )
         review = await session.scalar(
             select(ManualReview)
@@ -292,7 +339,14 @@ class ReviewService:
         replay = await self._find_replay(session, recruiter_user_id, operation, idempotency_key)
         if replay is not None:
             return self._mutation_from_replay(replay, fingerprint)
-        self._validate_binding(review, recruiter_user_id, thread_id, token, expected_version)
+        self._validate_binding(
+            review,
+            recruiter_user_id,
+            thread_id,
+            token,
+            expected_version,
+            bind_dm=bind_dm,
+        )
         recording = review.recording
         now = datetime.now(UTC)
         if action == "ignore":
@@ -338,7 +392,9 @@ class ReviewService:
             else:
                 raise ReviewRejectedError("Selected review option cannot resume the pipeline")
         recording.version += 1
-        review.status = ManualReviewStatus.RESOLVED
+        review.status = ManualReviewStatus.PROCESSING
+        review.answered_at = now
+        review.processing_at = now
         review.resolved_at = now
         review.token_consumed_at = now
         result = ReviewMutation(review.id, recording.id, recording.status.value, recording.version)
@@ -392,13 +448,18 @@ class ReviewService:
         thread_id: str,
         token: str,
         expected_version: int,
+        *,
+        bind_dm: bool = False,
     ) -> None:
         self._enforce_user(recruiter_user_id)
         if review.status != ManualReviewStatus.PENDING or review.token_consumed_at is not None:
             raise ReviewRejectedError("Review token is already consumed")
         if review.recruiter_user_id != recruiter_user_id:
             raise ReviewRejectedError("Review belongs to another recruiter")
-        if review.mattermost_thread_id != thread_id:
+        if bind_dm:
+            if review.mattermost_channel_id != thread_id:
+                raise ReviewRejectedError("Question belongs to another Mattermost DM")
+        elif review.mattermost_thread_id != thread_id:
             raise ReviewRejectedError("Review belongs to another Mattermost thread")
         expires = review.token_expires_at
         if expires is None:
@@ -406,7 +467,8 @@ class ReviewService:
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
         if expires <= datetime.now(UTC):
-            review.status = ManualReviewStatus.EXPIRED
+            review.status = ManualReviewStatus.SUPPRESSED
+            review.suppressed_at = datetime.now(UTC)
             raise ReviewRejectedError("Review token has expired")
         if (
             review.recording.version != expected_version

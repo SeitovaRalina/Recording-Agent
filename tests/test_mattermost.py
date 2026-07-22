@@ -104,3 +104,21 @@ async def test_mattermost_preflight_validates_user_without_sending_message() -> 
         )
 
     assert route.call_count == 1
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_mattermost_validates_exact_direct_channel_membership() -> None:
+    respx.get("https://mm.test/api/v4/channels/dm").mock(
+        return_value=httpx.Response(200, json={"id": "dm", "type": "D"})
+    )
+    respx.get("https://mm.test/api/v4/channels/dm/members?page=0&per_page=3").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"user_id": "bot"}, {"user_id": "recruiter"}],
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        await MattermostClient(
+            "https://mm.test", SecretStr("secret"), "bot", http
+        ).validate_direct_channel("recruiter", "dm")

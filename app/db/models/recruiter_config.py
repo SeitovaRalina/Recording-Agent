@@ -19,6 +19,7 @@ class RecruiterConfig(Base):
     synology_base_folder: Mapped[str] = mapped_column(Text, nullable=False)
     mattermost_user_id: Mapped[str | None] = mapped_column(Text)
     mattermost_dm_channel: Mapped[str | None] = mapped_column(Text)
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC", server_default="UTC")
     notion_preflight_token_hash: Mapped[str | None] = mapped_column(Text)
     notion_preflight_database_id: Mapped[str | None] = mapped_column(Text)
     notion_preflight_schema_hash: Mapped[str | None] = mapped_column(Text)

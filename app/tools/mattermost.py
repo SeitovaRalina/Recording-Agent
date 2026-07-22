@@ -43,12 +43,27 @@ class MattermostClient:
         if payload.get("id") != recruiter_user_id:
             raise MattermostError("Mattermost recruiter mapping response is malformed")
 
+    async def validate_direct_channel(self, recruiter_user_id: str, channel_id: str) -> None:
+        """Fail closed unless a channel is a DM containing exactly bot and recruiter."""
+        if not self._base_url or not self._bot_user_id or not recruiter_user_id or not channel_id:
+            raise MattermostError("Mattermost DM configuration is incomplete")
+        channel = await self._json_request("GET", f"/api/v4/channels/{channel_id}")
+        if channel.get("id") != channel_id or channel.get("type") != "D":
+            raise MattermostError("Mattermost channel is not a direct channel")
+        members = await self._list_request(
+            "GET", f"/api/v4/channels/{channel_id}/members?page=0&per_page=3"
+        )
+        member_ids = {member.get("user_id") for member in members if isinstance(member, dict)}
+        if member_ids != {self._bot_user_id, recruiter_user_id} or len(members) != 2:
+            raise MattermostError("Mattermost direct-channel membership is not exact")
+
     async def send_dm(
         self,
         recruiter_user_id: str,
         message: str,
         root_id: str = "",
         pending_post_id: str = "",
+        expected_channel_id: str = "",
     ) -> MattermostPost:
         if not self._base_url or not self._bot_user_id or not recruiter_user_id:
             raise MattermostError("Mattermost DM configuration is incomplete")
@@ -60,6 +75,8 @@ class MattermostClient:
         channel_id = channel_payload.get("id")
         if not isinstance(channel_id, str) or not channel_id:
             raise MattermostError("Mattermost direct-channel response is malformed")
+        if expected_channel_id and channel_id != expected_channel_id:
+            raise MattermostError("Mattermost direct-channel binding changed")
         if pending_post_id:
             existing = await self._find_pending_post(channel_id, pending_post_id)
             if existing is not None:
@@ -118,5 +135,22 @@ class MattermostClient:
         except ValueError:
             raise MattermostError("Mattermost response is not valid JSON") from None
         if not isinstance(payload, dict):
+            raise MattermostError("Mattermost response is malformed")
+        return payload
+
+    async def _list_request(self, method: str, path: str) -> list[Any]:
+        try:
+            response = await self._client.request(
+                method, f"{self._base_url}{path}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise MattermostError("Mattermost request transport failed") from None
+        if response.is_error:
+            raise MattermostError(f"Mattermost request failed with HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise MattermostError("Mattermost response is not valid JSON") from None
+        if not isinstance(payload, list):
             raise MattermostError("Mattermost response is malformed")
         return payload

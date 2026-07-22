@@ -14,6 +14,7 @@ from app.routers.tools import router as tools_router
 from app.scheduler.cron import register_jobs
 from app.services.candidate import CandidateService
 from app.services.matching import InterviewMatcher
+from app.services.question_queue import QuestionQueueService
 from app.services.reviews import ReviewService
 from app.services.status import StatusService
 from app.services.storage import StorageFactory
@@ -54,12 +55,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         http_client,
     )
     review_service = ReviewService(mattermost, settings)
+    question_queue_service = QuestionQueueService(review_service, mattermost, settings)
     app.state.notion_client = notion
     app.state.storage_backend = storage
     app.state.candidate_service = candidate_service
     app.state.transfer_service = transfer_service
     app.state.status_service = status_service
     app.state.review_service = review_service
+    app.state.question_queue_service = question_queue_service
     register_jobs(
         scheduler,
         session_factory,

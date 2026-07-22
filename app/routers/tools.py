@@ -23,6 +23,7 @@ from app.services.intents import (
     complete_intent,
     request_fingerprint,
 )
+from app.services.question_queue import QuestionAnswer, QuestionQueueService
 from app.services.reviews import ReviewRejectedError, ReviewService
 
 router = APIRouter(
@@ -120,6 +121,61 @@ class ReviewMutationResponse(BaseModel):
     status: str
     version: int
     replayed: bool
+
+
+class QuestionItem(BaseModel):
+    question_id: uuid.UUID
+    question_set_id: uuid.UUID
+    recording_id: uuid.UUID
+    recording_version: int
+    filename: str
+    reason: str
+    choices: list[dict[str, object]]
+    expires_at: str
+
+
+class QuestionListResponse(BaseModel):
+    items: list[QuestionItem]
+    count: int
+
+
+class QuestionActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: uuid.UUID
+    question_set_id: uuid.UUID
+    action: Literal["resolve", "ignore"]
+    capability: SecretStr
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    choice: int | None = Field(default=None, ge=1, le=10)
+
+
+class QuestionBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    actions: list[QuestionActionRequest] = Field(min_length=1, max_length=50)
+
+
+class QuestionAccepted(BaseModel):
+    question_id: uuid.UUID
+    recording_id: uuid.UUID
+    status: str
+    version: int
+    replayed: bool
+
+
+class QuestionRejected(BaseModel):
+    question_id: uuid.UUID
+    reason: str
+
+
+class QuestionBatchResponse(BaseModel):
+    accepted: list[QuestionAccepted]
+    rejected: list[QuestionRejected]
+    pending: list[uuid.UUID]
 
 
 @router.post("/scans/trigger", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -294,6 +350,86 @@ async def review_context(
     )
 
 
+@router.get("/questions", response_model=QuestionListResponse)
+async def list_questions(
+    session: Session,
+    request: Request,
+    recruiter_user_id: Annotated[str, Query(min_length=1, max_length=200)],
+    mattermost_dm_channel_id: Annotated[str, Query(min_length=1, max_length=200)],
+    question_set_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 50,
+) -> QuestionListResponse:
+    try:
+        rows = await _question_queue_service(request).list_active(
+            session,
+            recruiter_user_id=recruiter_user_id,
+            dm_channel_id=mattermost_dm_channel_id,
+            question_set_id=question_set_id,
+            limit=limit,
+        )
+    except ReviewRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    items = [
+        QuestionItem(
+            question_id=row.id,
+            question_set_id=row.question_set_id,
+            recording_id=row.recording_id,
+            recording_version=row.recording_version,
+            filename=row.recording.disk_filename,
+            reason=row.question_type,
+            choices=cast(list[dict[str, object]], row.question_context.get("choices", [])),
+            expires_at=row.token_expires_at.isoformat() if row.token_expires_at else "",
+        )
+        for row in rows
+    ]
+    return QuestionListResponse(items=items, count=len(items))
+
+
+@router.post("/questions/answer", response_model=QuestionBatchResponse)
+async def answer_questions(
+    body: QuestionBatchRequest, session: Session, request: Request
+) -> QuestionBatchResponse:
+    answers = tuple(
+        QuestionAnswer(
+            question_id=item.question_id,
+            question_set_id=item.question_set_id,
+            action=item.action,
+            token=item.capability.get_secret_value(),
+            expected_version=item.expected_version,
+            idempotency_key=item.idempotency_key,
+            choice=item.choice,
+        )
+        for item in body.actions
+    )
+    try:
+        result = await _question_queue_service(request).apply_partial(
+            session,
+            recruiter_user_id=body.recruiter_user_id,
+            dm_channel_id=body.mattermost_dm_channel_id,
+            answers=answers,
+        )
+        await session.commit()
+    except ReviewRejectedError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return QuestionBatchResponse(
+        accepted=[
+            QuestionAccepted(
+                question_id=item.review_id,
+                recording_id=item.recording_id,
+                status=item.status,
+                version=item.version,
+                replayed=item.replayed,
+            )
+            for item in result.accepted
+        ],
+        rejected=[
+            QuestionRejected(question_id=item[0], reason=item[1]) for item in result.rejected
+        ],
+        pending=list(result.pending),
+    )
+
+
 @router.post("/reviews/{review_id}/resolve", response_model=ReviewMutationResponse)
 async def resolve_review(
     review_id: uuid.UUID, body: ReviewResolveRequest, session: Session, request: Request
@@ -375,6 +511,10 @@ async def _mutate_review(
 
 def _review_service(request: Request) -> ReviewService:
     return cast(ReviewService, request.app.state.review_service)
+
+
+def _question_queue_service(request: Request) -> QuestionQueueService:
+    return cast(QuestionQueueService, request.app.state.question_queue_service)
 
 
 def _scan_response(
