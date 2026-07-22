@@ -45,6 +45,7 @@ async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
                     "Name": {"type": "title"},
                     "General Interview Date": {"type": "date"},
                     "General Interview recording": {"type": "files"},
+                    "TBD": {"type": "formula"},
                     "📍 Spots": {"type": "relation"},
                 },
             },

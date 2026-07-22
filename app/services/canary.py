@@ -44,7 +44,8 @@ def notion_schema_hash(settings: Settings) -> str:
         settings.notion_name_prop: "title",
         settings.notion_date_prop: "date",
         settings.notion_recording_prop: "files",
-        settings.notion_project_prop: settings.notion_project_prop_type,
+        settings.notion_contacts_prop: "formula",
+        settings.notion_project_prop: "relation",
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

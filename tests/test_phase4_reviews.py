@@ -38,7 +38,9 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
                     "id": "page-id",
                     "name": "Candidate",
                     "url": "https://notion.test/page",
-                    "project_or_spot": "",
+                    "project_or_spot": "Backend",
+                    "spot_id": "spot-id",
+                    "spot_url": "https://notion.test/spot",
                 }
             ]
         },
@@ -86,7 +88,17 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
     )
     assert first.status == RecordingStatus.CANDIDATE_MATCHED
     assert recording.notion_page_id == "page-id"
-    assert recording.project_or_spot == ""
+    assert recording.project_or_spot == "Backend"
+    assert review.result == {
+        "selected_choice": {
+            "id": "page-id",
+            "name": "Candidate",
+            "url": "https://notion.test/page",
+            "project_or_spot": "Backend",
+            "spot_id": "spot-id",
+            "spot_url": "https://notion.test/spot",
+        }
+    }
     assert replay.replayed is True
     assert replay.version == 4
 

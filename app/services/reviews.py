@@ -146,6 +146,15 @@ class ReviewService:
             details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
+            if choice.get("spot_url"):
+                details.append(f"Spot: {str(choice['spot_url'])[:500]}")
+            if choice.get("general_interview_date"):
+                details.append(f"Date: {str(choice['general_interview_date'])[:32]}")
+            emails = choice.get("candidate_emails")
+            if isinstance(emails, list):
+                safe_emails = [str(email)[:320] for email in emails[:3] if isinstance(email, str)]
+                if safe_emails:
+                    details.append(f"Contacts: {', '.join(safe_emails)}")
             if choice.get("url"):
                 details.append(str(choice["url"])[:500])
             rendered_choices.append(f"{index}. " + " — ".join(details))
@@ -372,6 +381,7 @@ class ReviewService:
                 recording.transition_to(RecordingStatus.CANDIDATE_MATCHED)
                 review.parsed_action = "select_card"
                 review.resolved_notion_page_id = recording.notion_page_id
+                review.result = {"selected_choice": dict(selected)}
             elif isinstance(selected.get("event_uid"), str):
                 start = selected.get("event_start_utc")
                 if not isinstance(start, str):

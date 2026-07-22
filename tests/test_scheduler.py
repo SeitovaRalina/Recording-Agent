@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -159,7 +159,7 @@ async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate()
             dtend_utc=start + timedelta(hours=1),
             description="https://calink.ru/recruiter/interview/123",
             organizer_email="recruiter@example.com",
-            attendees=[],
+            attendees=["candidate@example.com"],
             raw_ics="raw",
             calendar_id=calendar_id,
             calendar_url="https://caldav.test/interviews/",
@@ -181,6 +181,7 @@ async def test_resume_persists_unique_calendar_provenance_and_exact_title_gate()
     assert loaded.status == RecordingStatus.CALENDAR_EVENT_FOUND
     assert loaded.matched_calendar_id == calendar_id
     assert loaded.matched_calendar_url == "https://caldav.test/interviews/"
+    assert loaded.candidate_email == "candidate@example.com"
     assert loaded.manual_review_reason is None
     assert loaded.last_attempted_at is not None
 
@@ -549,11 +550,13 @@ async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed(
         "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm"
     )
     assert loaded.synology_share_url == "https://share/video"
-    notion.update_page_file.assert_awaited_once_with(
+    notion.update_page_interview.assert_awaited_once_with(
         "page",
-        Settings().notion_recording_prop,
-        "https://share/video",
-        "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm",
+        date_prop=Settings().notion_date_prop,
+        recording_prop=Settings().notion_recording_prop,
+        event_date=date(2026, 7, 16),
+        url="https://share/video",
+        filename="2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm",
     )
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
 
@@ -689,7 +692,7 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     assert loaded.status == RecordingStatus.COMPLETED
     assert transfer.transfer.await_count == transfer_calls
     assert transfer.create_share_link.await_count == share_calls
-    assert notion.update_page_file.await_count == notion_calls
+    assert notion.update_page_interview.await_count == notion_calls
     candidate.find_and_match.assert_not_awaited()
 
 
@@ -846,6 +849,9 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
         {
             "name": "Candidate",
             "project_or_spot": "Backend Spot",
+            "spot_url": "https://notion.example/spot",
+            "general_interview_date": "2026-07-16",
+            "candidate_emails": ["candidate@example.com"],
             "url": "https://notion.example/card",
         }
     ]
@@ -861,6 +867,9 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
     async def send_dm(_user_id: str, _message: str, **_kwargs: object) -> object:
         nonlocal durable_claim_seen
         assert "📍 Spots: Backend Spot" in _message
+        assert "Spot: https://notion.example/spot" in _message
+        assert "Date: 2026-07-16" in _message
+        assert "Contacts: candidate@example.com" in _message
         assert "https://notion.example/card" in _message
         async with factory() as check_session:
             claimed = await check_session.get(Recording, item.id)

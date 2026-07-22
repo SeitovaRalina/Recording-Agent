@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     notion_name_prop: str = "Name"
     notion_date_prop: str = "General Interview Date"
     notion_recording_prop: str = "General Interview recording"
+    notion_contacts_prop: str = "TBD"
     notion_project_prop: str = "📍 Spots"
     notion_project_prop_type: Literal["rich_text", "relation"] = "relation"
     notion_interview_type: str = "general_interview"

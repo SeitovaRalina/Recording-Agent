@@ -520,11 +520,17 @@ async def _run_transfer_recording(
             await session.commit()
             return
         try:
-            await notion.update_page_file(
+            if recording.calendar_dtstart is None:
+                raise ValueError("Matched calendar date is missing")
+            await notion.update_page_interview(
                 page.id,
-                settings.notion_recording_prop,
-                share_url,
-                recording.generated_filename or recording.disk_filename,
+                date_prop=settings.notion_date_prop,
+                recording_prop=settings.notion_recording_prop,
+                event_date=recording.calendar_dtstart.astimezone(
+                    ZoneInfo(settings.scan_local_timezone)
+                ).date(),
+                url=share_url,
+                filename=recording.generated_filename or recording.disk_filename,
             )
         except Exception as error:
             await status.advance(
@@ -703,11 +709,17 @@ async def _resume_committed_transfer_steps(
             await session.commit()
             return
         try:
-            await notion.update_page_file(
+            if recording.calendar_dtstart is None:
+                raise ValueError("Matched calendar date is missing")
+            await notion.update_page_interview(
                 cast(str, recording.notion_page_id),
-                settings.notion_recording_prop,
-                recording.synology_share_url,
-                cast(str, recording.generated_filename),
+                date_prop=settings.notion_date_prop,
+                recording_prop=settings.notion_recording_prop,
+                event_date=recording.calendar_dtstart.astimezone(
+                    ZoneInfo(settings.scan_local_timezone)
+                ).date(),
+                url=recording.synology_share_url,
+                filename=cast(str, recording.generated_filename),
             )
         except Exception as error:
             await status.advance(
@@ -987,6 +999,17 @@ async def _apply_match_result(
         )
     else:
         telemost = re.search(r"https://telemost\.360\.yandex\.ru/\S+", event.description)
+        excluded_emails = {
+            recording.disk_owner_email.casefold(),
+            event.organizer_email.casefold(),
+        }
+        candidate_attendees = sorted(
+            {
+                attendee.strip().casefold()
+                for attendee in event.attendees
+                if attendee.strip() and attendee.strip().casefold() not in excluded_emails
+            }
+        )
         updates.update(
             calendar_event_uid=event.uid,
             calendar_event_recurrence_id=event.recurrence_id,
@@ -994,6 +1017,7 @@ async def _apply_match_result(
             calendar_dtstart=event.dtstart_utc,
             calendar_dtend=event.dtend_utc,
             calendar_organizer=event.organizer_email,
+            candidate_email=(candidate_attendees[0] if len(candidate_attendees) == 1 else None),
             calendar_telemost_url=telemost.group(0) if telemost else None,
             calendar_raw_ics=event.raw_ics,
             matched_calendar_id=event.calendar_id,
