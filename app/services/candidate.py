@@ -52,6 +52,7 @@ class CandidateService:
             self._settings.notion_date_prop,
             self._settings.notion_recording_prop,
             self._settings.notion_project_prop,
+            self._settings.notion_project_prop_type,
         )
         if not pages:
             return CandidateMatchResult(reason="no_candidate_found", candidates=[])

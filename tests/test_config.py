@@ -1,4 +1,5 @@
-from pydantic import SecretStr
+import pytest
+from pydantic import SecretStr, ValidationError
 
 from app.config import Settings, get_settings
 
@@ -17,6 +18,8 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert isinstance(settings.notion_token, SecretStr)
     assert isinstance(settings.yandex_client_secret, SecretStr)
     assert settings.storage_provider == "minio"
+    assert settings.notion_project_prop == "📍 Spots"
+    assert settings.notion_project_prop_type == "relation"
     assert settings.confidence_threshold == 0.7
     assert settings.scan_ignore_before_today is True
     assert settings.scan_local_timezone == "Asia/Omsk"
@@ -53,3 +56,15 @@ def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None: 
     assert settings.scan_local_timezone == "UTC"
     assert settings.recording_filename_timezone == "Europe/Berlin"
     assert settings.pipeline_trace_active is True
+
+
+def test_mattermost_delivery_can_be_disabled_only_in_test_mode() -> None:
+    with pytest.raises(ValidationError, match="only in test mode"):
+        Settings(test_mode_enabled=False, mattermost_delivery_enabled=False)
+
+    settings = Settings(
+        test_mode_enabled=True,
+        yandex_source_mutation_enabled=False,
+        mattermost_delivery_enabled=False,
+    )
+    assert settings.mattermost_delivery_enabled is False

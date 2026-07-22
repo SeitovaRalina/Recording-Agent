@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -60,21 +60,12 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
         yield session
 
 
-async def verify_internal_request(request: Request) -> None:
-    host = request.client.host if request.client else ""
-    if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Internal endpoint")
-
-
-InternalRequest = Annotated[None, Depends(verify_internal_request)]
 Session = Annotated[AsyncSession, Depends(get_session)]
 Actor = Annotated[str, Header(alias="X-Operator-Identity", min_length=1, max_length=200)]
 
 
 @router.get("", response_model=CalendarState)
-async def get_calendar_state(
-    recruiter_email: str, session: Session, _internal: InternalRequest
-) -> CalendarState:
+async def get_calendar_state(recruiter_email: str, session: Session) -> CalendarState:
     return await _state(session, recruiter_email)
 
 
@@ -83,7 +74,6 @@ async def discover_calendars(
     recruiter_email: str,
     request: Request,
     session: Session,
-    _internal: InternalRequest,
     _actor: Actor,
 ) -> CalendarState:
     client = cast(CalDAVClient, request.app.state.calendar_client)
@@ -96,7 +86,6 @@ async def replace_calendar_selection(
     recruiter_email: str,
     body: ReplaceSelection,
     session: Session,
-    _internal: InternalRequest,
     actor: Actor,
 ) -> CalendarState:
     recruiter = await _locked_recruiter(session, recruiter_email)
@@ -123,7 +112,6 @@ async def set_default_calendar(
     recruiter_email: str,
     body: SetDefault,
     session: Session,
-    _internal: InternalRequest,
     actor: Actor,
 ) -> CalendarState:
     recruiter = await _locked_recruiter(session, recruiter_email)

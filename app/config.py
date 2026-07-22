@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     notion_name_prop: str = "Name"
     notion_date_prop: str = "General Interview Date"
     notion_recording_prop: str = "General Interview recording"
-    notion_project_prop: str = "Spot Client"
+    notion_project_prop: str = "📍 Spots"
+    notion_project_prop_type: Literal["rich_text", "relation"] = "relation"
     notion_interview_type: str = "general_interview"
     synology_base_url: str = ""
     synology_api_key: SecretStr = SecretStr("")
@@ -74,6 +75,7 @@ class Settings(BaseSettings):
     mattermost_bot_token: SecretStr = SecretStr("")
     mattermost_channel_id: str = ""
     mattermost_bot_user_id: str = ""
+    mattermost_delivery_enabled: bool = True
     review_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     intent_claim_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     minio_endpoint: str = "http://localhost:9000"
@@ -95,6 +97,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_canary_boundary(self) -> "Settings":
+        if not self.mattermost_delivery_enabled and not self.test_mode_enabled:
+            raise ValueError("Mattermost delivery can be disabled only in test mode")
         if self.test_mode_enabled:
             if self.storage_provider != "minio":
                 raise ValueError("Test mode requires MinIO storage")

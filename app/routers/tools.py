@@ -6,7 +6,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -14,7 +14,6 @@ from app.db.engine import get_session
 from app.db.models.intent_replay import IntentReplay
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
-from app.routers.calendars import verify_internal_request
 from app.routers.events import verify_openclaw_secret
 from app.scheduler.cron import ScanSummary, _resume_transfer_recording, scan_recruiter
 from app.services.canary import enforce_recruiter_scope
@@ -29,7 +28,7 @@ from app.services.reviews import ReviewRejectedError, ReviewService
 router = APIRouter(
     prefix="/tools",
     tags=["openclaw-tools"],
-    dependencies=[Depends(verify_internal_request), Depends(verify_openclaw_secret)],
+    dependencies=[Depends(verify_openclaw_secret)],
 )
 Session = Annotated[AsyncSession, Depends(get_session)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
@@ -43,14 +42,33 @@ class ScanRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
 
 
+class ScanItem(BaseModel):
+    id: uuid.UUID
+    filename: str
+    candidate_name: str | None
+    status: RecordingStatus
+    is_new: bool
+    requires_review: bool
+    review_reason: str | None
+    generated_filename: str | None
+    safe_link: str | None
+    error: str | None
+
+
 class ScanResponse(BaseModel):
     accepted: bool
     recruiter_email: str
     discovered: int
     inserted: int
+    skipped_legacy: int = 0
     matched: int
     manual_review: int
+    without_review: int = 0
     failed: int
+    failed_recordings: int = 0
+    processed: int = 0
+    items_truncated: bool = False
+    items: list[ScanItem] = Field(default_factory=list)
 
 
 class RecordingStatusItem(BaseModel):
@@ -59,6 +77,8 @@ class RecordingStatusItem(BaseModel):
     generated_filename: str | None
     candidate_name: str | None
     status: RecordingStatus
+    requires_review: bool
+    review_reason: str | None
     version: int
     found_at: str
     safe_link: str | None
@@ -147,7 +167,37 @@ async def trigger_scan(
         )
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
-    response = _scan_response(recruiter.email, result)
+    scan_ids = list(dict.fromkeys(result.recording_ids))
+    status_counts: dict[RecordingStatus, int] = {}
+    rows: list[Recording] = []
+    if scan_ids:
+        status_counts = {
+            recording_status: count
+            for recording_status, count in (
+                await session.execute(
+                    select(Recording.status, func.count())
+                    .where(
+                        Recording.disk_owner_email == recruiter.email,
+                        Recording.id.in_(scan_ids),
+                    )
+                    .group_by(Recording.status)
+                )
+            ).all()
+        }
+        rows = list(
+            (
+                await session.scalars(
+                    select(Recording)
+                    .where(
+                        Recording.disk_owner_email == recruiter.email,
+                        Recording.id.in_(scan_ids),
+                    )
+                    .order_by(Recording.found_at.asc())
+                    .limit(50)
+                )
+            ).all()
+        )
+    response = _scan_response(recruiter.email, result, rows, status_counts)
     await complete_intent(session, claim, response.model_dump(mode="json"))
     return response
 
@@ -200,6 +250,8 @@ async def recording_status(
             generated_filename=row.generated_filename,
             candidate_name=row.candidate_name,
             status=row.status,
+            requires_review=row.status == RecordingStatus.MANUAL_REVIEW_REQUIRED,
+            review_reason=row.manual_review_reason,
             version=row.version,
             found_at=row.found_at.isoformat(),
             safe_link=row.synology_share_url,
@@ -325,13 +377,47 @@ def _review_service(request: Request) -> ReviewService:
     return cast(ReviewService, request.app.state.review_service)
 
 
-def _scan_response(email: str, summary: ScanSummary) -> ScanResponse:
+def _scan_response(
+    email: str,
+    summary: ScanSummary,
+    rows: list[Recording] | None = None,
+    status_counts: dict[RecordingStatus, int] | None = None,
+) -> ScanResponse:
+    new_ids = set(summary.inserted_recording_ids)
+    items = [
+        ScanItem(
+            id=row.id,
+            filename=row.disk_filename,
+            candidate_name=row.candidate_name,
+            status=row.status,
+            is_new=row.id in new_ids,
+            requires_review=row.status == RecordingStatus.MANUAL_REVIEW_REQUIRED,
+            review_reason=row.manual_review_reason,
+            generated_filename=row.generated_filename,
+            safe_link=row.synology_share_url,
+            error=row.error_message,
+        )
+        for row in (rows or [])
+    ]
+    counts = status_counts or {
+        recording_status: sum(item.status == recording_status for item in items)
+        for recording_status in RecordingStatus
+    }
+    processed = sum(counts.values())
+    manual_review = counts.get(RecordingStatus.MANUAL_REVIEW_REQUIRED, 0)
+    failed_recordings = counts.get(RecordingStatus.FAILED, 0)
     return ScanResponse(
         accepted=True,
         recruiter_email=email,
         discovered=summary.discovered,
         inserted=summary.inserted,
+        skipped_legacy=summary.skipped_legacy,
         matched=summary.matched,
-        manual_review=summary.manual_review,
+        manual_review=manual_review,
+        without_review=max(0, processed - manual_review - failed_recordings),
         failed=summary.failed,
+        failed_recordings=failed_recordings,
+        processed=processed,
+        items_truncated=processed > len(items),
+        items=items,
     )

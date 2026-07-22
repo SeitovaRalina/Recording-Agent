@@ -66,6 +66,7 @@ class NotionInspector:
             self._settings.notion_date_prop,
             self._settings.notion_recording_prop,
             self._settings.notion_project_prop,
+            self._settings.notion_project_prop_type,
         )
         return DatabaseInspection(
             database_id=database_id,
@@ -150,6 +151,7 @@ async def preflight_recruiter_notion(
         settings.notion_date_prop,
         settings.notion_recording_prop,
         settings.notion_project_prop,
+        settings.notion_project_prop_type,
     )
     if inspection.database_id != recruiter.notion_database_id:
         raise ValueError("Notion preflight returned another database")
@@ -196,7 +198,8 @@ async def preflight_recruiter(
     for row in rows:
         row.is_default = row is target
     recruiter.caldav_calendar_url = target.canonical_url
-    await mattermost.probe_user(recruiter.mattermost_user_id)
+    if settings.mattermost_delivery_enabled:
+        await mattermost.probe_user(recruiter.mattermost_user_id)
     await session.commit()
     return await preflight_recruiter_notion(
         session,
@@ -237,7 +240,8 @@ async def activate_recruiter(
         raise ValueError("Current calendar discovery and one explicit default are required")
 
     await yandex_probe.probe(recruiter.email)
-    await mattermost.probe_user(recruiter.mattermost_user_id)
+    if settings.mattermost_delivery_enabled:
+        await mattermost.probe_user(recruiter.mattermost_user_id)
     recruiter.active = True
     await session.commit()
     return recruiter

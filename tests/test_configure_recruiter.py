@@ -45,7 +45,7 @@ async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
                     "Name": {"type": "title"},
                     "General Interview Date": {"type": "date"},
                     "General Interview recording": {"type": "files"},
-                    "Spot Client": {"type": "rich_text"},
+                    "📍 Spots": {"type": "relation"},
                 },
             },
         )
@@ -85,7 +85,7 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
     inspector.inspect.return_value = DatabaseInspection(
         "fe5fe300-f311-821b-96fe-01233947e4c2",
         "Test Interviews",
-        {"Name": "title", "Spot Client": "rich_text"},
+        {"Name": "title", "📍 Spots": "relation"},
     )
     settings = Settings(
         yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
@@ -171,14 +171,18 @@ async def test_operator_preflight_persists_backend_token_and_synthetic_row_proof
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("mattermost_delivery_enabled", [True, False])
 async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
-    session: object,
+    session: object, mattermost_delivery_enabled: bool
 ) -> None:
     database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
     settings = Settings(
         notion_token=SecretStr("backend-token"),
         yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
         yandex_caldav_passwords={"r@example.com": SecretStr("password")},
+        test_mode_enabled=not mattermost_delivery_enabled,
+        yandex_source_mutation_enabled=mattermost_delivery_enabled,
+        mattermost_delivery_enabled=mattermost_delivery_enabled,
     )
     recruiter = await configure_recruiter(
         session,  # type: ignore[arg-type]
@@ -232,7 +236,19 @@ async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
     assert second.is_default is True
     assert first.is_default is False
     yandex.probe.assert_awaited_once_with("r@example.com")
-    mattermost.probe_user.assert_awaited_once_with("mm-user")
+    if mattermost_delivery_enabled:
+        mattermost.probe_user.assert_awaited_once_with("mm-user")
+    else:
+        mattermost.probe_user.assert_not_awaited()
+        activated = await activate_recruiter(
+            session,  # type: ignore[arg-type]
+            settings,
+            recruiter_email=recruiter.email,
+            yandex_probe=yandex,
+            mattermost=mattermost,
+        )
+        assert activated.active is True
+        mattermost.probe_user.assert_not_awaited()
 
 
 @pytest.mark.anyio

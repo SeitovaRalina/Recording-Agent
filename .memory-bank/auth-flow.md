@@ -171,20 +171,25 @@ sharing; block enablement on sharing, schema, or ambiguity failure.
    → Username: recording-agent
    → Role: Member
    → Get token
-2. Add bot to relevant channel(s)
+2. Confirm the bot can resolve the allowlisted recruiter and open a direct-message channel.
 3. Store in secrets:
    MATTERMOST_URL=https://mm.company.com
    MATTERMOST_BOT_TOKEN=xxx...
-   MATTERMOST_CHANNEL_ID=xxx...   # default notifications channel
+   MATTERMOST_BOT_USER_ID=xxx...
 ```
 
 **Usage:**
 ```python
 headers = {"Authorization": f"Bearer {settings.mattermost_bot_token}"}
-# POST /api/v4/posts  → send message
-# GET  /api/v4/channels/{channel_id}/posts  → poll replies
+# POST /api/v4/channels/direct → resolve/open recruiter DM
+# POST /api/v4/posts           → send summary, questions, reminders, and results
 # Preferred: Mattermost webhooks / WebSocket for real-time replies
 ```
+
+Recording Agent uses the recruiter's ordinary Mila DM without mandatory threads and without a
+shared-channel fallback. Backend persists the DM channel and pending-question state. The bot token
+is required for proactive scheduled summaries, reminders, processing-start feedback, and
+completion/error messages. OpenClaw never receives or prints the bot token.
 
 ---
 
@@ -200,7 +205,7 @@ headers = {"Authorization": f"Bearer {settings.mattermost_bot_token}"}
 | `SYNOLOGY_API_KEY` | Synology | API key | Never (unless deleted) |
 | `MATTERMOST_URL` | Mattermost | Config | — |
 | `MATTERMOST_BOT_TOKEN` | Mattermost | Bot token | Never (unless regenerated) |
-| `MATTERMOST_CHANNEL_ID` | Mattermost | Config | — |
+| `MATTERMOST_BOT_USER_ID` | Mattermost | Config | — |
 | `DATABASE_URL` | PostgreSQL | Connection string | — |
 
 All secrets injected via `pydantic-settings` (`BaseSettings`). `SecretStr` for sensitive fields.

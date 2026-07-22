@@ -14,7 +14,10 @@ def enforce_recruiter_scope(settings: Settings, recruiter: RecruiterConfig) -> N
         raise PermissionError("Recruiter is inactive")
     if recruiter.email not in settings.test_recruiter_allowlist:
         raise PermissionError("Recruiter is outside the test-mode allowlist")
-    if recruiter.notion_database_id not in settings.test_notion_database_allowlist:
+    notion_allowlist = {
+        _normalize_notion_id(item) for item in settings.test_notion_database_allowlist
+    }
+    if _normalize_notion_id(recruiter.notion_database_id) not in notion_allowlist:
         raise PermissionError("Notion database is outside the test-mode allowlist")
     if not recruiter.mattermost_user_id or (
         recruiter.mattermost_user_id not in settings.test_mattermost_user_allowlist
@@ -41,11 +44,15 @@ def notion_schema_hash(settings: Settings) -> str:
         settings.notion_name_prop: "title",
         settings.notion_date_prop: "date",
         settings.notion_recording_prop: "files",
-        settings.notion_project_prop: "rich_text",
+        settings.notion_project_prop: settings.notion_project_prop_type,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _normalize_notion_id(value: str) -> str:
+    return value.replace("-", "").casefold()
 
 
 def notion_token_hash(settings: Settings) -> str:

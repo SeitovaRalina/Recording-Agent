@@ -5,7 +5,12 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
-from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
+from app.services.canary import (
+    enforce_recruiter_scope,
+    notion_schema_hash,
+    notion_token_hash,
+    require_notion_preflight,
+)
 
 
 def test_notion_write_flag_does_not_bypass_durable_preflight() -> None:
@@ -28,3 +33,24 @@ def test_notion_write_flag_does_not_bypass_durable_preflight() -> None:
     changed_token = Settings(notion_writes_enabled=True, notion_token=SecretStr("other-token"))
     with pytest.raises(PermissionError, match="Backend-token"):
         require_notion_preflight(changed_token, recruiter)
+
+
+def test_canary_scope_normalizes_notion_database_uuid() -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="fe5fe300-f311-821b-96fe-01233947e4c2",
+        synology_base_folder="test-interviews",
+        mattermost_user_id="codex-user",
+        active=True,
+    )
+    settings = Settings(
+        test_mode_enabled=True,
+        yandex_source_mutation_enabled=False,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={recruiter.email},
+        test_notion_database_allowlist={"fe5fe300f311821b96fe01233947e4c2"},
+        test_mattermost_user_allowlist={recruiter.mattermost_user_id},
+        minio_test_prefix=recruiter.synology_base_folder,
+    )
+
+    enforce_recruiter_scope(settings, recruiter)

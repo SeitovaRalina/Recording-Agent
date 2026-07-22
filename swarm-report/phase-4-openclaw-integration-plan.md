@@ -25,6 +25,44 @@ and exposes its authenticated Gateway only on `127.0.0.1:18789`.
 - **Runtime:** testing happens on Mila, but in a separate test service and isolated data scope.
 - **Sylvanas:** untouched until Mila canary passes.
 
+## Approved requirements amendment (2026-07-22)
+
+Anton confirmed the following target behavior after the original Phase 4 approval. This amendment
+supersedes conflicting thread, Notion-date lookup, and scheduled-cleanup assumptions below; it does
+not claim that the current implementation already provides these behaviors.
+
+- Use Mila's ordinary recruiter DM without mandatory Mattermost threads. Mila already serves
+  multiple purposes, so unrelated messages must not be consumed as Recording Agent answers.
+- Send one daily summary followed by numbered actionable questions for every unresolved recording.
+  A recruiter may answer all questions or any subset in free form.
+- Mila confirms how it understood each answer, reports that processing started, and later reports
+  completion or an actionable error. Unanswered questions remain durable in PostgreSQL and are
+  repeated once per day in the 18:00 recruiter-local summary without duplicating closed questions.
+- Backend remains the state owner. Bind actions to recruiter, DM channel, recording/review ID,
+  expected version, one-time capability, TTL, and idempotency key; thread ID is not part of the
+  target binding.
+- Candidate lookup must not require a prefilled `General Interview Date`. Search by candidate name;
+  use email only as supporting evidence extracted from the mixed contacts returned by the Notion
+  `TBD` formula `prop("Candidate").map(current.prop("Contacts"))`. After processing, write the
+  matched calendar event date and final storage link to Notion.
+- Configure project/spot with an explicit property name and expected type. Test and production use
+  the literal `📍 Spots/relation` after independent schema preflights. For
+  a relation, resolve `<project_or_spot>` from exactly one related page title. Zero relations use
+  `unspecified`; multiple relations fail closed until their product rule is approved. Do not
+  silently fall back to `unspecified` when one relation exists.
+- Add a distinct non-interview route: store the file in a Backend-resolved allowed Synology
+  destination, return its link, and complete without updating a candidate card. Recruiters may
+  request a new folder, but Backend creates it only under the configured recruiter storage root
+  after canonical path and permission validation. This is not `ignore`.
+- Do not schedule Yandex cleanup. Preserve a manual preview-and-confirm action for only
+  Backend-proven successfully processed files; it may move sources to Trash but never expose
+  permanent purge to Mila. There is no minimum age after proven success. The initial MinIO canary
+  still keeps all Yandex mutations disabled.
+
+Still open before implementation: the behavior for multiple related `📍 Spots` and the operational
+Synology base path/credentials. Runtime probes must confirm the exact Notion formula and relation
+payloads before production writes.
+
 ## User-facing Mattermost workflow
 
 The completed Phase 4 must support all customer-facing scenarios:
@@ -34,10 +72,12 @@ The completed Phase 4 must support all customer-facing scenarios:
    reporting.
 2. **Manual start:** recruiter writes `Мила, проверь новые записи`; Mila invokes the skill's test or
    production scan intent and reports how many recordings were found.
-3. **Ambiguity:** Mila sends a DM such as `Нашла запись ... Есть два подходящих события: 1) ...,
-   2) ... . Ответьте 1, 2 или "пропустить".` The recruiter replies in the same DM/thread. Mila
-   submits the bound choice; Backend resumes processing.
-4. **Completion/error:** Mila sends a concise DM with candidate, generated filename, terminal
+3. **Ambiguity:** Mila sends one DM summary with numbered actionable questions for every unresolved
+   recording. The recruiter answers all questions or a subset in ordinary free-form text. Mila
+   confirms the interpreted actions; ambiguous answer-to-question mapping causes clarification,
+   not a guess. Backend closes only answered questions and preserves the rest for reminders.
+4. **Completion/error:** Mila first acknowledges that accepted work started, then sends a concise
+   DM with candidate, generated filename, terminal
    status, and safe link or actionable error. Secrets and raw integration payloads are omitted.
 5. **Status query:** recruiter writes `Мила, покажи статусы записей за сегодня` or asks for one
    candidate/recording. Mila returns bounded status rows from Backend without mutating anything.
@@ -48,15 +88,14 @@ can launch and supervise the workflow.
 
 ## Live evidence and current Notion blocker
 
-- After sharing was updated, Mila's configured Notion key retrieved the exact page
-  `397c8889-e4c8-814c-8acf-d7da92915220` with HTTP 200.
-- The page contains original child database `Test Interviews`
-  (`ef16e0bf-e91b-470f-90a1-749d0bae0ad3`) and data source
-  `0788967f-04fe-43c3-a78b-d2572e031031`.
+- The confirmed canary database is `Test Interviews`
+  (`fe5fe300f311821b96fe01233947e4c2`). Database
+  `ef16e0bfe91b470f90a1749d0bae0ad3` is production and is forbidden in canary configuration.
+- The Backend discovers the canary data-source ID at runtime and never stores it in configuration.
 - Read-only schema retrieval confirms `Name` (title), `General Interview Date` (date),
-  `General Interview recording` (files), `Spot Client` (rich_text), `Stage` (multi_select), and
+  `General Interview recording` (files), `📍 Spots` (relation), `Stage` (multi_select), and
   other copied production properties.
-- Phase 4 general-interview naming uses `Spot Client` for `<project_or_spot>` and the explicit
+- Phase 4 general-interview naming resolves `📍 Spots` for `<project_or_spot>` and uses the explicit
   constant `general_interview` for `<interview_type>`. `Stage` is a candidate pipeline stage and
   must not be misused as recording type.
 
@@ -88,11 +127,13 @@ directly.
    script, and a contract reference. No secret exists in those files.
 4. Skill is explicit-invocation-only during the first canary. After it passes, Backend scheduler is
    enabled at the configured interval; OpenClaw heartbeat does not own deterministic scanning.
-5. Skill can trigger a scan, query bounded recording statuses, request bounded review context,
-   resolve one review, and ignore one review. It cannot call raw transfer, Notion-update,
-   mark-processed, delete, or purge operations.
+5. Skill can trigger a scan, query bounded recording statuses, request bounded pending questions,
+   resolve an unambiguous subset of reviews, ignore a review, and request a preview of the future
+   manual cleanup. It cannot call raw transfer, Notion-update, mark-processed, immediate delete,
+   or purge operations. Initial canary cleanup remains disabled.
 6. DM replies are accepted only from the configured recruiter and are bound to review ID,
-   recording ID/version, Mattermost post or thread ID, opaque one-time token, and expiry.
+   recording ID/version, Mattermost DM channel, opaque one-time capability, and expiry. Threads
+   are not required. Unrelated or ambiguous replies do not mutate recording state.
 7. Every mutation requires `expected_version` and an idempotency key. Retry/replay returns the
    persisted result and causes no duplicate upload, Notion update, or notification.
 8. MinIO object name is
@@ -109,8 +150,9 @@ directly.
 13. Unit, contract, and integration tests pass, followed by the full `pytest` gate.
 14. Rollback removes/disables only the test Backend service and Recording Agent skill; existing
     OpenClaw, Mattermost, and unrelated Mila skills keep working.
-15. Scheduled and manual runs send DM completion or actionable error notifications, while normal
-    status queries remain read-only.
+15. Scheduled and manual runs send one summary, actionable pending questions, processing-start
+    feedback, and completion/error notifications. Partial answers leave unanswered questions
+    pending and deduplicated; normal status queries remain read-only.
 
 ## Plan
 
@@ -156,7 +198,7 @@ older auth documentation does not exist. Phase 4 keeps credential issuance outsi
   succeed.
 
 For the Mila canary, store confirmed Test Interviews database ID
-`ef16e0bf-e91b-470f-90a1-749d0bae0ad3`. Discover its data-source ID at runtime; never persist it as
+`fe5fe300f311821b96fe01233947e4c2`. Discover its data-source ID at runtime; never persist it as
 recruiter configuration. Self-service OAuth remains a later feature.
 
 ### 2. Resolve the test Notion data source
@@ -173,9 +215,20 @@ Confirmed canary mapping:
 
 - candidate: `Name` (`title`);
 - date: `General Interview Date` (`date`);
-- project/spot: `Spot Client` (`rich_text`);
+- project/spot in test and production: explicitly configured `📍 Spots` (`relation`) resolved
+  to exactly one related page title after each environment's schema preflight;
 - interview type: configured constant `general_interview`;
 - recording destination: `General Interview recording` (`files`).
+
+`General Interview Date` and `General Interview recording` are pipeline outputs. Candidate lookup
+must not require a prefilled date. Write the matched Calendar event date and final storage link only
+after the candidate choice and transfer are confirmed.
+
+The optional email signal comes from `TBD` (`formula`) whose Contacts rendering can mix phone,
+email, and Telegram lines. Extract only valid normalized emails after probing the runtime formula
+shape. The project/spot component comes from the title of one `📍 Spots` relation target, not from the
+relation page ID. Zero relations use `unspecified`; more than one relation requires review until a
+separate selection rule is approved.
 
 Production IDs remain absent from test service config. Repeat this probe using Backend's runtime
 token before live writes; do not assume Mila process configuration equals Backend configuration.
@@ -213,6 +266,13 @@ Create/adapt authenticated loopback endpoints for:
 - `POST /tools/scans/trigger`: explicit scan trigger, test/prod scope enforced by service config;
 - `GET /tools/recordings/status`: bounded filters for date, candidate, recording ID, and status.
 
+Amend the review model to support a recruiter-scoped durable question queue and partial batch
+answers without thread binding. Add only bounded operations needed to list pending questions,
+submit one unambiguous answer subset, acknowledge accepted processing, and query remaining
+questions. A future manual cleanup must be two-step preview/confirm and remain disabled in the
+initial canary. Non-interview routing must resolve a requested destination through Backend-owned
+Synology configuration rather than exposing arbitrary paths.
+
 One resolve intent invokes the existing ordered Backend pipeline. Do not expose individual storage,
 Notion, Yandex mutation, or deletion primitives to the model. Use row locking/compare-and-swap and
 persist idempotency response replay.
@@ -220,11 +280,16 @@ persist idempotency response replay.
 ### 5. Add DM-only Mattermost review flow
 
 - Map recruiter config to one Mattermost user ID.
-- Send a DM containing bounded candidate choices and opaque review token; never include secrets.
-- Persist DM channel/post or thread ID, recruiter ID, review token hash, expiry, recording version,
-  and status.
-- Reject wrong sender, wrong thread, expired token, already-consumed token, stale version, and
-  ambiguous free-form reply.
+- Send one DM summary containing bounded, numbered actionable questions; never include secrets.
+- Persist DM channel, recruiter ID, question/review IDs, token hash, expiry, recording version,
+  answer state, reminder state, and notification idempotency.
+- Accept all or a subset of answers. Confirm the parsed mapping before/while submitting it, report
+  processing start, and send final completion/error feedback.
+- Reject wrong sender/channel, expired token, already-consumed token, stale version, unrelated
+  replies, and ambiguous free-form answer-to-question mappings.
+- Repeat only unanswered questions according to the later-approved reminder policy.
+- Run the summary/reminder job once per day at 18:00 in each recruiter's configured local timezone;
+  accepted answers still receive immediate start and terminal feedback.
 - No fallback to a shared channel.
 - Backend remains able to report failures without asking Mila to perform side effects.
 
@@ -245,8 +310,9 @@ Deployment target after approval:
 /root/.openclaw/workspace/skills/recording-agent/
 ```
 
-`SKILL.md` defines activation phrases, explicit test-only scope, reply grammar, status-query
-behavior, and refusal rules.
+`SKILL.md` defines activation phrases, explicit test-only scope, batch/partial reply grammar,
+clarification behavior, status queries, feedback messages, and refusal rules. Recording Agent
+pending state must not hijack unrelated Mila purposes.
 The CLI calls only loopback Backend endpoints and emits bounded JSON. Backend secret comes from
 process environment. Skill never reads Mila's Notion key and never implements matching/transfer.
 
@@ -289,6 +355,9 @@ scheduled run. Production scheduling remains disabled until a separate promotion
 7. Enable test-scope Backend schedule and prove one scheduled scan plus completion/error DM.
 8. Query statuses by today, candidate, recording ID, and status through natural-language prompts.
 9. Run repository lint/type gates and full `pytest`; record exact output in build report.
+10. Test one summary with multiple questions, partial answers, ambiguous short answers, unrelated
+    Mila requests, restart recovery, reminder deduplication, and processing start/completion
+    feedback.
 
 ### 9. Rollback and promotion
 
@@ -348,7 +417,9 @@ parallel pipeline if current services can be extended safely.
 - Public exposure of OpenClaw Gateway or Backend.
 - OpenClaw upgrade, native plugin, or MCP server.
 - Production Notion databases, Synology, or production Yandex recordings.
-- Yandex `mark_processed`, Trash cleanup, and permanent purge.
+- Yandex `mark_processed`, Trash cleanup, and permanent purge during the initial canary. A later
+  manual preview/confirm Trash action is part of the amended production target; scheduled cleanup
+  and Mila-accessible permanent purge remain out of scope.
 - Permanent archive URLs from MinIO pre-signed links.
 - Lili production schema.
 

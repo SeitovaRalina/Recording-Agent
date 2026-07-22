@@ -84,7 +84,14 @@ async def test_candidate_search_uses_configured_local_date(session: object) -> N
     notion = AsyncMock()
     notion.search_pages.return_value = []
 
-    await CandidateService(notion, Settings(scan_local_timezone="Asia/Omsk")).find_and_match(
+    await CandidateService(
+        notion,
+        Settings(
+            scan_local_timezone="Asia/Omsk",
+            notion_project_prop="📍 Spots",
+            notion_project_prop_type="relation",
+        ),
+    ).find_and_match(
         item,
         recruiter(),
         session,  # type: ignore[arg-type]
@@ -92,6 +99,7 @@ async def test_candidate_search_uses_configured_local_date(session: object) -> N
 
     assert notion.search_pages.await_args.args[0] == "db"
     assert notion.search_pages.await_args.args[2] == date(2026, 7, 16)
+    assert notion.search_pages.await_args.args[6:] == ("📍 Spots", "relation")
 
 
 @pytest.mark.anyio

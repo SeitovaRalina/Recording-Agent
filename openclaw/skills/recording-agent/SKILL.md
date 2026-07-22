@@ -18,7 +18,13 @@ Use `scripts/recording_agent.py` for every operation. Read `references/contract.
 
 Pass recruiter email plus Mattermost sender and thread identifiers from trusted metadata. Pass the review token, expected version, and idempotency key exactly; never infer or rewrite them. Generate one stable idempotency key per recruiter action and reuse it only when retrying that same action.
 
-Return concise recruiter-facing results from bounded CLI JSON. Treat nonzero exit status or `ok: false` as failure. Do not expose authorization values, raw integration payloads, or stack traces.
+For an operator-configured internal Codex harness, the CLI may obtain the trusted recruiter user ID
+from `RECORDING_AGENT_RECRUITER_USER_ID`; omit `--recruiter-user-id` when that environment value is
+configured. Never ask the recruiter to provide or confirm this authorization identity in chat.
+
+For every command, return the CLI JSON `message` verbatim. Do not replace counts, statuses, filenames, review reasons, choices, or errors with an inferred summary. The deterministic message is the recruiter-facing answer; use `result` only to select the next allowed operation. Treat nonzero exit status or `ok: false` as failure and still return its safe `message`. Do not expose authorization values, raw integration payloads, or stack traces.
+
+After `scan`, report every item included in `message`: new count, skipped legacy count, items requiring review, items not requiring review, and failures. Never say that no new recordings were found when `inserted` is greater than zero. After `status`, preserve the applied filters in the conversational context and return every bounded item. For review mutations, state the resulting recording status and whether the request was an idempotent replay.
 
 ## Enforce boundaries
 

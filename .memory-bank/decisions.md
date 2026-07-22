@@ -100,3 +100,61 @@ mutation, cleanup, purge, Synology, and production resources.
 change Gateway bind, or add a native plugin/MCP server without evidence that the script-backed
 contract is insufficient. Sylvanas is unchanged and can reuse the same skill later.
 **Date:** 2026-07-21
+
+## ADR-016: One ordinary Mila DM with a Backend-owned question queue
+**Decision:** Recording Agent uses the recruiter's existing direct conversation with Mila and does
+not require Mattermost threads. A scheduled run produces one summary followed by numbered,
+actionable questions for every unresolved recording. The recruiter may answer all questions or a
+subset in free form. Mila confirms how it understood each answer, reports processing start, and
+later reports completion or an actionable error.
+**Reliability:** PostgreSQL owns pending-question state, partial-answer progress, versions,
+idempotency, reminders, and notification deduplication. Replies are bound to recruiter, DM
+channel, recording/review ID, version, one-time capability, and TTL. If several mappings are
+possible, Mila asks a clarifying question rather than guessing. Unrelated Mila conversations do
+not consume Recording Agent questions.
+**Why:** Mila already serves multiple purposes. One ordinary DM is simpler for recruiters than
+opening a separate thread for every recording, while durable Backend state prevents conversational
+memory from becoming the workflow source of truth.
+**Status:** Target decision; current Phase 4 review contract still requires a thread and must be
+reconciled before Mila deployment.
+**Reminder cadence:** Send the consolidated summary and repeat unresolved questions once per day
+at 18:00 in the recruiter's configured local timezone. Accepted answers receive immediate
+processing-start and completion/error feedback.
+**Date:** 2026-07-22
+
+## ADR-017: Notion interview date and recording link are pipeline outputs
+**Decision:** Candidate-card lookup must not require a prefilled `General Interview Date`. Use the
+candidate name as the primary lookup key. Email may be an additional signal only after its Notion
+formula value is parsed safely. Contacts come from the `TBD` formula
+`prop("Candidate").map(current.prop("Contacts"))`; extract and normalize only valid email
+addresses from the mixed phone/email/Telegram output. Calendar attendee email is supporting
+evidence, never a mandatory rejection condition. Multiple matches require recruiter selection.
+After a confirmed match, write the matched calendar event date to
+`General Interview Date` and the final storage URL to `General Interview recording`.
+**Why:** Recruiters do not fill these fields before processing. Requiring the date prevents the
+agent from finding the intended card.
+**Date:** 2026-07-22
+
+## ADR-018: No scheduled Yandex cleanup; keep a manual safe cleanup action
+**Decision:** Do not schedule Yandex source deletion. Keep a manual recruiter command that previews
+and, after explicit confirmation, moves only Backend-proven successfully processed source files to
+Trash. Never expose permanent purge to Mila. The action is idempotent and excludes pending,
+failed, unresolved, and unverified files.
+**Why:** The Telemost folder is reported to expire automatically after 90 days and not consume the
+normal storage quota. Automatic cleanup adds risk without a clear capacity benefit, while a narrow
+manual function preserves operator control.
+**Eligibility age:** None. A file may appear in the preview immediately after Backend proves the
+recording completed successfully. Explicit preview confirmation remains mandatory.
+**Status:** Target decision; current automatic seven-day cleanup code must remain disabled and be
+reconciled.
+**Date:** 2026-07-22
+
+## ADR-019: Recruiter-requested Synology folders stay under a configured root
+**Decision:** For a non-interview recording, the recruiter may select an existing Synology folder
+or ask Mila to create a new folder. Backend canonicalizes and creates the destination only under
+the recruiter's configured storage root and only after permission validation. OpenClaw never gets
+a raw storage mutation primitive and free-form text never becomes an unchecked filesystem path.
+**Consequence:** A successful non-interview route returns the storage link and completes without a
+candidate Notion update. An invalid, escaping, inaccessible, or ambiguous destination fails closed
+and remains actionable.
+**Date:** 2026-07-22

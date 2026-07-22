@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
@@ -39,6 +39,15 @@ from app.tools.notion import NotionClient, NotionPage
 
 logger = logging.getLogger(__name__)
 
+TRANSFER_RESUMABLE_STATUSES = (
+    RecordingStatus.CALENDAR_EVENT_FOUND,
+    RecordingStatus.CANDIDATE_MATCHED,
+    RecordingStatus.TRANSFER_STARTED,
+    RecordingStatus.UPLOADED_TO_SYNOLOGY,
+    RecordingStatus.SYNOLOGY_LINK_CREATED,
+    RecordingStatus.NOTION_UPDATED,
+)
+
 
 @dataclass
 class ScanSummary:
@@ -48,6 +57,8 @@ class ScanSummary:
     matched: int = 0
     manual_review: int = 0
     failed: int = 0
+    recording_ids: list[uuid.UUID] = field(default_factory=list)
+    inserted_recording_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 def local_today_start_utc(settings: Settings, now: datetime | None = None) -> datetime:
@@ -86,11 +97,14 @@ async def scan_recruiter(
     summary.discovered = len(files)
     for file_item in files:
         try:
-            outcome = await _persist_found_recording(
+            outcome, persisted_id = await _persist_found_recording(
                 recruiter, file_item, session_factory, disk, active_settings, now
             )
             if outcome == "inserted":
                 summary.inserted += 1
+                if persisted_id is not None:
+                    summary.inserted_recording_ids.append(persisted_id)
+                    summary.recording_ids.append(persisted_id)
             elif outcome == "skipped_legacy":
                 summary.skipped_legacy += 1
         except Exception:
@@ -114,6 +128,8 @@ async def scan_recruiter(
                 recording_id, session_factory, cal, matcher, active_status, active_settings
             )
             if result is not None:
+                if recording_id not in summary.recording_ids:
+                    summary.recording_ids.append(recording_id)
                 if result.manual_review_required:
                     summary.manual_review += 1
                     status = RecordingStatus.MANUAL_REVIEW_REQUIRED
@@ -146,23 +162,14 @@ async def scan_recruiter(
                     await session.scalars(
                         select(Recording.id).where(
                             Recording.disk_owner_email == recruiter.email,
-                            Recording.status.in_(
-                                [
-                                    RecordingStatus.CALENDAR_EVENT_FOUND,
-                                    RecordingStatus.CANDIDATE_MATCHED,
-                                    RecordingStatus.TRANSFER_STARTED,
-                                    RecordingStatus.UPLOADED_TO_SYNOLOGY,
-                                    RecordingStatus.SYNOLOGY_LINK_CREATED,
-                                    RecordingStatus.NOTION_UPDATED,
-                                ]
-                            ),
+                            Recording.status.in_(TRANSFER_RESUMABLE_STATUSES),
                         )
                     )
                 ).all()
             )
         for recording_id in transfer_ids:
             try:
-                await _resume_transfer_recording(
+                owned = await _resume_transfer_recording(
                     recording_id,
                     recruiter,
                     session_factory,
@@ -173,6 +180,8 @@ async def scan_recruiter(
                     cast(NotionClient, notion),
                     active_settings,
                 )
+                if owned and recording_id not in summary.recording_ids:
+                    summary.recording_ids.append(recording_id)
             except Exception:
                 summary.failed += 1
                 logger.exception("Recording %s transfer pipeline failed", recording_id)
@@ -187,7 +196,7 @@ async def scan_recruiter(
         summary.manual_review,
         summary.failed,
     )
-    if review_service is not None:
+    if review_service is not None and active_settings.mattermost_delivery_enabled:
         await _send_recruiter_notifications(recruiter, session_factory, review_service)
     return summary
 
@@ -202,7 +211,7 @@ async def _resume_transfer_recording(
     status: StatusService,
     notion: NotionClient,
     settings: Settings,
-) -> None:
+) -> bool:
     lease_token = str(uuid.uuid4())
     now = datetime.now(UTC)
     async with session_factory() as session:
@@ -210,6 +219,7 @@ async def _resume_transfer_recording(
             update(Recording)
             .where(
                 Recording.id == recording_id,
+                Recording.status.in_(TRANSFER_RESUMABLE_STATUSES),
                 or_(
                     Recording.processing_lease_token.is_(None),
                     Recording.processing_lease_expires_at <= now,
@@ -223,7 +233,7 @@ async def _resume_transfer_recording(
         )
         await session.commit()
     if claimed is None:
-        return
+        return False
     try:
         await _run_transfer_recording(
             recording_id,
@@ -247,6 +257,7 @@ async def _resume_transfer_recording(
                 .values(processing_lease_token=None, processing_lease_expires_at=None)
             )
             await session.commit()
+    return True
 
 
 async def _run_transfer_recording(
@@ -351,7 +362,7 @@ async def _run_transfer_recording(
                 if recording.calendar_dtstart
                 else datetime.now(UTC).date(),
                 candidate_name=candidate_name,
-                project_or_spot=page.project_or_spot or "",
+                project_or_spot=page.project_or_spot,
                 interview_type=settings.notion_interview_type,
                 original_filename=recording.disk_filename,
                 recruiter_prefix=recruiter.email,
@@ -758,7 +769,7 @@ async def _persist_found_recording(
     disk: DiskScanner,
     settings: Settings | None = None,
     now: datetime | None = None,
-) -> Literal["existing", "inserted", "skipped_legacy"]:
+) -> tuple[Literal["existing", "inserted", "skipped_legacy"], uuid.UUID | None]:
     path = str(file_item["path"])
     metadata = await disk.get_metadata(path, recruiter.email)
     created_at = _datetime(metadata.get("disk_created_at"))
@@ -774,13 +785,13 @@ async def _persist_found_recording(
             metadata.get("disk_filename"),
             created_at.isoformat(),
         )
-        return "skipped_legacy"
+        return "skipped_legacy", None
     async with session_factory() as session:
         existing = await session.scalar(
             select(Recording.id).where(Recording.disk_file_id == str(metadata["disk_file_id"]))
         )
         if existing is not None:
-            return "existing"
+            return "existing", existing
         recording = Recording(
             disk_file_id=str(metadata["disk_file_id"]),
             disk_path=str(metadata["disk_path"]),
@@ -802,10 +813,57 @@ async def _persist_found_recording(
             recording.disk_created_at.isoformat() if recording.disk_created_at else None,
             recording.status,
         )
-        return "inserted"
+        return "inserted", recording.id
 
 
 async def _resume_found_recording(
+    recording_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession],
+    cal: CalDAVClient,
+    matcher: InterviewMatcher,
+    status: StatusService | None = None,
+    settings: Settings | None = None,
+) -> MatchResult | None:
+    lease_token = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        claimed = await session.scalar(
+            update(Recording)
+            .where(
+                Recording.id == recording_id,
+                Recording.status == RecordingStatus.FOUND,
+                or_(
+                    Recording.processing_lease_token.is_(None),
+                    Recording.processing_lease_expires_at <= now,
+                ),
+            )
+            .values(
+                processing_lease_token=lease_token,
+                processing_lease_expires_at=now + timedelta(hours=6),
+            )
+            .returning(Recording.id)
+        )
+        await session.commit()
+    if claimed is None:
+        return None
+    try:
+        return await _run_found_recording(
+            recording_id, session_factory, cal, matcher, status, settings
+        )
+    finally:
+        async with session_factory() as session:
+            await session.execute(
+                update(Recording)
+                .where(
+                    Recording.id == recording_id,
+                    Recording.processing_lease_token == lease_token,
+                )
+                .values(processing_lease_token=None, processing_lease_expires_at=None)
+            )
+            await session.commit()
+
+
+async def _run_found_recording(
     recording_id: uuid.UUID,
     session_factory: async_sessionmaker[AsyncSession],
     cal: CalDAVClient,

@@ -27,6 +27,7 @@ BASE = "https://api.notion.com/v1"
 NAME = "Name"
 DATE = "General Interview Date"
 RECORDING = "General Interview recording"
+SPOTS = "📍 Spots"
 
 
 def page(page_id: str = "page-1") -> dict[str, object]:
@@ -51,6 +52,7 @@ def schema(
     name_type: str = "title",
     date_type: str = "date",
     recording_type: str = "files",
+    project_type: str | None = None,
     omit: str | None = None,
 ) -> dict[str, object]:
     properties: dict[str, object] = {
@@ -58,9 +60,118 @@ def schema(
         DATE: {"type": date_type},
         RECORDING: {"type": recording_type},
     }
+    if project_type is not None:
+        properties[SPOTS] = {"type": project_type}
     if omit is not None:
         del properties[omit]
     return {"object": "data_source", "id": source_id, "properties": properties}
+
+
+@pytest.mark.anyio
+async def test_resolves_project_name_from_spots_relation() -> None:
+    related_page_id = "df3fe300-f311-82b4-98f5-013eb4ca475d"
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[SPOTS] = {"relation": [{"id": related_page_id}]}
+
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [candidate]})
+            )
+            router.get(f"{BASE}/pages/{related_page_id}").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "id": related_page_id,
+                        "properties": {"Name": {"title": [{"plain_text": "Backend Spot"}]}},
+                    },
+                )
+            )
+
+            result = await client.search_pages(
+                "db",
+                "Ivan",
+                date(2026, 7, 16),
+                NAME,
+                DATE,
+                RECORDING,
+                SPOTS,
+                "relation",
+            )
+
+    assert result[0].project_or_spot == "Backend Spot"
+
+
+@pytest.mark.anyio
+async def test_rejects_multiple_spots_as_ambiguous() -> None:
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[SPOTS] = {
+        "relation": [
+            {"id": "first-spot"},
+            {"id": "second-spot"},
+        ]
+    }
+
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [candidate]})
+            )
+
+            with pytest.raises(NotionMalformedResponseError, match="ambiguous"):
+                await client.search_pages(
+                    "db",
+                    "Ivan",
+                    date(2026, 7, 16),
+                    NAME,
+                    DATE,
+                    RECORDING,
+                    SPOTS,
+                    "relation",
+                )
+
+
+@pytest.mark.anyio
+async def test_rejects_configured_project_property_type_mismatch() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+
+            with pytest.raises(NotionSchemaError):
+                await client.search_pages(
+                    "db",
+                    "Ivan",
+                    date(2026, 7, 16),
+                    NAME,
+                    DATE,
+                    RECORDING,
+                    SPOTS,
+                    "rich_text",
+                )
 
 
 def register_chain(

@@ -79,10 +79,10 @@ async def test_discovery_skips_only_new_files_before_local_today() -> None:
         disk_metadata("current", cutoff),
     ]
 
-    legacy = await _persist_found_recording(
+    legacy, legacy_id = await _persist_found_recording(
         recruiter(), {"path": "disk:/legacy.webm"}, factory, disk, settings, now
     )
-    current = await _persist_found_recording(
+    current, current_id = await _persist_found_recording(
         recruiter(), {"path": "disk:/current.webm"}, factory, disk, settings, now
     )
     async with factory() as session:
@@ -90,7 +90,9 @@ async def test_discovery_skips_only_new_files_before_local_today() -> None:
     await engine.dispose()
 
     assert legacy == "skipped_legacy"
+    assert legacy_id is None
     assert current == "inserted"
+    assert current_id is not None
     assert [item.disk_file_id for item in recordings] == ["current"]
 
 
@@ -110,7 +112,7 @@ async def test_successful_scan_logs_insert_match_and_summary(
     calendar.find_events.return_value = []
 
     with caplog.at_level("INFO"):
-        await scan_recruiter(
+        summary = await scan_recruiter(
             recruiter(),
             factory,
             disk,
@@ -124,6 +126,8 @@ async def test_successful_scan_logs_insert_match_and_summary(
     assert "recording inserted:" in caplog.text
     assert "recording match decision:" in caplog.text
     assert "recruiter scan summary:" in caplog.text
+    assert summary.recording_ids == summary.inserted_recording_ids
+    assert len(summary.recording_ids) == 1
 
 
 @pytest.mark.anyio
@@ -390,6 +394,49 @@ async def test_empty_recruiter_scan_emits_completion_totals(
     assert "discovered=0 inserted=0 skipped_legacy=0" in caplog.text
 
 
+@pytest.mark.anyio
+async def test_internal_codex_scan_skips_mattermost_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    recruiter = RecruiterConfig(
+        email="codex@example.com",
+        notion_database_id="test-db",
+        synology_base_folder="test-interviews",
+        mattermost_user_id="codex-user",
+        active=True,
+    )
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    delivery = AsyncMock()
+    monkeypatch.setattr("app.scheduler.cron._send_recruiter_notifications", delivery)
+    settings = Settings(
+        test_mode_enabled=True,
+        yandex_source_mutation_enabled=False,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={recruiter.email},
+        test_notion_database_allowlist={recruiter.notion_database_id},
+        test_mattermost_user_allowlist={recruiter.mattermost_user_id},
+        minio_test_prefix=recruiter.synology_base_folder,
+    )
+
+    await scan_recruiter(
+        recruiter,
+        factory,
+        disk,
+        AsyncMock(),
+        MagicMock(),
+        settings,
+        review_service=AsyncMock(),
+    )
+    await engine.dispose()
+
+    delivery.assert_not_awaited()
+
+
 def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     get_settings.cache_clear()
     scheduler = MagicMock()
@@ -439,7 +486,7 @@ async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
 
 
 @pytest.mark.anyio
-async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
+async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -459,7 +506,13 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         session.add(item)
         await session.commit()
         recording_id = item.id
-    page = NotionPage("page", "https://notion/page", "Different Notion Title", "2026-07-16")
+    page = NotionPage(
+        "page",
+        "https://notion/page",
+        "Different Notion Title",
+        "2026-07-16",
+        project_or_spot=None,
+    )
     candidate = AsyncMock()
     candidate.find_and_match.return_value = CandidateMatchResult(page=page, confidence=1.0)
     transfer = AsyncMock()
@@ -491,6 +544,10 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
     assert loaded.source_processed is True
     assert loaded.candidate_name == "Ivan Ivanov"
     assert loaded.notion_database_id == owner.notion_database_id
+    assert loaded.project_or_spot is None
+    assert loaded.generated_filename == (
+        "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm"
+    )
     assert loaded.synology_share_url == "https://share/video"
     notion.update_page_file.assert_awaited_once_with(
         "page",
@@ -499,6 +556,62 @@ async def test_transfer_pipeline_reaches_source_marked_processed() -> None:
         "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm",
     )
     disk.mark_processed.assert_awaited_once_with(item.disk_path, owner.email)
+
+
+@pytest.mark.anyio
+async def test_blank_spot_storage_key_collision_requires_manual_review() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("blank-spot-collision")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    expected_key = (
+        "recruiter@example.com/2026-07-16/Ivan_Ivanov/"
+        "2026-07-16_Ivan_Ivanov_unspecified_general_interview.webm"
+    )
+    conflicting = found("existing-key")
+    conflicting.storage_key = expected_key
+    async with factory() as session:
+        session.add_all([item, conflicting])
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage(
+            "page",
+            "https://notion/page",
+            "Different Notion Title",
+            "2026-07-16",
+            project_or_spot=" ",
+        ),
+        confidence=1.0,
+    )
+    transfer = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "storage_key_collision"
+    assert loaded.storage_key is None
+    transfer.transfer.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -631,10 +744,48 @@ async def test_concurrent_transfer_resume_has_single_side_effect_owner() -> None
     second = asyncio.create_task(_resume_transfer_recording(*args))
     await asyncio.sleep(0.05)
     release.set()
-    await asyncio.gather(first, second)
+    first_owned, second_owned = await asyncio.gather(first, second)
+    third_owned = await _resume_transfer_recording(*args)
     await engine.dispose()
 
     assert transfer.create_share_link.await_count == 1
+    assert first_owned is True
+    assert second_owned is False
+    assert third_owned is False
+
+
+@pytest.mark.anyio
+async def test_concurrent_found_resume_has_single_claim() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    item = found("concurrent-found")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calendar = AsyncMock()
+
+    async def find_events(*_args: object) -> list[object]:
+        entered.set()
+        await release.wait()
+        return []
+
+    calendar.find_events.side_effect = find_events
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+    first = asyncio.create_task(_resume_found_recording(recording_id, factory, calendar, matcher))
+    await entered.wait()
+    second_result = await _resume_found_recording(recording_id, factory, calendar, matcher)
+    release.set()
+    first_result = await first
+    await engine.dispose()
+
+    assert first_result is not None
+    assert second_result is None
+    assert calendar.find_events.await_count == 1
 
 
 @pytest.mark.anyio

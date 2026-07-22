@@ -37,7 +37,7 @@ def build_storage_identity(
     *,
     event_date: date,
     candidate_name: str,
-    project_or_spot: str,
+    project_or_spot: str | None,
     interview_type: str,
     original_filename: str,
     recruiter_prefix: str,
@@ -47,7 +47,10 @@ def build_storage_identity(
     if extension not in ALLOWED_EXTENSIONS:
         raise FilenameError("Recording extension is not allowed")
     candidate = sanitize_component(candidate_name)
-    project = sanitize_component(project_or_spot)
+    project_value = (
+        "unspecified" if project_or_spot is None or not project_or_spot.strip() else project_or_spot
+    )
+    project = sanitize_component(project_value)
     kind = sanitize_component(interview_type)
     recruiter = sanitize_component(recruiter_prefix)
     stamp = event_date.isoformat()

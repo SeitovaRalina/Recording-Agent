@@ -8,6 +8,15 @@ production decision. The logical object prefix is
 `<recruiter>/<YYYY-MM-DD>/<candidate>/`; MinIO represents folders as `/`-delimited object-key
 prefixes. The generated basename is
 `YYYY-MM-DD_<candidate_name>_<project_or_spot>_<interview_type>.<ext>`.
+**Source amendment (2026-07-22):** Project source must be configured as an explicit property
+name/type pair. A UTF-8-safe read-only probe confirms that test database `fe5...` exposes the
+literal property `📍 Spots: relation`; the earlier probe missed it because its console output failed
+on Unicode. Test and production therefore use `📍 Spots/relation` after independent preflights.
+For one relation, resolve the related Spot page
+and use its title as `<project_or_spot>`. Empty rich text or an empty relation uses the deterministic
+component `unspecified`. A nonblank resolved title keeps existing sanitization; if it sanitizes to
+empty, fail closed as `invalid_storage_identity`. Multiple related `📍 Spots` must not be silently
+ordered or joined. This policy does not update or reprocess existing recording rows.
 **Collision rule:** A retry of the same recording reuses the same key. A different recording that
 resolves to an existing key requires manual review; never overwrite or silently auto-suffix.
 **Status:** Closed for the MinIO canary. Reopen before Synology production rollout to confirm the
@@ -18,11 +27,23 @@ real share and base path.
 **Consequence for synology.py:** Use API Key header only. No Session SID fallback needed.
 **ADR:** ADR-005 confirmed, ADR-012 (MinIO for dev testing) added.
 
-## Q3: Mattermost routing — channel vs DM ✅ CLOSED
-**Answer (2026-07-21):** DM-only to the configured recruiter. No shared-channel fallback.
-Manual-review replies must be bound to recruiter ID, DM post/thread ID, recording/review version,
-an opaque one-time token, and an expiry. Wrong-user, stale, expired, and replayed replies fail
-closed.
+## Q3: Mattermost routing and conversation UX ✅ CLOSED FOR TARGET UX
+**Answer (updated 2026-07-22):** Use one ordinary DM conversation with the configured recruiter;
+do not require the recruiter to open or reply in Mattermost threads. No shared-channel fallback.
+Mila first sends one daily summary, then presents every unresolved recording as a numbered,
+actionable question. A recruiter may answer all questions or any subset in free form. Mila must
+state how it understood the answer, report that processing started, and later report completion or
+an actionable error.
+
+PostgreSQL, not Mila's conversational memory, owns the durable set of pending, answered,
+processing, completed, failed, and suppressed questions. Replies remain bound to recruiter,
+DM channel, recording/review ID, recording version, an opaque one-time capability, and expiry;
+thread ID is not part of the target binding. Wrong-user, stale, expired, ambiguous, and replayed
+answers fail closed. An unrelated Mila conversation must not consume a Recording Agent question.
+
+Unanswered questions remain pending and are repeated once per day in the 18:00 recruiter-local
+summary. Do not send additional reminder spam between daily summaries. Closed or suppressed
+questions are never repeated.
 
 ## Q4: Яндекс.Диск — where Telemost recordings land ✅ CLOSED
 **Answer:** Fixed folder `/Записи Телемоста/` on organizer's Яндекс.Диск.
@@ -35,20 +56,35 @@ closed.
 **Question:** What is each recruiter's original database ID, and is it shared directly with the
 Recording Agent integration?
 **Known (Anton's Interviews DB):** Name (title), General Interview Date (date), General Interview
-recording (files), TBD (formula), Spots (relation).
+recording (files), TBD (formula), 📍 Spots (relation).
 **Action:** Keep only the original database ID in configuration. With `Notion-Version: 2026-03-11`,
 call `GET /v1/databases/{database_id}`, then retrieve every advertised schema through
 `GET /v1/data_sources/{data_source_id}`. Property IDs and types come from data-source retrieval,
 not database retrieval. Enable the recruiter only when exactly one source has the configured
 name/date/recording properties with types `title`/`date`/`files`.
-**Phase 4 decision (2026-07-21):** Use a test database first; production recruiter databases stay
-disabled. After sharing was updated, Mila's configured token retrieved page
-`397c8889-e4c8-814c-8acf-d7da92915220`, child database `Test Interviews`
-(`ef16e0bf-e91b-470f-90a1-749d0bae0ad3`), and data source
-`0788967f-04fe-43c3-a78b-d2572e031031`. The read-only schema probe confirms `Name` (title),
-`General Interview Date` (date), `General Interview recording` (files), and `Spot Client`
-(rich_text). General-interview naming uses `Spot Client` plus constant `general_interview`;
-`Stage` is not the interview type.
+**Phase 4 decision (corrected 2026-07-22):** Use a test database first; production recruiter
+databases stay disabled. The confirmed `Test Interviews` database ID is
+`fe5fe300f311821b96fe01233947e4c2`. Database
+`ef16e0bfe91b470f90a1749d0bae0ad3` is production and must never be configured in the canary.
+The read-only schema probe must confirm `Name` (title), `General Interview Date` (date),
+`General Interview recording` (files), and configured `📍 Spots` (relation). Production must
+independently validate the same literal property and type. General-interview naming
+uses the resolved configured project property plus constant `general_interview`; `Stage` is not
+the interview type. Discover
+the data-source ID at runtime and never persist it.
+
+**Candidate matching amendment (confirmed by Anton, 2026-07-22):** `General Interview Date` is an
+output, not a prefilled lookup constraint. Candidate lookup must not require it. Match by candidate
+name; email is an optional additional signal. Production contacts are exposed through the `TBD`
+property of type `formula`, based on
+`prop("Candidate").map(current.prop("Contacts"))`. A rendered Contacts value may contain phone,
+email, and Telegram data on separate lines, for example `example@gmail.com`. Runtime schema/value
+probing must confirm the exact Notion API formula representation. Parse only syntactically valid
+email addresses, normalize them case-insensitively, and never treat phone/Telegram text as email.
+Use a calendar attendee email only as supporting evidence; absence or mismatch must not reject an
+otherwise valid name match. Multiple candidate cards or multiple conflicting emails require an
+actionable recruiter choice. After processing, write the matched calendar event date to
+`General Interview Date` and the final storage link to `General Interview recording`.
 **Credential boundary:** Backend `NOTION_TOKEN` and Mila/OpenClaw `NOTION_API_KEY` are environment
 variable names. They may contain the same Connection access token; using separate least-privilege
 tokens is recommended but not required. The skill still calls Backend intents rather than Notion.
@@ -99,36 +135,23 @@ explicit Mattermost interaction and manual-review language only. A native plugin
 option if the script-backed contract proves insufficient.
 **Status:** Closed for Mila Phase 4. Re-evaluate for Sylvanas or an OpenClaw upgrade.
 
-## Q9: Recording retention policy on Яндекс.Диск ✅ CLOSED
-**Answer (2026-07-14):** Two-stage retention:
-1. On successful Synology upload: set custom property `app:recording_agent:processed=true` via `PATCH /disk/resources` (Yandex Disk custom_properties).
-2. DiskScanner skips files with this property → no double processing.
-3. Separate daily cleanup cron: for files where `processed=true` and `processed_at` is at least
-   7 days old, call `DELETE /disk/resources` to move them to Trash. This cron is soft-delete-only.
-4. Permanent deletion is a separate, never-scheduled operation. Every run requires a new
-   `PermanentDeleteApproval` with a non-empty operator identity, timezone-aware timestamp no
-   more than 5 minutes old, and non-empty unique nonce. Freshness uses an injected/trusted aware
-   UTC clock; callers cannot provide `now`. The nonce is consumed before any request and cannot
-   be reused after success or failure. The purge enumerates real Trash resources and deletes
-   their actual `trash:/...` paths. No environment/configuration boolean may grant standing
-   authority.
+## Q9: Recording retention policy on Яндекс.Диск ✅ CLOSED FOR TARGET UX
+**Answer (updated 2026-07-22):** The Telemost recordings folder is reported to be removed by
+Yandex after 90 days and not to consume the normal cloud-storage quota. Recording Agent therefore
+must not schedule automatic source cleanup for the target workflow.
 
-**Consequences for disk.py:**
-- `DiskScanner.list()` filters out items with `custom_properties.processed == "true"`. If
-  `processed_at` is missing or invalid, it repairs the timestamp to current UTC and still
-  excludes the item, preventing duplicate processing.
-- `DiskScanner.mark_processed(path)` → PATCH custom_properties: `{"processed": "true", "processed_at": "<ISO8601>"}`.
-- `DiskScanner.delete_expired()` → list processed items, check `processed_at` age, and move those
-  aged at least 7 days to Trash. If a processed item has missing/invalid `processed_at`, repair
-  it to current UTC and do not delete it during that run. It never permanently deletes.
-- `DiskScanner.purge_expired_from_trash(approval)` → validate fresh per-run approval, enumerate
-  Trash, correlate `origin_path`, validate markers/age, and permanently delete actual Trash paths.
-- A partial purge is resumable: a later run requires fresh approval and re-enumerates remaining
-  Trash resources. The prior nonce remains consumed even when the purge failed, so retry requires
-  a newly issued approval. Ask before every purge run per the `AGENTS.md` destructive-operations
-  rule.
+Keep a manual recruiter command equivalent to "clean successfully processed recordings". It
+must first return a bounded preview and require explicit confirmation. Eligibility must be proven
+from Backend state: the recording completed successfully and has a durable final-storage link.
+Never include pending review, processing, failed, ignored-without-transfer, or otherwise
+unverified files. A confirmed cleanup may only move eligible source files to Yandex Trash; it must
+be idempotent and report each result. Permanent purge remains unavailable to Mila and is never
+scheduled.
 
-**Note:** custom_properties reads require extra API call per file (not returned in folder listing by default). Batch by reading only after scanner confirms file is candidate for processing — not on every scan.
+The current code's older `processed=true` plus automatic seven-day cleanup model is superseded by
+this target decision and must remain disabled until it is reconciled. There is no minimum age:
+an item becomes eligible immediately after Backend proves successful processing. Preview and
+explicit confirmation remain mandatory because moving a source file to Trash is destructive.
 
 ## Q11: Multiple Calendar selection and Telemost filename correlation ✅ CLOSED
 **Answer (2026-07-15):** The shared `/Записи Телемоста/` Disk folder is immutable and contains
@@ -167,8 +190,48 @@ must show the result for confirmation, and then stores the ID on an inactive rec
 Workspace-wide search must never silently select a database. Data-source IDs remain runtime-only.
 
 **Current canary:** `Test Interviews` database
-`ef16e0bf-e91b-470f-90a1-749d0bae0ad3` is confirmed through Mila. Repeat the schema probe with the
-Backend runtime token before enabling writes.
+`fe5fe300f311821b96fe01233947e4c2` is the confirmed test target. Database
+`ef16e0bfe91b470f90a1749d0bae0ad3` is production and is forbidden in canary configuration.
+Repeat the schema probe with the Backend runtime token before enabling writes; discover the
+data-source ID at runtime and never persist it.
 
 **Future:** Self-service OAuth/onboarding is a separate feature and requires consent callbacks,
 secure secret storage, revocation, audit, and deactivation flows.
+
+## Q13: Non-interview routing to Synology ✅ CLOSED FOR TARGET UX
+
+**Confirmed requirement (Anton, 2026-07-22):** A recruiter may explain that an unresolved
+recording is not an interview, identify it as another work meeting, choose a Synology folder, and
+ask Mila to store it there and return a link. This is not the same as `ignored`: a successful
+non-interview route uploads the file and completes without updating a candidate Notion card.
+
+**Safety requirement:** Do not expose an arbitrary raw storage-path primitive to OpenClaw. The
+Backend must resolve the request to recruiter-owned, discovered, bounded Synology destinations
+and persist the chosen destination before upload.
+
+**Answer (2026-07-22):** Recruiters may choose an existing folder or ask Mila to create a new one.
+Backend must create it only under the recruiter's configured storage root after canonical path
+validation and permission checks; free-form text never becomes an unchecked raw path. The exact
+production base path and credentials remain an operational Synology preflight requirement.
+
+## Q14: Reminder policy for unanswered review questions ✅ CLOSED FOR TARGET UX
+
+**Confirmed requirement (2026-07-22):** Mila must identify questions left unanswered after a
+partial free-form reply and repeat them later. Closed questions must never be repeated. Reminder
+state and deduplication belong to Backend/PostgreSQL.
+
+**Answer (2026-07-22):** Send the consolidated summary and repeat unresolved questions once per
+day at 18:00 in the recruiter's configured local timezone. Do not send additional reminders during
+the day. A user may still answer at any time; accepted work gets immediate start and completion or
+error feedback. "Skip" closes the relevant question according to the selected action, and closed
+questions are not repeated.
+
+## Q15: Multiple related `📍 Spots` in Notion [IMPLEMENTATION BLOCKER]
+
+**Question:** If a candidate card relates to more than one `📍 Spots` page, which value belongs in the
+single `<project_or_spot>` filename component and Synology path?
+**Known:** Zero relations use `unspecified`; exactly one relation resolves that page's title. The
+reported `unspecified` result came from reading the legacy `Spot Client/rich_text` property instead
+of the literal `📍 Spots/relation` property; explicit relation resolution is being added.
+**Status:** Open only for the multiple-relation case. Do not choose the first relation based on API
+order.

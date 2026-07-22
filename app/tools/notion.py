@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -88,13 +88,23 @@ class NotionDataSourceSchema:
     property_types: dict[str, str]
 
     def is_compatible(
-        self, name_prop: str, date_prop: str, recording_prop: str, project_prop: str = ""
+        self,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str = "",
+        project_prop_type: str = "",
     ) -> bool:
+        accepted_project_types = (
+            {project_prop_type} if project_prop_type else {"rich_text", "relation"}
+        )
         return (
             self.property_types.get(name_prop) == "title"
             and self.property_types.get(date_prop) == "date"
             and self.property_types.get(recording_prop) == "files"
-            and (not project_prop or self.property_types.get(project_prop) == "rich_text")
+            and (
+                not project_prop or self.property_types.get(project_prop) in accepted_project_types
+            )
         )
 
 
@@ -105,7 +115,7 @@ class NotionDatabaseInspection:
     schema: NotionDataSourceSchema
 
 
-SourceCacheKey = tuple[str, str, str, str, str]
+SourceCacheKey = tuple[str, str, str, str, str, str]
 
 
 class NotionClient:
@@ -144,8 +154,16 @@ class NotionClient:
         date_prop: str,
         recording_prop: str = DEFAULT_RECORDING_PROP,
         project_prop: str = "",
+        project_prop_type: str = "",
     ) -> list[NotionPage]:
-        key = (database_id, name_prop, date_prop, recording_prop, project_prop)
+        key = (
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            project_prop,
+            project_prop_type,
+        )
         source_id, was_cached = await self._resolve_source(key)
         self._trace(
             "notion.query.start",
@@ -172,9 +190,19 @@ class NotionClient:
         results = payload.get("results")
         if not isinstance(results, list):
             raise NotionMalformedResponseError("Notion query response has invalid results")
-        pages = [
-            self._parse_page(item, name_prop, date_prop, project_prop) for item in results[:10]
-        ]
+        pages: list[NotionPage] = []
+        relation_title_cache: dict[str, str] = {}
+        for item in results[:10]:
+            page = self._parse_page(item, name_prop, date_prop, project_prop)
+            relation_ids = self._project_relation_ids(item, project_prop)
+            if relation_ids:
+                relation_id = relation_ids[0]
+                title = relation_title_cache.get(relation_id)
+                if title is None:
+                    title = await self._retrieve_page_title(relation_id)
+                    relation_title_cache[relation_id] = title
+                page = replace(page, project_or_spot=title)
+            pages.append(page)
         self._trace(
             "notion.query.result",
             database_id=database_id,
@@ -262,10 +290,15 @@ class NotionClient:
                         del self._inflight[key]
 
     async def _discover_source(self, key: SourceCacheKey) -> str:
-        database_id, name_prop, date_prop, recording_prop, project_prop = key
+        database_id, name_prop, date_prop, recording_prop, project_prop, project_prop_type = key
         database = await self._retrieve_database(database_id)
         selected = await self._select_compatible_schema(
-            database, name_prop, date_prop, recording_prop, project_prop
+            database,
+            name_prop,
+            date_prop,
+            recording_prop,
+            project_prop,
+            project_prop_type,
         )
         self._trace_source_selection(database_id, database, selected.id)
         return selected.id
@@ -277,10 +310,16 @@ class NotionClient:
         date_prop: str,
         recording_prop: str,
         project_prop: str = "",
+        project_prop_type: str = "",
     ) -> NotionDatabaseInspection:
         database = await self._retrieve_database(database_id)
         selected = await self._select_compatible_schema(
-            database, name_prop, date_prop, recording_prop, project_prop
+            database,
+            name_prop,
+            date_prop,
+            recording_prop,
+            project_prop,
+            project_prop_type,
         )
         self._trace_source_selection(database_id, database, selected.id)
         return NotionDatabaseInspection(
@@ -297,9 +336,15 @@ class NotionClient:
         date_prop: str,
         recording_prop: str,
         project_prop: str = "",
+        project_prop_type: str = "",
     ) -> NotionDatabaseInspection:
         inspection = await self.inspect_database(
-            database_id, name_prop, date_prop, recording_prop, project_prop
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            project_prop,
+            project_prop_type,
         )
         try:
             response = await self._client.post(
@@ -350,12 +395,19 @@ class NotionClient:
         date_prop: str,
         recording_prop: str,
         project_prop: str,
+        project_prop_type: str,
     ) -> NotionDataSourceSchema:
         sources = self._parse_sources(database)
         compatible: list[NotionDataSourceSchema] = []
         for source in sources:
             schema = await self._retrieve_schema(source.id)
-            if schema.is_compatible(name_prop, date_prop, recording_prop, project_prop):
+            if schema.is_compatible(
+                name_prop,
+                date_prop,
+                recording_prop,
+                project_prop,
+                project_prop_type,
+            ):
                 compatible.append(schema)
         if not compatible:
             raise NotionSchemaError("No Notion data source has the required schema")
@@ -407,6 +459,34 @@ class NotionClient:
             if isinstance(prop_type, str):
                 property_types[name] = prop_type
         return NotionDataSourceSchema(id=payload_id, property_types=property_types)
+
+    async def _retrieve_page_title(self, page_id: str) -> str:
+        try:
+            response = await self._client.get(
+                f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion related page retrieval failed") from None
+        self._raise_common(response)
+        if response.is_error:
+            raise NotionQueryError(
+                f"Notion related page retrieval failed with HTTP {response.status_code}"
+            )
+        payload = self._json_object(response, "related page retrieval")
+        properties = payload.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError("Notion related page properties are malformed")
+        title = next(
+            (
+                self._plain_text(value).strip()
+                for value in properties.values()
+                if isinstance(value, dict) and isinstance(value.get("title"), list)
+            ),
+            "",
+        )
+        if not title:
+            raise NotionMalformedResponseError("Notion related page has no title")
+        return title
 
     async def _query_source(
         self,
@@ -535,6 +615,32 @@ class NotionClient:
                 NotionClient._plain_text(properties.get(project_prop)) if project_prop else None
             ),
         )
+
+    @staticmethod
+    def _project_relation_ids(item: Any, project_prop: str) -> list[str]:
+        if not project_prop or not isinstance(item, dict):
+            return []
+        properties = item.get("properties")
+        if not isinstance(properties, dict):
+            return []
+        value = properties.get(project_prop)
+        if not isinstance(value, dict) or "relation" not in value:
+            return []
+        relations = value.get("relation")
+        if not isinstance(relations, list):
+            raise NotionMalformedResponseError("Notion project relation is malformed")
+        if value.get("has_more") is True or len(relations) > 1:
+            raise NotionMalformedResponseError("Notion project relation is ambiguous")
+        relation_ids: list[str] = []
+        for relation in relations:
+            if (
+                not isinstance(relation, dict)
+                or not isinstance(relation.get("id"), str)
+                or not relation["id"]
+            ):
+                raise NotionMalformedResponseError("Notion project relation is malformed")
+            relation_ids.append(relation["id"])
+        return relation_ids
 
     @staticmethod
     def _plain_text(value: Any) -> str:
