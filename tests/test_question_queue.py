@@ -118,9 +118,32 @@ async def test_digest_reminds_once_then_suppresses(session: AsyncSession) -> Non
     assert await service.build_digest(
         session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
     )
+    first_message = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "summary")
+    )
+    assert first_message is not None
+    rendered = first_message.payload["message"]
+    assert isinstance(rendered, str)
+    assert "capability=" not in rendered
+    assert "question=" not in rendered
+    assert "set=" not in rendered
+    first_message.status = OutboxStatus.SENDING
+    first_message.claim_owner = "worker-1"
+    await service.deliver_claimed(session, first_message, worker_id="worker-1")
+    await session.commit()
     assert await service.build_digest(
         session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 23)
     )
+    second_message = await session.scalar(
+        select(NotificationOutbox).where(
+            NotificationOutbox.dedupe_key == "digest:recruiter:dm:2026-07-23"
+        )
+    )
+    assert second_message is not None
+    second_message.status = OutboxStatus.SENDING
+    second_message.claim_owner = "worker-2"
+    await service.deliver_claimed(session, second_message, worker_id="worker-2")
+    await session.commit()
     assert (
         await service.build_digest(
             session,
@@ -132,6 +155,42 @@ async def test_digest_reminds_once_then_suppresses(session: AsyncSession) -> Non
     )
     assert question.automatic_delivery_count == 2
     assert question.status == ManualReviewStatus.SUPPRESSED
+
+
+@pytest.mark.anyio
+async def test_undelivered_summary_does_not_consume_reminder(session: AsyncSession) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("delivery-failed", "unused")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    assert await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+    assert (
+        await service.build_digest(
+            session,
+            recruiter_user_id="recruiter",
+            dm_channel_id="dm",
+            local_date=date(2026, 7, 23),
+        )
+        is None
+    )
+    assert question.automatic_delivery_count == 0
+    assert question.status == ManualReviewStatus.PENDING
 
 
 @pytest.mark.anyio

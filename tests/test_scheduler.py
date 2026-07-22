@@ -12,10 +12,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models.manual_review import ManualReview
+from app.db.models.question_digest import QuestionDigest
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
 from app.scheduler.cron import (
+    _claim_daily_digest,
+    _due_recruiter_local_date,
     _persist_found_recording,
     _resume_found_recording,
     _resume_transfer_recording,
@@ -443,8 +446,8 @@ def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
     scheduler = MagicMock()
     register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
-    assert scheduler.add_job.call_count == 2
-    assert scheduler.add_job.call_args_list[1].kwargs["id"] == "cleanup_stale_transfer_files"
+    assert scheduler.add_job.call_count == 1
+    assert scheduler.add_job.call_args_list[0].kwargs["id"] == "cleanup_stale_transfer_files"
     assert all(
         call.kwargs["id"] != "cleanup_expired_recordings"
         for call in scheduler.add_job.call_args_list
@@ -453,7 +456,7 @@ def test_registered_cleanup_has_no_permanent_delete_authority() -> None:
 
 
 @pytest.mark.anyio
-async def test_real_scheduler_registers_jobs_before_start_with_next_run_logs(
+async def test_real_scheduler_is_disabled_by_default_but_temp_cleanup_remains(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     get_settings.cache_clear()
@@ -463,12 +466,12 @@ async def test_real_scheduler_registers_jobs_before_start_with_next_run_logs(
         register_jobs(scheduler, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         scheduler.start(paused=True)
     try:
-        scan_job = scheduler.get_job("scan_all_recruiters")
+        scan_job = scheduler.get_job("scan_due_recruiter_summaries")
         cleanup_job = scheduler.get_job("cleanup_expired_recordings")
-        assert scan_job is not None
+        assert scan_job is None
         assert cleanup_job is None
-        assert scan_job.next_run_time is not None
-        assert "scan_all_recruiters registered:" in caplog.text
+        assert scheduler.get_job("cleanup_stale_transfer_files") is not None
+        assert "Scheduled recording scan is disabled" in caplog.text
         assert "cleanup_expired_recordings registered:" not in caplog.text
         assert "next_run=None" not in caplog.text
     finally:
@@ -481,8 +484,80 @@ async def test_app_lifespan_starts_scheduler_without_running_jobs() -> None:
     get_settings.cache_clear()
     async with app.router.lifespan_context(app):
         assert app.state.scheduler.running is True
-        assert app.state.scheduler.get_job("scan_all_recruiters") is not None
+        assert app.state.scheduler.get_job("scan_due_recruiter_summaries") is None
+        assert app.state.scheduler.get_job("cleanup_stale_transfer_files") is not None
         assert app.state.scheduler.get_job("cleanup_expired_recordings") is None
+    get_settings.cache_clear()
+
+
+def test_recruiter_local_due_time_handles_dst_offsets() -> None:
+    owner = recruiter()
+    owner.timezone = "Europe/Berlin"
+
+    assert _due_recruiter_local_date(owner, datetime(2026, 7, 22, 15, 59, tzinfo=UTC)) is None
+    assert _due_recruiter_local_date(owner, datetime(2026, 7, 22, 16, 0, tzinfo=UTC)) == date(
+        2026, 7, 22
+    )
+    assert _due_recruiter_local_date(owner, datetime(2026, 12, 22, 16, 59, tzinfo=UTC)) is None
+    assert _due_recruiter_local_date(owner, datetime(2026, 12, 22, 17, 0, tzinfo=UTC)) == date(
+        2026, 12, 22
+    )
+
+
+@pytest.mark.anyio
+async def test_daily_digest_claim_deduplicates_and_recovers_after_restart() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+
+    assert await _claim_daily_digest(factory, "user", "dm", date(2026, 7, 22), now) is True
+    assert (
+        await _claim_daily_digest(
+            factory, "user", "dm", date(2026, 7, 22), now + timedelta(minutes=1)
+        )
+        is False
+    )
+    assert (
+        await _claim_daily_digest(
+            factory, "user", "dm", date(2026, 7, 22), now + timedelta(minutes=16)
+        )
+        is True
+    )
+    async with factory() as session:
+        assert len(list((await session.scalars(select(QuestionDigest))).all())) == 1
+    await engine.dispose()
+
+
+def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCHEDULER_ENABLED", "true")
+    get_settings.cache_clear()
+    scheduler = MagicMock()
+
+    register_jobs(
+        scheduler,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        question_queue_service=MagicMock(),
+    )
+
+    dispatcher = next(
+        call
+        for call in scheduler.add_job.call_args_list
+        if call.kwargs["id"] == "scan_due_recruiter_summaries"
+    )
+    assert dispatcher.kwargs["coalesce"] is True
+    assert dispatcher.kwargs["misfire_grace_time"] == 86400
+    assert dispatcher.kwargs["max_instances"] == 1
+    assert all(
+        call.kwargs["id"] != "cleanup_expired_recordings"
+        for call in scheduler.add_job.call_args_list
+    )
     get_settings.cache_clear()
 
 
@@ -493,7 +568,7 @@ async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed(
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     owner = recruiter()
-    settings = Settings()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=True)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
     owner.notion_preflight_schema_hash = notion_schema_hash(settings)
@@ -1229,7 +1304,7 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
             email="second@example.com", notion_database_id="two", synology_base_folder="/two"
         ),
     ]
-    settings = Settings()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=True)
     for owner in owners:
         owner.notion_preflight_token_hash = notion_token_hash(settings)
         owner.notion_preflight_database_id = owner.notion_database_id

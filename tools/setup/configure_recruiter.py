@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import DISCOVERY_MAX_AGE, CalDAVClient
 from app.tools.mattermost import MattermostClient
 from app.tools.notion import NotionClient
+from app.tools.synology import SynologyBackend, SynologyPreflight
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,12 @@ class CalendarProvisioner(Protocol):
 class MattermostUserProbe(Protocol):
     async def probe_user(self, recruiter_user_id: str) -> None: ...
 
+    async def validate_direct_channel(self, recruiter_user_id: str, channel_id: str) -> None: ...
+
+
+class StorageRootProbe(Protocol):
+    async def preflight(self, root: str) -> SynologyPreflight: ...
+
 
 class YandexProbe:
     def __init__(self, token_manager: YandexTokenManager) -> None:
@@ -67,6 +75,7 @@ class NotionInspector:
             self._settings.notion_recording_prop,
             self._settings.notion_project_prop,
             self._settings.notion_project_prop_type,
+            self._settings.notion_contacts_prop,
         )
         return DatabaseInspection(
             database_id=database_id,
@@ -98,6 +107,8 @@ async def configure_recruiter(
     storage_prefix: str,
     confirmed: bool,
     inspection: DatabaseInspection | None = None,
+    timezone_name: str = "UTC",
+    mattermost_dm_channel: str = "",
 ) -> RecruiterConfig:
     normalized_email = email.strip().casefold()
     if normalized_email not in settings.yandex_refresh_tokens:
@@ -108,6 +119,10 @@ async def configure_recruiter(
         select(RecruiterConfig.id).where(RecruiterConfig.email == normalized_email)
     ):
         raise ValueError("Recruiter already exists")
+    try:
+        canonical_timezone = ZoneInfo(timezone_name.strip()).key
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ValueError("Recruiter timezone is invalid") from None
     database_id = parse_notion_database_id(notion_target)
     if inspection is None:
         inspection = await inspector.inspect(database_id)
@@ -120,7 +135,9 @@ async def configure_recruiter(
         email=normalized_email,
         notion_database_id=database_id,
         mattermost_user_id=mattermost_user_id.strip(),
+        mattermost_dm_channel=mattermost_dm_channel.strip() or None,
         synology_base_folder=storage_prefix.strip(" /"),
+        timezone=canonical_timezone,
         active=False,
     )
     session.add(recruiter)
@@ -152,6 +169,7 @@ async def preflight_recruiter_notion(
         settings.notion_recording_prop,
         settings.notion_project_prop,
         settings.notion_project_prop_type,
+        settings.notion_contacts_prop,
     )
     if inspection.database_id != recruiter.notion_database_id:
         raise ValueError("Notion preflight returned another database")
@@ -175,11 +193,14 @@ async def preflight_recruiter(
     calendar: CalendarProvisioner,
     notion: NotionClient,
     mattermost: MattermostUserProbe,
+    storage: StorageRootProbe | None = None,
 ) -> RecruiterConfig:
     recruiter = await _inactive_recruiter(session, recruiter_email)
     _require_configured_credentials(settings, recruiter)
     if not recruiter.mattermost_user_id:
         raise ValueError("Mattermost recruiter mapping is missing")
+    if not recruiter.mattermost_dm_channel:
+        raise ValueError("Mattermost DM channel binding is missing")
 
     await yandex_probe.probe(recruiter.email)
     await calendar.discover_calendars(recruiter.email)
@@ -200,6 +221,20 @@ async def preflight_recruiter(
     recruiter.caldav_calendar_url = target.canonical_url
     if settings.mattermost_delivery_enabled:
         await mattermost.probe_user(recruiter.mattermost_user_id)
+        await mattermost.validate_direct_channel(
+            recruiter.mattermost_user_id, recruiter.mattermost_dm_channel
+        )
+    if settings.storage_provider == "synology":
+        if storage is None:
+            raise ValueError("Synology preflight client is required")
+        result = await storage.preflight(recruiter.synology_base_folder)
+        if not (
+            result.api_available
+            and result.root_exists
+            and result.root_writable
+            and result.share_links_available
+        ):
+            raise ValueError("Synology root preflight failed")
     await session.commit()
     return await preflight_recruiter_notion(
         session,
@@ -222,6 +257,8 @@ async def activate_recruiter(
     _require_configured_credentials(settings, recruiter)
     if not recruiter.mattermost_user_id:
         raise ValueError("Mattermost recruiter mapping is missing")
+    if not recruiter.mattermost_dm_channel:
+        raise ValueError("Mattermost DM channel binding is missing")
     try:
         require_notion_preflight(settings, recruiter)
     except PermissionError as error:
@@ -242,6 +279,9 @@ async def activate_recruiter(
     await yandex_probe.probe(recruiter.email)
     if settings.mattermost_delivery_enabled:
         await mattermost.probe_user(recruiter.mattermost_user_id)
+        await mattermost.validate_direct_channel(
+            recruiter.mattermost_user_id, recruiter.mattermost_dm_channel
+        )
     recruiter.active = True
     await session.commit()
     return recruiter
@@ -305,6 +345,8 @@ async def _run(args: argparse.Namespace) -> None:
                         storage_prefix=args.storage_prefix,
                         confirmed=confirmed,
                         inspection=inspection,
+                        timezone_name=args.timezone,
+                        mattermost_dm_channel=args.mattermost_dm_channel,
                     )
                 else:
                     yandex = YandexProbe(YandexTokenManager(factory, settings, client))
@@ -325,6 +367,15 @@ async def _run(args: argparse.Namespace) -> None:
                             calendar=CalDAVClient(settings, factory, client),
                             notion=notion,
                             mattermost=mattermost,
+                            storage=(
+                                SynologyBackend(
+                                    settings.synology_base_url,
+                                    settings.synology_api_key,
+                                    client,
+                                )
+                                if settings.storage_provider == "synology"
+                                else None
+                            ),
                         )
                     elif input("Activate recruiter? [yes/no] ").strip() == "yes":
                         await activate_recruiter(
@@ -347,6 +398,8 @@ def main() -> None:
     configure.add_argument("--email", required=True)
     configure.add_argument("--notion", required=True, help="Explicit Notion database URL or ID")
     configure.add_argument("--mattermost-user-id", required=True)
+    configure.add_argument("--mattermost-dm-channel", required=True)
+    configure.add_argument("--timezone", required=True)
     configure.add_argument("--storage-prefix", required=True)
     preflight = commands.add_parser("preflight", help="Run all inactive recruiter preflights")
     preflight.add_argument("--email", required=True)

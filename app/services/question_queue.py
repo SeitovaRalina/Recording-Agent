@@ -139,6 +139,18 @@ class QuestionQueueService:
         local_date: date,
     ) -> QuestionDigest | None:
         await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        dedupe_key = f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}"
+        outstanding_summary = await session.scalar(
+            select(NotificationOutbox.id).where(
+                NotificationOutbox.recruiter_user_id == recruiter_user_id,
+                NotificationOutbox.mattermost_channel_id == dm_channel_id,
+                NotificationOutbox.kind == "summary",
+                NotificationOutbox.status.in_([OutboxStatus.PENDING, OutboxStatus.SENDING]),
+                NotificationOutbox.dedupe_key != dedupe_key,
+            )
+        )
+        if outstanding_summary is not None:
+            return None
         existing = await session.scalar(
             select(QuestionDigest).where(
                 QuestionDigest.recruiter_user_id == recruiter_user_id,
@@ -146,7 +158,11 @@ class QuestionQueueService:
                 QuestionDigest.local_date == local_date,
             )
         )
-        if existing is not None:
+        if existing is not None and existing.status != QuestionDigestStatus.PENDING:
+            return existing
+        if existing is not None and await session.scalar(
+            select(NotificationOutbox.id).where(NotificationOutbox.dedupe_key == dedupe_key)
+        ):
             return existing
         now = datetime.now(UTC)
         await session.execute(
@@ -178,27 +194,27 @@ class QuestionQueueService:
             .all()
         )
         if not questions:
+            if existing is not None:
+                existing.status = QuestionDigestStatus.SENT
+                existing.sent_at = now
+                await session.flush()
             return None
-        digest = QuestionDigest(
-            recruiter_user_id=recruiter_user_id,
-            mattermost_channel_id=dm_channel_id,
-            local_date=local_date,
-        )
-        session.add(digest)
-        await session.flush()
+        digest = existing
+        if digest is None:
+            digest = QuestionDigest(
+                recruiter_user_id=recruiter_user_id,
+                mattermost_channel_id=dm_channel_id,
+                local_date=local_date,
+            )
+            session.add(digest)
+            await session.flush()
         lines = ["Recording Agent questions:"]
         for number, question in enumerate(questions, start=1):
             question.digest_id = digest.id
-            question.automatic_delivery_count += 1
-            lines.append(
-                f"{number}. {question.recording.disk_filename}: {question.question_type} "
-                f"[question={question.id}; set={question.question_set_id}; "
-                f"capability={self._reviews.capability_token(question)}; "
-                f"version={question.recording_version}]"
-            )
+            lines.append(f"{number}. {question.recording.disk_filename}: {question.question_type}")
         await self.queue_notification(
             session,
-            dedupe_key=f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}",
+            dedupe_key=dedupe_key,
             kind="summary",
             recruiter_user_id=recruiter_user_id,
             dm_channel_id=dm_channel_id,
@@ -365,6 +381,14 @@ class QuestionQueueService:
             if isinstance(entity_id, str):
                 digest = await session.get(QuestionDigest, uuid.UUID(entity_id))
                 if digest is not None:
+                    await session.execute(
+                        update(ManualReview)
+                        .where(
+                            ManualReview.digest_id == digest.id,
+                            ManualReview.status == ManualReviewStatus.PENDING,
+                        )
+                        .values(automatic_delivery_count=ManualReview.automatic_delivery_count + 1)
+                    )
                     digest.status = QuestionDigestStatus.SENT
                     digest.sent_at = item.sent_at
         await session.flush()

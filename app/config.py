@@ -14,11 +14,11 @@ class Settings(BaseSettings):
     app_environment: Literal["development", "test", "production"] = "production"
     pipeline_trace_enabled: bool = False
     test_mode_enabled: bool = False
-    scheduler_enabled: bool = True
-    yandex_source_mutation_enabled: bool = True
+    scheduler_enabled: bool = False
+    yandex_source_mutation_enabled: bool = False
     cleanup_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     cleanup_preview_max_items: int = Field(default=50, ge=1, le=100)
-    notion_writes_enabled: bool = True
+    notion_writes_enabled: bool = False
     test_recruiter_allowlist: set[str] = Field(default_factory=set)
     test_notion_database_allowlist: set[str] = Field(default_factory=set)
     test_mattermost_user_allowlist: set[str] = Field(default_factory=set)
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     mattermost_bot_token: SecretStr = SecretStr("")
     mattermost_channel_id: str = ""
     mattermost_bot_user_id: str = ""
-    mattermost_delivery_enabled: bool = True
+    mattermost_delivery_enabled: bool = False
     review_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     intent_claim_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     minio_endpoint: str = "http://localhost:9000"
@@ -103,8 +103,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_canary_boundary(self) -> "Settings":
-        if not self.mattermost_delivery_enabled and not self.test_mode_enabled:
-            raise ValueError("Mattermost delivery can be disabled only in test mode")
         if self.test_mode_enabled:
             if self.storage_provider != "minio":
                 raise ValueError("Test mode requires MinIO storage")

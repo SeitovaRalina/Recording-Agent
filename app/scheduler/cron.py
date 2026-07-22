@@ -3,16 +3,18 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
+from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import (
@@ -29,6 +31,7 @@ from app.services.matching import (
     normalize_title,
 )
 from app.services.pipeline_trace import safe_url, trace
+from app.services.question_queue import QuestionQueueService
 from app.services.reviews import ReviewService
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
@@ -38,6 +41,10 @@ from app.tools.disk import DiskScanner
 from app.tools.notion import NotionClient, NotionPage
 
 logger = logging.getLogger(__name__)
+
+SUMMARY_LOCAL_HOUR = 18
+SUMMARY_LOCAL_MINUTE = 0
+SUMMARY_CLAIM_TTL = timedelta(minutes=15)
 
 TRANSFER_RESUMABLE_STATUSES = (
     RecordingStatus.CALENDAR_EVENT_FOUND,
@@ -196,8 +203,6 @@ async def scan_recruiter(
         summary.manual_review,
         summary.failed,
     )
-    if review_service is not None and active_settings.mattermost_delivery_enabled:
-        await _send_recruiter_notifications(recruiter, session_factory, review_service)
     return summary
 
 
@@ -1161,19 +1166,38 @@ def register_jobs(
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
     review_service: ReviewService | None = None,
+    question_queue_service: QuestionQueueService | None = None,
 ) -> None:
     settings = get_settings()
+    scheduler.add_job(
+        cleanup_stale_temp_files,
+        "interval",
+        hours=1,
+        max_instances=1,
+        id="cleanup_stale_transfer_files",
+        replace_existing=True,
+    )
+    if settings.mattermost_delivery_enabled and question_queue_service is not None:
+        scheduler.add_job(
+            drain_notification_outbox,
+            "interval",
+            seconds=10,
+            args=[session_factory, question_queue_service],
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+            id="deliver_notification_outbox",
+            replace_existing=True,
+        )
     if not settings.scheduler_enabled:
         logger.info("Scheduled recording scan is disabled")
         return
-    scan_trigger = CronTrigger(
-        hour=settings.scan_hour,
-        minute=settings.scan_minute,
-        timezone=UTC,
-    )
+    if question_queue_service is None:
+        raise RuntimeError("Question queue service is required when scheduler is enabled")
     scheduler.add_job(
-        scan_all_recruiters,
-        scan_trigger,
+        run_due_recruiter_summaries,
+        "interval",
+        minutes=1,
         args=[
             session_factory,
             disk,
@@ -1185,26 +1209,162 @@ def register_jobs(
             status_service,
             notion,
             review_service,
+            question_queue_service,
         ],
         max_instances=1,
-        misfire_grace_time=3600,
-        id="scan_all_recruiters",
+        coalesce=True,
+        misfire_grace_time=86400,
+        id="scan_due_recruiter_summaries",
         replace_existing=True,
     )
     logger.info(
-        "scan_all_recruiters registered: hour=%d minute=%d next_run=%s",
-        settings.scan_hour,
-        settings.scan_minute,
-        _next_run_time(scan_trigger).isoformat(),
+        "recruiter-local scan/summary dispatcher registered: local_time=%02d:%02d",
+        SUMMARY_LOCAL_HOUR,
+        SUMMARY_LOCAL_MINUTE,
     )
-    scheduler.add_job(
-        cleanup_stale_temp_files,
-        "interval",
-        hours=1,
-        max_instances=1,
-        id="cleanup_stale_transfer_files",
-        replace_existing=True,
-    )
+
+
+async def run_due_recruiter_summaries(
+    session_factory: async_sessionmaker[AsyncSession],
+    disk: DiskScanner,
+    cal: CalDAVClient,
+    matcher: InterviewMatcher,
+    settings: Settings,
+    candidate_service: CandidateService | None,
+    transfer_service: TransferService | None,
+    status_service: StatusService | None,
+    notion: NotionClient | None,
+    review_service: ReviewService | None,
+    question_queue_service: QuestionQueueService,
+    now: datetime | None = None,
+) -> None:
+    current = _utc(now or datetime.now(UTC))
+    for recruiter in await _active_recruiters(session_factory):
+        local_date = _due_recruiter_local_date(recruiter, current)
+        if (
+            local_date is None
+            or not recruiter.mattermost_user_id
+            or not recruiter.mattermost_dm_channel
+        ):
+            continue
+        claimed = await _claim_daily_digest(
+            session_factory,
+            recruiter.mattermost_user_id,
+            recruiter.mattermost_dm_channel,
+            local_date,
+            current,
+        )
+        if not claimed:
+            continue
+        try:
+            await scan_recruiter(
+                recruiter,
+                session_factory,
+                disk,
+                cal,
+                matcher,
+                settings,
+                now=current,
+                candidate_service=candidate_service,
+                transfer_service=transfer_service,
+                status_service=status_service,
+                notion=notion,
+                review_service=None,
+            )
+            async with session_factory() as session:
+                await question_queue_service.build_digest(
+                    session,
+                    recruiter_user_id=recruiter.mattermost_user_id,
+                    dm_channel_id=recruiter.mattermost_dm_channel,
+                    local_date=local_date,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("Scheduled recruiter scan/summary failed for %s", recruiter.email)
+            async with session_factory() as session:
+                digest = await session.scalar(
+                    select(QuestionDigest).where(
+                        QuestionDigest.recruiter_user_id == recruiter.mattermost_user_id,
+                        QuestionDigest.mattermost_channel_id == recruiter.mattermost_dm_channel,
+                        QuestionDigest.local_date == local_date,
+                    )
+                )
+                if digest is not None:
+                    digest.status = QuestionDigestStatus.FAILED
+                    await session.commit()
+
+
+async def drain_notification_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    service: QuestionQueueService,
+) -> None:
+    worker_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        items = await service.claim_outbox(session, worker_id=worker_id)
+        await session.commit()
+        for item in items:
+            try:
+                await service.deliver_claimed(session, item, worker_id=worker_id)
+                await session.commit()
+            except Exception:
+                await session.commit()
+                logger.exception("Notification outbox delivery failed for item %s", item.id)
+
+
+def _due_recruiter_local_date(recruiter: RecruiterConfig, now: datetime) -> date | None:
+    try:
+        local = _utc(now).astimezone(ZoneInfo(recruiter.timezone))
+    except Exception:
+        logger.error("Recruiter %s has invalid timezone", recruiter.email)
+        return None
+    due = time(SUMMARY_LOCAL_HOUR, SUMMARY_LOCAL_MINUTE)
+    return local.date() if local.timetz().replace(tzinfo=None) >= due else None
+
+
+async def _claim_daily_digest(
+    session_factory: async_sessionmaker[AsyncSession],
+    recruiter_user_id: str,
+    dm_channel_id: str,
+    local_date: date,
+    now: datetime,
+) -> bool:
+    async with session_factory() as session:
+        existing = await session.scalar(
+            select(QuestionDigest)
+            .where(
+                QuestionDigest.recruiter_user_id == recruiter_user_id,
+                QuestionDigest.mattermost_channel_id == dm_channel_id,
+                QuestionDigest.local_date == local_date,
+            )
+            .with_for_update(skip_locked=True)
+        )
+        if existing is not None:
+            created_at = _utc(existing.created_at)
+            if existing.status == QuestionDigestStatus.SENT:
+                return False
+            if (
+                existing.status == QuestionDigestStatus.PENDING
+                and created_at > now - SUMMARY_CLAIM_TTL
+            ):
+                return False
+            existing.status = QuestionDigestStatus.PENDING
+            existing.created_at = now
+            await session.commit()
+            return True
+        session.add(
+            QuestionDigest(
+                recruiter_user_id=recruiter_user_id,
+                mattermost_channel_id=dm_channel_id,
+                local_date=local_date,
+                created_at=now,
+            )
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            return False
+        return True
 
 
 def _next_run_time(trigger: CronTrigger, now: datetime | None = None) -> datetime:

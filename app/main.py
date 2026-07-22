@@ -90,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         status_service,
         notion,
         review_service,
+        question_queue_service,
     )
     scheduler.start()
     try:

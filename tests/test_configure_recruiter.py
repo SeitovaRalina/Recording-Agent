@@ -99,12 +99,38 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
         email="R@example.com",
         notion_target="fe5fe300f311821b96fe01233947e4c2",
         mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
+        timezone_name="Asia/Omsk",
         confirmed=True,
     )
     assert recruiter.active is False
     assert recruiter.notion_database_id == "fe5fe300-f311-821b-96fe-01233947e4c2"
+    assert recruiter.timezone == "Asia/Omsk"
+    assert recruiter.mattermost_dm_channel == "dm-channel"
     inspector.inspect.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_bootstrap_rejects_invalid_recruiter_timezone(session: object) -> None:
+    settings = Settings(
+        yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
+        yandex_caldav_passwords={"r@example.com": SecretStr("password")},
+    )
+
+    with pytest.raises(ValueError, match="timezone"):
+        await configure_recruiter(
+            session,  # type: ignore[arg-type]
+            AsyncMock(),
+            settings,
+            email="r@example.com",
+            notion_target="fe5fe300f311821b96fe01233947e4c2",
+            mattermost_user_id="mm-user",
+            mattermost_dm_channel="dm-channel",
+            storage_prefix="test-prefix",
+            timezone_name="Invalid/Timezone",
+            confirmed=True,
+        )
 
 
 @pytest.mark.anyio
@@ -124,6 +150,7 @@ async def test_bootstrap_reuses_confirmed_database_inspection(session: object) -
         email="R@example.com",
         notion_target=database_id,
         mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
         confirmed=True,
         inspection=inspection,
@@ -148,6 +175,7 @@ async def test_operator_preflight_persists_backend_token_and_synthetic_row_proof
         email="r@example.com",
         notion_target=database_id,
         mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
         confirmed=True,
         inspection=DatabaseInspection(database_id, "Test Interviews", {}),
@@ -184,6 +212,7 @@ async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
         test_mode_enabled=not mattermost_delivery_enabled,
         yandex_source_mutation_enabled=mattermost_delivery_enabled,
         mattermost_delivery_enabled=mattermost_delivery_enabled,
+        notion_writes_enabled=True,
     )
     recruiter = await configure_recruiter(
         session,  # type: ignore[arg-type]
@@ -192,6 +221,7 @@ async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
         email="r@example.com",
         notion_target=database_id,
         mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
         confirmed=True,
         inspection=DatabaseInspection(database_id, "Test Interviews", {}),
@@ -239,8 +269,10 @@ async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
     yandex.probe.assert_awaited_once_with("r@example.com")
     if mattermost_delivery_enabled:
         mattermost.probe_user.assert_awaited_once_with("mm-user")
+        mattermost.validate_direct_channel.assert_awaited_once_with("mm-user", "dm-channel")
     else:
         mattermost.probe_user.assert_not_awaited()
+        mattermost.validate_direct_channel.assert_not_awaited()
         activated = await activate_recruiter(
             session,  # type: ignore[arg-type]
             settings,
@@ -259,6 +291,8 @@ async def test_activation_fails_closed_then_activates_after_all_preflights(
     database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
     settings = Settings(
         notion_token=SecretStr("backend-token"),
+        notion_writes_enabled=True,
+        mattermost_delivery_enabled=True,
         yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
         yandex_caldav_passwords={"r@example.com": SecretStr("password")},
     )
@@ -269,6 +303,7 @@ async def test_activation_fails_closed_then_activates_after_all_preflights(
         email="r@example.com",
         notion_target=database_id,
         mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
         confirmed=True,
         inspection=DatabaseInspection(database_id, "Test Interviews", {}),
@@ -314,3 +349,4 @@ async def test_activation_fails_closed_then_activates_after_all_preflights(
     assert activated.active is True
     yandex.probe.assert_awaited_once_with("r@example.com")
     mattermost.probe_user.assert_awaited_once_with("mm-user")
+    mattermost.validate_direct_channel.assert_awaited_once_with("mm-user", "dm-channel")

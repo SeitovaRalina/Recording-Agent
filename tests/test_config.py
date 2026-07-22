@@ -1,5 +1,4 @@
-import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from app.config import Settings, get_settings
 
@@ -26,6 +25,10 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.recording_filename_timezone == "Europe/Moscow"
     assert settings.app_environment == "production"
     assert settings.pipeline_trace_active is False
+    assert settings.scheduler_enabled is False
+    assert settings.mattermost_delivery_enabled is False
+    assert settings.notion_writes_enabled is False
+    assert settings.yandex_source_mutation_enabled is False
     get_settings.cache_clear()
 
 
@@ -58,13 +61,12 @@ def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None: 
     assert settings.pipeline_trace_active is True
 
 
-def test_mattermost_delivery_can_be_disabled_only_in_test_mode() -> None:
-    with pytest.raises(ValidationError, match="only in test mode"):
-        Settings(test_mode_enabled=False, mattermost_delivery_enabled=False)
-
+def test_side_effect_flags_are_explicitly_opt_in() -> None:
     settings = Settings(
-        test_mode_enabled=True,
-        yandex_source_mutation_enabled=False,
-        mattermost_delivery_enabled=False,
+        scheduler_enabled=True,
+        mattermost_delivery_enabled=True,
+        notion_writes_enabled=True,
+        yandex_source_mutation_enabled=True,
     )
-    assert settings.mattermost_delivery_enabled is False
+    assert settings.scheduler_enabled is True
+    assert settings.mattermost_delivery_enabled is True
