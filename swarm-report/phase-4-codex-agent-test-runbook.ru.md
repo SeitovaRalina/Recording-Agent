@@ -595,7 +595,31 @@ services и команды Mila.
 - затронут production resource;
 - secret/token появился в ответе или логе.
 
-## 15. Остановить локальный тест без удаления данных
+## 15. Очистить test recording-state для повторного скана
+
+Команда удаляет только строки workflow из test PostgreSQL: recordings, manual reviews,
+processing attempts и intent replays. Recruiter configuration и выбранные календари сохраняются.
+Она не удаляет объекты MinIO, файлы Яндекс.Диска и уже внесённые изменения Notion, поэтому это не
+полный откат внешних side effects. Scheduler должен оставаться выключенным.
+
+Сначала выполнить preview:
+
+```powershell
+docker compose exec app poetry run python -m tools.setup.reset_recording_state
+```
+
+Проверить количество строк в `would_delete`, затем применить:
+
+```powershell
+docker compose exec app poetry run python -m tools.setup.reset_recording_state `
+  --apply `
+  --confirm RESET-TEST-RECORDING-STATE
+```
+
+Команда fail-closed, если `APP_ENVIRONMENT` не равен `test`, выключен `TEST_MODE_ENABLED` или
+включён scheduler. После неё можно снова попросить Codex/Mila проверить новые записи.
+
+## 16. Остановить локальный тест без удаления данных
 
 ```powershell
 docker compose stop
@@ -610,7 +634,7 @@ $reviewSecure = $null
 Не выполнять `docker compose down -v`. Junction `recording-agent` можно оставить для повторного
 теста; он указывает на repository source of truth.
 
-## 16. Шаблон отчёта для возврата
+## 17. Шаблон отчёта для возврата
 
 ```text
 Codex test: PASS | FAIL

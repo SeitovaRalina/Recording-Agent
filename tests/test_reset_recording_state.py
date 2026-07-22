@@ -1,0 +1,106 @@
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings
+from app.db.models.intent_replay import IntentReplay
+from app.db.models.manual_review import ManualReview
+from app.db.models.processing_attempt import ProcessingAttempt
+from app.db.models.recording import Recording
+from tools.setup.reset_recording_state import (
+    CONFIRMATION,
+    inspect_recording_state,
+    require_safe_reset_settings,
+    reset_recording_state,
+)
+
+
+def _test_settings(*, scheduler_enabled: bool = False) -> Settings:
+    return Settings(
+        app_environment="test",
+        test_mode_enabled=True,
+        scheduler_enabled=scheduler_enabled,
+        yandex_source_mutation_enabled=False,
+    )
+
+
+def test_reset_requires_test_mode_and_disabled_scheduler() -> None:
+    with pytest.raises(RuntimeError, match="test mode"):
+        require_safe_reset_settings(Settings(app_environment="production"))
+
+    with pytest.raises(RuntimeError, match="scheduler"):
+        require_safe_reset_settings(_test_settings(scheduler_enabled=True))
+
+
+@pytest.mark.anyio
+async def test_reset_deletes_only_recording_workflow_state(session: AsyncSession) -> None:
+    recording = Recording(
+        disk_file_id="disk-file",
+        disk_path="/Записи Телемоста/interview.webm",
+        disk_filename="interview.webm",
+        disk_owner_email="recruiter@example.com",
+    )
+    session.add(recording)
+    await session.flush()
+    session.add_all(
+        [
+            ManualReview(
+                recording_id=recording.id,
+                question_type="multiple_candidates",
+                question_context={},
+            ),
+            ProcessingAttempt(
+                recording_id=recording.id,
+                status_before="found",
+                status_after="manual_review_required",
+                step="candidate_match",
+                success=True,
+            ),
+            IntentReplay(
+                actor="codex-test-operator",
+                operation="scan",
+                idempotency_key="same-scan",
+                request_fingerprint="fingerprint",
+            ),
+        ]
+    )
+    await session.commit()
+
+    before = await inspect_recording_state(session)
+    assert before.recordings == 1
+    assert before.manual_reviews == 1
+    assert before.processing_attempts == 1
+    assert before.intent_replays == 1
+
+    deleted = await reset_recording_state(
+        session,
+        _test_settings(),
+        CONFIRMATION,
+    )
+
+    assert deleted == before
+    assert await session.scalar(select(Recording)) is None
+    assert await session.scalar(select(ManualReview)) is None
+    assert await session.scalar(select(ProcessingAttempt)) is None
+    assert await session.scalar(select(IntentReplay)) is None
+
+
+@pytest.mark.anyio
+async def test_reset_rejects_wrong_confirmation_without_mutation(session: AsyncSession) -> None:
+    recording = Recording(
+        disk_file_id="disk-file",
+        disk_path="/Записи Телемоста/interview.webm",
+        disk_filename="interview.webm",
+        disk_owner_email="recruiter@example.com",
+    )
+    session.add(recording)
+    await session.commit()
+
+    with pytest.raises(ValueError, match=CONFIRMATION):
+        await reset_recording_state(
+            session,
+            _test_settings(),
+            "wrong",
+        )
+
+    assert await session.scalar(select(Recording)) is not None
