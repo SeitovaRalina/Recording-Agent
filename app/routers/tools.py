@@ -134,6 +134,7 @@ class QuestionItem(BaseModel):
     filename: str
     reason: str
     choices: list[dict[str, object]]
+    capability: str = Field(repr=False)
     expires_at: str
 
 
@@ -450,6 +451,7 @@ async def trigger_scan(
             status_service=request.app.state.status_service,
             notion=request.app.state.notion_client,
             review_service=request.app.state.review_service,
+            question_queue_service=request.app.state.question_queue_service,
         )
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
@@ -589,8 +591,9 @@ async def list_questions(
     question_set_id: uuid.UUID | None = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 50,
 ) -> QuestionListResponse:
+    service = _question_queue_service(request)
     try:
-        rows = await _question_queue_service(request).list_active(
+        rows = await service.list_active(
             session,
             recruiter_user_id=recruiter_user_id,
             dm_channel_id=mattermost_dm_channel_id,
@@ -608,6 +611,7 @@ async def list_questions(
             filename=row.recording.disk_filename,
             reason=row.question_type,
             choices=cast(list[dict[str, object]], row.question_context.get("choices", [])),
+            capability=service.capability_token(row),
             expires_at=row.token_expires_at.isoformat() if row.token_expires_at else "",
         )
         for row in rows
@@ -638,6 +642,40 @@ async def answer_questions(
             dm_channel_id=body.mattermost_dm_channel_id,
             answers=answers,
         )
+        await session.commit()
+        recruiter = await session.scalar(
+            select(RecruiterConfig).where(
+                RecruiterConfig.mattermost_user_id == body.recruiter_user_id,
+                RecruiterConfig.mattermost_dm_channel == body.mattermost_dm_channel_id,
+                RecruiterConfig.active.is_(True),
+            )
+        )
+        if recruiter is None:
+            raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
+        for mutation in result.accepted:
+            recording = await session.get(Recording, mutation.recording_id)
+            if recording is None or recording.status not in {
+                RecordingStatus.CALENDAR_EVENT_FOUND,
+                RecordingStatus.CANDIDATE_MATCHED,
+                RecordingStatus.TRANSFER_STARTED,
+                RecordingStatus.UPLOADED_TO_SYNOLOGY,
+                RecordingStatus.SYNOLOGY_LINK_CREATED,
+                RecordingStatus.NOTION_UPDATED,
+            }:
+                continue
+            await _resume_transfer_recording(
+                recording.id,
+                recruiter,
+                request.app.state.session_factory,
+                request.app.state.disk_scanner,
+                request.app.state.candidate_service,
+                request.app.state.transfer_service,
+                request.app.state.status_service,
+                request.app.state.notion_client,
+                get_settings(),
+            )
+        session.expire_all()
+        await _question_queue_service(request).reconcile_processing(session, recruiter=recruiter)
         await session.commit()
     except ReviewRejectedError as error:
         await session.rollback()

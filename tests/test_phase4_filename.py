@@ -108,7 +108,7 @@ def test_filename_rejects_empty_component_and_extension() -> None:
 
 def test_test_mode_fails_closed() -> None:
     with pytest.raises(ValidationError, match="Yandex source mutation"):
-        Settings(test_mode_enabled=True)
+        Settings(test_mode_enabled=True, yandex_source_mutation_enabled=True)
     settings = Settings(
         test_mode_enabled=True,
         scheduler_enabled=False,

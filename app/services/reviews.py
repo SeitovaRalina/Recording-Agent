@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,18 @@ class ReviewService:
         if not review.delivery_nonce:
             raise ReviewRejectedError("Question capability is not initialized")
         return self._derive_review_token(review.id, review.delivery_nonce, review.recording_version)
+
+    def rotate_digest_capability(self, review: ManualReview, *, issued_at: datetime) -> str:
+        """Issue a digest-bound capability that remains valid through the next daily digest."""
+        review.delivery_nonce = secrets.token_urlsafe(16)
+        review.question_set_id = uuid.uuid4()
+        review.token_consumed_at = None
+        token = self.capability_token(review)
+        review.token_hash = self._hash_token(token)
+        review.token_expires_at = issued_at + timedelta(
+            seconds=self._settings.question_capability_ttl_seconds
+        )
+        return token
 
     async def enqueue_review(
         self,
@@ -374,10 +387,16 @@ class ReviewService:
             if not isinstance(selected, dict):
                 raise ReviewRejectedError("Selected review option cannot resume the pipeline")
             if isinstance(selected.get("id"), str):
+                spot_id, spot_url = self._selected_spot_identity(
+                    selected,
+                    required=review.question_type == "multiple_spots",
+                )
                 recording.notion_page_id = selected["id"]
                 recording.notion_page_url = str(selected.get("url") or "")
                 recording.candidate_name = str(selected.get("name") or "")
                 recording.project_or_spot = str(selected.get("project_or_spot") or "")
+                recording.notion_spot_id = spot_id
+                recording.notion_spot_url = spot_url
                 recording.transition_to(RecordingStatus.CANDIDATE_MATCHED)
                 review.parsed_action = "select_card"
                 review.resolved_notion_page_id = recording.notion_page_id
@@ -420,6 +439,27 @@ class ReviewService:
         )
         await session.flush()
         return result
+
+    @staticmethod
+    def _selected_spot_identity(
+        selected: dict[str, Any], *, required: bool
+    ) -> tuple[str | None, str | None]:
+        title = selected.get("project_or_spot")
+        spot_id = selected.get("spot_id")
+        spot_url = selected.get("spot_url")
+        has_any_identity = bool(spot_id or spot_url)
+        if required or has_any_identity:
+            if not isinstance(title, str) or not title.strip():
+                raise ReviewRejectedError("Selected Spot has no title")
+            if not isinstance(spot_id, str) or not spot_id.strip():
+                raise ReviewRejectedError("Selected Spot has no opaque identity")
+            if not isinstance(spot_url, str):
+                raise ReviewRejectedError("Selected Spot has no safe URL")
+            parsed = urlsplit(spot_url)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+                raise ReviewRejectedError("Selected Spot has no safe URL")
+            return spot_id, spot_url
+        return None, None
 
     @staticmethod
     async def _find_replay(

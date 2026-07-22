@@ -10,7 +10,7 @@ from app.db.engine import get_session
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
-from app.routers.tools import _scan_response
+from app.routers.tools import QuestionItem, _scan_response
 from app.scheduler.cron import ScanSummary
 
 
@@ -20,6 +20,10 @@ async def test_tools_reject_missing_auth(async_client: AsyncClient) -> None:
         "/tools/recordings/status", params={"recruiter_user_id": "user"}
     )
     assert response.status_code == 401
+
+
+def test_question_item_exposes_capability_required_by_answer_contract() -> None:
+    assert "capability" in QuestionItem.model_fields
 
 
 def test_scan_response_reports_final_per_recording_outcomes() -> None:

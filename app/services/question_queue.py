@@ -14,6 +14,7 @@ from app.config import Settings
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.notification_outbox import NotificationOutbox, OutboxStatus
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
+from app.db.models.recording import RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.reviews import ReviewMutation, ReviewRejectedError, ReviewService
 from app.tools.mattermost import MattermostClient, MattermostError
@@ -46,6 +47,9 @@ class QuestionQueueService:
         self._reviews = review_service
         self._mattermost = mattermost
         self._settings = settings
+
+    def capability_token(self, question: ManualReview) -> str:
+        return self._reviews.capability_token(question)
 
     async def list_active(
         self,
@@ -211,7 +215,8 @@ class QuestionQueueService:
         lines = ["Recording Agent questions:"]
         for number, question in enumerate(questions, start=1):
             question.digest_id = digest.id
-            lines.append(f"{number}. {question.recording.disk_filename}: {question.question_type}")
+            self._reviews.rotate_digest_capability(question, issued_at=now)
+            lines.extend(self._render_question(number, question))
         await self.queue_notification(
             session,
             dedupe_key=dedupe_key,
@@ -222,6 +227,30 @@ class QuestionQueueService:
             entity_id=digest.id,
         )
         return digest
+
+    @staticmethod
+    def _render_question(number: int, question: ManualReview) -> list[str]:
+        lines = [f"{number}. {question.recording.disk_filename}: {question.question_type}"]
+        choices = question.question_context.get("choices")
+        if not isinstance(choices, list):
+            return lines
+        for choice_number, choice in enumerate(choices[:10], start=1):
+            if not isinstance(choice, dict):
+                continue
+            details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
+            if choice.get("project_or_spot"):
+                details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
+            if choice.get("spot_url"):
+                details.append(f"Spot: {str(choice['spot_url'])[:500]}")
+            emails = choice.get("candidate_emails")
+            if isinstance(emails, list):
+                safe_emails = [str(email)[:320] for email in emails[:3] if isinstance(email, str)]
+                if safe_emails:
+                    details.append(f"Contacts: {', '.join(safe_emails)}")
+            if choice.get("url"):
+                details.append(str(choice["url"])[:500])
+            lines.append(f"   {choice_number}. " + " — ".join(details))
+        return lines
 
     async def queue_notification(
         self,
@@ -289,6 +318,67 @@ class QuestionQueueService:
             dm_channel_id=question.mattermost_channel_id or "",
             message=safe_message[:4000],
         )
+
+    async def reconcile_processing(
+        self,
+        session: AsyncSession,
+        *,
+        recruiter: RecruiterConfig,
+    ) -> None:
+        """Recover and finalize accepted answers from durable recording state."""
+        questions = list(
+            (
+                await session.scalars(
+                    select(ManualReview)
+                    .join(ManualReview.recording)
+                    .where(
+                        ManualReview.status == ManualReviewStatus.PROCESSING,
+                        ManualReview.recruiter_user_id == recruiter.mattermost_user_id,
+                        ManualReview.mattermost_channel_id == recruiter.mattermost_dm_channel,
+                    )
+                    .options(joinedload(ManualReview.recording))
+                )
+            )
+            .unique()
+            .all()
+        )
+        for question in questions:
+            recording = question.recording
+            filename = recording.generated_filename or recording.disk_filename
+            if recording.status in {RecordingStatus.COMPLETED, RecordingStatus.IGNORED}:
+                detail = (
+                    f" Storage: {recording.synology_share_url}."
+                    if recording.synology_share_url
+                    else ""
+                )
+                await self.mark_terminal(
+                    session,
+                    question_id=question.id,
+                    succeeded=True,
+                    safe_message=f"Finished processing {filename}.{detail}",
+                )
+            elif recording.status == RecordingStatus.FAILED:
+                await self.mark_terminal(
+                    session,
+                    question_id=question.id,
+                    succeeded=False,
+                    safe_message=(
+                        f"Could not finish {filename}: step={recording.error_step or 'unknown'}; "
+                        f"error={(recording.error_message or 'unknown')[:300]}. "
+                        "Check the integration and retry the recording."
+                    ),
+                )
+            elif recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED:
+                await self.mark_terminal(
+                    session,
+                    question_id=question.id,
+                    succeeded=True,
+                    safe_message=(
+                        f"Processed the answer for {filename}; another decision is required."
+                    ),
+                )
+                await self._reviews.enqueue_review(session, recording, recruiter)
+        await session.flush()
 
     async def claim_outbox(
         self, session: AsyncSession, *, worker_id: str, limit: int = 20

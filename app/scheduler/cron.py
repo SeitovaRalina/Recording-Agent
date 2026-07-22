@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -38,7 +39,7 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
-from app.tools.notion import NotionClient, NotionPage
+from app.tools.notion import NotionClient, NotionPage, NotionRelationChoice
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ async def scan_recruiter(
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
     review_service: ReviewService | None = None,
+    question_queue_service: QuestionQueueService | None = None,
 ) -> ScanSummary:
     active_settings = settings or get_settings()
     _enforce_recruiter_scope(active_settings, recruiter)
@@ -192,6 +194,25 @@ async def scan_recruiter(
             except Exception:
                 summary.failed += 1
                 logger.exception("Recording %s transfer pipeline failed", recording_id)
+    if question_queue_service is not None:
+        async with session_factory() as session:
+            await question_queue_service.reconcile_processing(session, recruiter=recruiter)
+            await session.commit()
+    if review_service is not None:
+        async with session_factory() as session:
+            pending = list(
+                (
+                    await session.scalars(
+                        select(Recording).where(
+                            Recording.disk_owner_email == recruiter.email,
+                            Recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                        )
+                    )
+                ).all()
+            )
+            for recording in pending:
+                await review_service.enqueue_review(session, recording, recruiter)
+            await session.commit()
     logger.info(
         "recruiter scan summary: recruiter=%s discovered=%d inserted=%d skipped_legacy=%d "
         "matched=%d manual_review=%d failed=%d",
@@ -265,6 +286,57 @@ async def _resume_transfer_recording(
     return True
 
 
+def _persisted_spot(recording: Recording) -> NotionRelationChoice | None:
+    required = recording.manual_review_reason == "multiple_spots"
+    has_any_identity = bool(recording.notion_spot_id or recording.notion_spot_url)
+    if not required and not has_any_identity:
+        return None
+    if not recording.project_or_spot or not recording.project_or_spot.strip():
+        raise ValueError("Resolved Spot title is missing")
+    if not recording.notion_spot_id or not recording.notion_spot_id.strip():
+        raise ValueError("Resolved Spot opaque identity is missing")
+    if not recording.notion_spot_url:
+        raise ValueError("Resolved Spot URL is missing")
+    return _validated_spot(
+        NotionRelationChoice(
+            recording.notion_spot_id,
+            recording.project_or_spot,
+            recording.notion_spot_url,
+        )
+    )
+
+
+def _single_page_spot(page: NotionPage) -> NotionRelationChoice | None:
+    if len(page.spots) > 1:
+        raise ValueError("Candidate page has multiple unresolved Spots")
+    return _validated_spot(page.spots[0]) if page.spots else None
+
+
+def _validated_spot(spot: NotionRelationChoice) -> NotionRelationChoice:
+    if not spot.id.strip() or not spot.title.strip():
+        raise ValueError("Resolved Spot identity is incomplete")
+    parsed = urlsplit(spot.url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("Resolved Spot URL is unsafe")
+    return spot
+
+
+def _selected_spot_context(
+    recording: Recording, selected_spot: NotionRelationChoice | None = None
+) -> dict[str, object]:
+    return {
+        "project_or_spot": selected_spot.title
+        if selected_spot is not None
+        else recording.project_or_spot or "",
+        "spot_id": selected_spot.id
+        if selected_spot is not None
+        else recording.notion_spot_id or "",
+        "spot_url": selected_spot.url
+        if selected_spot is not None
+        else recording.notion_spot_url or "",
+    }
+
+
 async def _run_transfer_recording(
     recording_id: uuid.UUID,
     recruiter: RecruiterConfig,
@@ -297,6 +369,7 @@ async def _run_transfer_recording(
             return
         already_matched = recording.status == RecordingStatus.CANDIDATE_MATCHED
         match_confidence = 1.0
+        selected_spot: NotionRelationChoice | None = None
         if already_matched:
             if not recording.notion_page_id or not recording.candidate_name:
                 await status.advance(
@@ -308,6 +381,20 @@ async def _run_transfer_recording(
                 )
                 await session.commit()
                 return
+            try:
+                selected_spot = _persisted_spot(recording)
+            except ValueError as error:
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason="invalid_selected_spot_identity",
+                    manual_review_candidates=[],
+                    error_step="review_resolution",
+                    error_message=str(error),
+                )
+                await session.commit()
+                return
             page = NotionPage(
                 id=recording.notion_page_id,
                 url=recording.notion_page_url or "",
@@ -315,6 +402,7 @@ async def _run_transfer_recording(
                 date_str=None,
                 email=recording.candidate_email,
                 project_or_spot=recording.project_or_spot,
+                spots=(selected_spot,) if selected_spot is not None else (),
             )
             candidate_name = recording.candidate_name
         else:
@@ -359,6 +447,20 @@ async def _run_transfer_recording(
             page = match.page
             match_confidence = match.confidence
             candidate_name = _candidate_name(recording.calendar_event_summary)
+            try:
+                selected_spot = _single_page_spot(page)
+            except ValueError as error:
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason="invalid_selected_spot_identity",
+                    manual_review_candidates=[],
+                    error_step="candidate_matching",
+                    error_message=str(error),
+                )
+                await session.commit()
+                return
         try:
             identity = build_storage_identity(
                 event_date=recording.calendar_dtstart.astimezone(
@@ -385,8 +487,23 @@ async def _run_transfer_recording(
             )
             await session.commit()
             return
+        if (
+            recording.generated_filename is not None
+            and recording.generated_filename != identity.filename
+        ) or (recording.storage_key is not None and recording.storage_key != identity.key):
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                manual_review_reason="stale_storage_identity",
+                manual_review_candidates=[_selected_spot_context(recording, selected_spot)],
+                error_step="destination",
+                error_message="Persisted storage identity does not match the selected Spot",
+            )
+            await session.commit()
+            return
         collision = await session.scalar(
-            select(Recording.id).where(
+            select(Recording).where(
                 Recording.storage_key == identity.key,
                 Recording.id != recording.id,
             )
@@ -397,7 +514,13 @@ async def _run_transfer_recording(
                 recording,
                 RecordingStatus.MANUAL_REVIEW_REQUIRED,
                 manual_review_reason="storage_key_collision",
-                manual_review_candidates=[{"conflicting_recording_id": str(collision)}],
+                manual_review_candidates=[
+                    {
+                        **_selected_spot_context(recording, selected_spot),
+                        "conflicting_recording_id": str(collision.id),
+                        "conflicting_spot_id": collision.notion_spot_id or "",
+                    }
+                ],
             )
             await session.commit()
             return
@@ -423,6 +546,8 @@ async def _run_transfer_recording(
             "notion_page_id": page.id,
             "notion_page_url": page.url,
             "project_or_spot": page.project_or_spot,
+            "notion_spot_id": selected_spot.id if selected_spot is not None else None,
+            "notion_spot_url": selected_spot.url if selected_spot is not None else None,
             "generated_filename": identity.filename,
             "storage_key": identity.key,
             "content_identity": recording.disk_md5 or recording.disk_file_id,
@@ -1057,6 +1182,7 @@ async def scan_all_recruiters(
     status_service: StatusService | None = None,
     notion: NotionClient | None = None,
     review_service: ReviewService | None = None,
+    question_queue_service: QuestionQueueService | None = None,
 ) -> None:
     started_at = datetime.now(UTC)
     recruiters = await _active_recruiters(session_factory)
@@ -1077,6 +1203,7 @@ async def scan_all_recruiters(
                 status_service=status_service,
                 notion=notion,
                 review_service=review_service,
+                question_queue_service=question_queue_service,
             )
             for item in recruiters
         ),
@@ -1269,7 +1396,8 @@ async def run_due_recruiter_summaries(
                 transfer_service=transfer_service,
                 status_service=status_service,
                 notion=notion,
-                review_service=None,
+                review_service=review_service,
+                question_queue_service=question_queue_service,
             )
             async with session_factory() as session:
                 await question_queue_service.build_digest(

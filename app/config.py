@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     mattermost_bot_user_id: str = ""
     mattermost_delivery_enabled: bool = False
     review_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    question_capability_ttl_seconds: int = Field(default=90000, ge=86400, le=172800)
     intent_claim_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     minio_endpoint: str = "http://localhost:9000"
     minio_access_key: str = "minioadmin"

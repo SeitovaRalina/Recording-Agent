@@ -96,6 +96,158 @@ async def test_partial_answer_accepts_exact_item_and_leaves_other_pending(
 
 
 @pytest.mark.anyio
+async def test_digest_rotates_digest_bound_capability_with_next_day_ttl(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    reviews = ReviewService(mattermost, settings)
+    service = QuestionQueueService(reviews, mattermost, settings)
+    question = _question("rotated", "expired-before-digest")
+    question.token_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    old_nonce = question.delivery_nonce
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                active=True,
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    before = datetime.now(UTC)
+    await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+
+    assert question.delivery_nonce != old_nonce
+    assert question.token_expires_at is not None
+    assert question.token_expires_at >= before + timedelta(hours=24)
+    capability = reviews.capability_token(question)
+    assert question.token_hash == hashlib.sha256(capability.encode()).hexdigest()
+
+
+@pytest.mark.anyio
+async def test_digest_renders_bounded_notion_differentiators(session: AsyncSession) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("duplicates", "unused")
+    question.question_context = {
+        "choices": [
+            {
+                "name": "Same Name",
+                "url": "https://notion.example/interview-1",
+                "project_or_spot": "Backend",
+                "spot_url": "https://notion.example/spot-1",
+                "candidate_emails": ["candidate@example.com"],
+            }
+        ]
+    }
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                active=True,
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+    message = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "summary")
+    )
+
+    assert message is not None
+    rendered = str(message.payload["message"])
+    assert "https://notion.example/interview-1" in rendered
+    assert "Spots: Backend" in rendered
+    assert "https://notion.example/spot-1" in rendered
+    assert "candidate@example.com" in rendered
+
+
+@pytest.mark.anyio
+async def test_reconcile_processing_marks_terminal_and_queues_completion(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("completed-answer", "unused")
+    question.status = ManualReviewStatus.PROCESSING
+    question.recording.status = RecordingStatus.COMPLETED
+    question.recording.synology_share_url = "https://storage.example/file"
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="recruiter",
+        mattermost_dm_channel="dm",
+        active=True,
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+
+    await service.reconcile_processing(session, recruiter=recruiter)
+
+    assert question.status == ManualReviewStatus.COMPLETED
+    completion = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "completion")
+    )
+    assert completion is not None
+    assert "https://storage.example/file" in str(completion.payload["message"])
+
+
+@pytest.mark.anyio
+async def test_reconcile_processing_recovers_failed_work_with_actionable_error(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("failed-answer", "unused")
+    question.status = ManualReviewStatus.PROCESSING
+    question.recording.status = RecordingStatus.FAILED
+    question.recording.error_step = "notion_update"
+    question.recording.error_message = "schema changed"
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="recruiter",
+        mattermost_dm_channel="dm",
+        active=True,
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+
+    await service.reconcile_processing(session, recruiter=recruiter)
+
+    assert question.status == ManualReviewStatus.FAILED
+    failure = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "error")
+    )
+    assert failure is not None
+    rendered = str(failure.payload["message"])
+    assert "notion_update" in rendered
+    assert "retry" in rendered.casefold()
+
+
+@pytest.mark.anyio
 async def test_digest_reminds_once_then_suppresses(session: AsyncSession) -> None:
     mattermost = AsyncMock()
     settings = Settings(openclaw_secret="secret")

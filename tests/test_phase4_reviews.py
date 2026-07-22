@@ -24,6 +24,25 @@ def _recording() -> Recording:
     )
 
 
+@pytest.mark.parametrize(
+    "selected",
+    [
+        {
+            "project_or_spot": "Backend",
+            "spot_url": "https://notion.test/spot",
+        },
+        {
+            "project_or_spot": "Backend",
+            "spot_id": "spot-id",
+            "spot_url": "http://notion.test/spot",
+        },
+    ],
+)
+def test_multiple_spot_choice_requires_exact_safe_identity(selected: dict[str, str]) -> None:
+    with pytest.raises(ReviewRejectedError, match="Selected Spot"):
+        ReviewService._selected_spot_identity(selected, required=True)  # noqa: SLF001
+
+
 @pytest.mark.anyio
 async def test_review_resolution_is_bound_and_idempotent(session: object) -> None:
     token = "opaque-review-token-value"
@@ -31,7 +50,7 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
     review = ManualReview(
         recording=recording,
         recording_id=recording.id,
-        question_type="multiple_candidates",
+        question_type="multiple_spots",
         question_context={
             "choices": [
                 {
@@ -89,6 +108,8 @@ async def test_review_resolution_is_bound_and_idempotent(session: object) -> Non
     assert first.status == RecordingStatus.CANDIDATE_MATCHED
     assert recording.notion_page_id == "page-id"
     assert recording.project_or_spot == "Backend"
+    assert recording.notion_spot_id == "spot-id"
+    assert recording.notion_spot_url == "https://notion.test/spot"
     assert review.result == {
         "selected_choice": {
             "id": "page-id",

@@ -37,7 +37,7 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 from app.tools.mattermost import MattermostError, MattermostPost
-from app.tools.notion import NotionPage
+from app.tools.notion import NotionPage, NotionRelationChoice
 
 
 def found(file_id: str) -> Recording:
@@ -693,6 +693,130 @@ async def test_blank_spot_storage_key_collision_requires_manual_review() -> None
 
 
 @pytest.mark.anyio
+async def test_equal_spot_titles_collision_keeps_exact_spot_identities() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("equal-spot-title-collision")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    expected_key = (
+        "recruiter@example.com/2026-07-16/Ivan_Ivanov/"
+        "2026-07-16_Ivan_Ivanov_Backend_general_interview.webm"
+    )
+    conflicting = found("existing-equal-title-key")
+    conflicting.storage_key = expected_key
+    conflicting.project_or_spot = "Backend"
+    conflicting.notion_spot_id = "different-backend-spot"
+    async with factory() as session:
+        session.add_all([item, conflicting])
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage(
+            "page",
+            "https://notion.example/page",
+            "Ivan Ivanov",
+            None,
+            project_or_spot="Backend",
+            spots=(
+                NotionRelationChoice(
+                    "selected-backend-spot",
+                    "Backend",
+                    "https://notion.example/selected-backend-spot",
+                ),
+            ),
+        ),
+        confidence=1.0,
+    )
+    transfer = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "storage_key_collision"
+    assert loaded.manual_review_candidates == [
+        {
+            "project_or_spot": "Backend",
+            "spot_id": "selected-backend-spot",
+            "spot_url": "https://notion.example/selected-backend-spot",
+            "conflicting_recording_id": str(conflicting.id),
+            "conflicting_spot_id": "different-backend-spot",
+        }
+    ]
+    transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_multiple_spot_resume_rejects_stale_storage_identity() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    item = found("stale-selected-spot")
+    item.status = RecordingStatus.CANDIDATE_MATCHED
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.notion_page_id = "candidate-page"
+    item.notion_page_url = "https://notion.example/candidate-page"
+    item.manual_review_reason = "multiple_spots"
+    item.project_or_spot = "Backend"
+    item.notion_spot_id = "backend-spot"
+    item.notion_spot_url = "https://notion.example/backend-spot"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Mobile_general_interview.webm"
+    item.storage_key = (
+        "recruiter@example.com/2026-07-16/Ivan_Ivanov/"
+        "2026-07-16_Ivan_Ivanov_Mobile_general_interview.webm"
+    )
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    transfer = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        Settings(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "stale_storage_identity"
+    assert loaded.notion_spot_id == "backend-spot"
+    transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("initial_status", "transfer_calls", "share_calls", "notion_calls"),
     [
@@ -1196,6 +1320,39 @@ async def test_scan_resumes_calendar_match_and_routes_missing_candidate_to_revie
     assert loaded.manual_review_candidates == []
     candidate.find_and_match.assert_awaited_once()
     transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_scan_enqueues_manual_review_question_for_daily_digest() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "recruiter"
+    owner.mattermost_dm_channel = "dm"
+    item = found("digest-review")
+    item.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    item.manual_review_reason = "multiple_candidates"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    reviews = AsyncMock()
+
+    await scan_recruiter(
+        owner,
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        review_service=reviews,
+    )
+    await engine.dispose()
+
+    reviews.enqueue_review.assert_awaited_once()
 
 
 @pytest.mark.anyio

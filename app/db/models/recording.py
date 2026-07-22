@@ -73,6 +73,7 @@ class Recording(Base):
         },
         RecordingStatus.CANDIDATE_MATCHED: {
             RecordingStatus.TRANSFER_STARTED,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.MANUAL_REVIEW_REQUIRED: {
@@ -139,6 +140,8 @@ class Recording(Base):
     candidate_name: Mapped[str | None] = mapped_column(Text)
     candidate_email: Mapped[str | None] = mapped_column(Text)
     project_or_spot: Mapped[str | None] = mapped_column(Text)
+    notion_spot_id: Mapped[str | None] = mapped_column(Text)
+    notion_spot_url: Mapped[str | None] = mapped_column(Text)
     notion_database_id: Mapped[str | None] = mapped_column(Text)
     notion_page_id: Mapped[str | None] = mapped_column(Text)
     notion_page_url: Mapped[str | None] = mapped_column(Text)
