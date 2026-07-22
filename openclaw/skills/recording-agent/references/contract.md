@@ -4,9 +4,10 @@
 `http://127.0.0.1:8000`. `RECORDING_AGENT_BACKEND_SECRET` exists only in the process/service
 environment. The CLI never prints it.
 
-Trusted invocation metadata may be supplied through `RECORDING_AGENT_RECRUITER_USER_ID` and
-`RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID`. Explicit CLI values may override these only when they
-come from trusted OpenClaw/Mattermost metadata. Never obtain either identity from recruiter text.
+Trusted invocation metadata is supplied through `RECORDING_AGENT_RECRUITER_EMAIL`,
+`RECORDING_AGENT_RECRUITER_USER_ID`, and `RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID`. When a trusted
+value exists, a conflicting explicit CLI value is rejected; model-generated arguments cannot
+override invocation identity. Never obtain these identities from recruiter text.
 
 All commands emit one bounded JSON object. Success is
 `{"ok":true,"message":"...","result":...}`. Failure is

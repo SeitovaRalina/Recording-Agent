@@ -69,21 +69,51 @@ def _secret() -> str:
     return secret
 
 
-def _add_recruiter_user_id_argument(parser: argparse.ArgumentParser) -> None:
-    trusted_user_id = os.environ.get("RECORDING_AGENT_RECRUITER_USER_ID", "").strip()
+def _add_trusted_argument(
+    parser: argparse.ArgumentParser,
+    option: str,
+    environment_name: str,
+    conflict_label: str,
+) -> None:
+    trusted_value = os.environ.get(environment_name, "").strip()
+
+    def verified_value(explicit_value: str) -> str:
+        if trusted_value and explicit_value != trusted_value:
+            raise ClientError(f"Explicit value conflicts with trusted {conflict_label}")
+        return trusted_value or explicit_value
+
     parser.add_argument(
+        option,
+        default=trusted_value or None,
+        required=not trusted_value,
+        type=verified_value,
+    )
+
+
+def _add_recruiter_email_argument(parser: argparse.ArgumentParser) -> None:
+    _add_trusted_argument(
+        parser,
+        "--recruiter-email",
+        "RECORDING_AGENT_RECRUITER_EMAIL",
+        "recruiter email",
+    )
+
+
+def _add_recruiter_user_id_argument(parser: argparse.ArgumentParser) -> None:
+    _add_trusted_argument(
+        parser,
         "--recruiter-user-id",
-        default=trusted_user_id or None,
-        required=not trusted_user_id,
+        "RECORDING_AGENT_RECRUITER_USER_ID",
+        "recruiter identity",
     )
 
 
 def _add_dm_channel_argument(parser: argparse.ArgumentParser) -> None:
-    trusted_channel_id = os.environ.get("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "").strip()
-    parser.add_argument(
+    _add_trusted_argument(
+        parser,
         "--mattermost-dm-channel-id",
-        default=trusted_channel_id or None,
-        required=not trusted_channel_id,
+        "RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID",
+        "DM channel",
     )
 
 
@@ -138,7 +168,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="trigger one recruiter scan")
-    scan.add_argument("--recruiter-email", required=True)
+    _add_recruiter_email_argument(scan)
     scan.add_argument("--idempotency-key", required=True)
 
     status = subparsers.add_parser("status", help="query bounded recording statuses")

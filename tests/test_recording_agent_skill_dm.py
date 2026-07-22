@@ -40,6 +40,61 @@ def test_questions_use_trusted_dm_metadata(monkeypatch: pytest.MonkeyPatch) -> N
     assert args.limit == 12
 
 
+def test_questions_reject_conflicting_explicit_dm_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
+    monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
+
+    with pytest.raises(CLIENT.ClientError, match="trusted DM channel"):
+        CLIENT._parser().parse_args(
+            [
+                "questions",
+                "--mattermost-dm-channel-id",
+                "attacker-dm",
+            ]
+        )
+
+
+def test_explicit_dm_metadata_remains_available_without_trusted_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECORDING_AGENT_RECRUITER_USER_ID", raising=False)
+    monkeypatch.delenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", raising=False)
+
+    args = CLIENT._parser().parse_args(
+        [
+            "questions",
+            "--recruiter-user-id",
+            "local-user",
+            "--mattermost-dm-channel-id",
+            "local-dm",
+        ]
+    )
+
+    assert args.recruiter_user_id == "local-user"
+    assert args.mattermost_dm_channel_id == "local-dm"
+
+
+def test_conflict_failure_does_not_print_backend_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "must-not-appear"
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", secret)
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["recording_agent.py", "status", "--recruiter-user-id", "attacker-user"],
+    )
+
+    assert CLIENT.main() == 1
+    output = capsys.readouterr().out
+    assert secret not in output
+    assert "attacker-user" not in output
+
+
 def test_partial_answer_sends_only_validated_exact_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

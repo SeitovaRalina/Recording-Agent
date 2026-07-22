@@ -38,14 +38,71 @@ def test_status_uses_trusted_recruiter_identity_from_environment(
     assert args.recruiter_user_id == "trusted-user-id"
 
 
-def test_explicit_trusted_recruiter_identity_overrides_environment(
+def test_conflicting_explicit_recruiter_identity_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "environment-user-id")
 
-    args = CLIENT._parser().parse_args(["status", "--recruiter-user-id", "metadata-user-id"])
+    with pytest.raises(CLIENT.ClientError, match="trusted recruiter identity"):
+        CLIENT._parser().parse_args(["status", "--recruiter-user-id", "metadata-user-id"])
 
-    assert args.recruiter_user_id == "metadata-user-id"
+
+def test_scan_uses_trusted_recruiter_email_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
+    captured: dict[str, object] = {}
+
+    def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setattr(CLIENT, "_request", request)
+
+    args = CLIENT._parser().parse_args(["scan", "--idempotency-key", "scan-0001"])
+    CLIENT._execute(args)
+
+    assert args.recruiter_email == "trusted@example.com"
+    assert captured["body"] == {
+        "recruiter_email": "trusted@example.com",
+        "scope": "test",
+        "idempotency_key": "scan-0001",
+    }
+
+
+def test_scan_rejects_conflicting_explicit_recruiter_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
+
+    with pytest.raises(CLIENT.ClientError, match="trusted recruiter email"):
+        CLIENT._parser().parse_args(
+            [
+                "scan",
+                "--recruiter-email",
+                "attacker@example.com",
+                "--idempotency-key",
+                "scan-0001",
+            ]
+        )
+
+
+def test_scan_accepts_explicit_recruiter_email_without_trusted_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RECORDING_AGENT_RECRUITER_EMAIL", raising=False)
+
+    args = CLIENT._parser().parse_args(
+        [
+            "scan",
+            "--recruiter-email",
+            "local-codex@example.com",
+            "--idempotency-key",
+            "scan-0001",
+        ]
+    )
+
+    assert args.recruiter_email == "local-codex@example.com"
 
 
 def test_scan_message_reports_counts_and_every_category() -> None:
