@@ -2,6 +2,10 @@
 
 Актуально на 22 июля 2026 года.
 
+Для всей незавершённой реализации и rollout авторитетен новый план
+`swarm-report/recording-agent-mila-completion-plan.md`. Старый Phase 4 plan сохранён только как
+исторический контекст.
+
 ## 1. Что это за система
 
 Recording Agent автоматизирует обработку записей интервью:
@@ -29,7 +33,8 @@ PostgreSQL-состояния, matching, загрузки файлов, обно
 - Реализован поиск записей в папке `/Записи Телемоста/` каждого настроенного
   рекрутера.
 - Реализовано сопоставление записи с выбранными календарями рекрутера.
-- Реализован поиск кандидата в Notion по имени и дате интервью.
+- В текущем коде поиск кандидата в Notion всё ещё использует имя и дату интервью; целевой flow
+  ищет прежде всего по имени, а дату записывает после обработки.
 - Реализованы детерминированное имя файла, storage key и защита от коллизий.
 - Для canary используется отдельное тестовое хранилище MinIO и база Test Interviews.
 - Реализован operator-only onboarding рекрутера с явным выбором Notion database,
@@ -43,8 +48,7 @@ PostgreSQL-состояния, matching, загрузки файлов, обно
   если они доступны.
 - Для внутреннего Codex-теста Mattermost-доставка отключается. Trusted recruiter ID
   приходит из process environment и не запрашивается у пользователя в чате.
-- Локальные quality gates пройдены: `ruff`, `mypy`, skill validation и полный
-  `pytest` (`190 passed, 1 warning`). Warning относится только к невозможности Windows
+- Последний зафиксированный полный `pytest`: `204 passed, 1 warning`. Warning относится только к невозможности Windows
   создать `.pytest_cache`.
 
 На Mila пока выполнен только read-only discovery окружения. Skill и Backend на Mila
@@ -52,8 +56,8 @@ PostgreSQL-состояния, matching, загрузки файлов, обно
 
 После проверки локального canary Антон подтвердил обновлённый целевой сценарий. Он ещё не
 реализован полностью: текущий Backend всё ещё использует дату как часть Notion lookup и thread
-binding для review. Эти расхождения перечислены ниже и добавлены в Phase 4 plan как утверждённая
-поправка, а не как уже готовый функционал.
+binding для review. Эти расхождения перечислены ниже и входят в новый authoritative completion
+plan; они не являются уже готовым функционалом.
 
 ## 3. Что умеет агент
 
@@ -73,6 +77,9 @@ binding для review. Эти расхождения перечислены ни
 - какие записи обработаны без review;
 - какие требуют review и почему;
 - какие завершились ошибкой.
+
+Этот ручной запуск остаётся штатным сценарием даже при выключенном scheduler. Он использует те же
+Backend state, matching и idempotency rules, что и scheduled scan.
 
 ### Получить статусы
 
@@ -96,8 +103,9 @@ binding для review. Эти расхождения перечислены ни
 все вопросы сразу или только на часть свободным текстом.
 
 Mila сообщает, как поняла ответ, пишет о начале обработки и затем присылает результат или ошибку.
-Неотвеченные вопросы остаются в PostgreSQL и повторяются в следующей ежедневной сводке в 18:00 по
-локальному времени рекрутера; закрытые вопросы не повторяются.
+Неотвеченные вопросы остаются в PostgreSQL и повторяются один раз в следующей ежедневной сводке
+в 18:00 по локальному времени рекрутера. После этого Backend автоматически исключает их из
+последующих сводок до явного reopen; закрытые вопросы не повторяются.
 Если ответ можно связать с несколькими вопросами, Mila переспрашивает и ничего не изменяет.
 Посторонние обращения к Mila по другим задачам не считаются ответами Recording Agent.
 
@@ -149,10 +157,10 @@ Candidate или проекту, они также показываются. О�
    возвращает смешанный текст с телефоном, email и Telegram. Backend извлекает только валидный
    email; отсутствие или несовпадение email не отменяет совпадение по имени.
 5. Источник project/spot в test и production настраивается по точному API-имени
-   `📍 Spots: relation`. Backend должен получить title ровно одной связанной Spot-страницы.
-   Пустое значение даёт `unspecified`.
-   Если relation заполнена одной страницей, `unspecified` является ошибкой. Правило для нескольких
-   связанных `📍 Spots` ещё нужно согласовать.
+   `📍 Spots: relation`. Пустое значение даёт `unspecified`, одна relation — title связанной
+   страницы. При нескольких relations Backend показывает bounded title/URL каждого Spot и требует
+   явный выбор рекрутера. Порядок Notion API ничего не выбирает; выбор сохраняется до генерации
+   filename/storage key и повторной collision-проверки.
 6. Событие должно находиться в default/selected calendar рекрутера.
 7. Время записи должно попадать в интервал события с допуском 15 минут до и после.
 8. Ссылка Telemost подтверждает видеовстречу, а ссылка calink.ru в description является
@@ -278,6 +286,10 @@ canary cutoff старые файлы будут показаны как skipped
 - Провести один synthetic canary: manual scan, ambiguity DM, resolve/ignore,
   completion/error DM, retry и restart recovery.
 - После успешного ручного canary отдельно включить и доказать один scheduled test scan.
+- Mila сейчас не имеет Docker/Compose. До установки нужен повторный read-only inventory, точный
+  manifest пакетов/paths/services/commands/restarts/rollback и явное подтверждение.
+- Установка skill, Mila agent invocation, первый реальный allowlisted Mattermost DM и scheduled
+  test — отдельные approval checkpoints. Production effects согласуются ещё отдельно.
 
 ### До production
 
@@ -298,8 +310,9 @@ canary cutoff старые файлы будут показаны как skipped
 - Согласовать единый календарный шаблон и довести качество реальных event titles/Notion rows.
 - Провести ограниченный production canary на заранее выбранных данных, сначала без Yandex
   mutations и без массового исторического scan.
-- После доказанного canary включить ежедневный scheduler Backend. Конкретное время запуска
-  ещё нужно согласовать; сейчас scheduler выключен.
+- После доказанного canary отдельно разрешить один реальный scheduler test Backend в 18:00 по
+  настроенной timezone рекрутера; после доказательства снова выключить, если продолжение работы
+  не согласовано отдельно. Ручной scan остаётся доступен всё время.
 - Утвердить production retention отдельно для Synology и PostgreSQL.
 
 ### Sylvanas
@@ -310,12 +323,11 @@ OpenClaw version, environment injection и Mattermost metadata. Sylvanas сей�
 
 ## 9. Предлагаемый порядок следующих работ
 
-1. Завершить повторный Codex scan/status тест на сегодняшних данных.
-2. Зафиксировать единый календарный шаблон и правило для карточки с несколькими связанными `📍 Spots`.
-3. Получить Mattermost Bot configuration и проверить Backend DM в test scope.
-4. Развернуть Mila canary с MinIO и Test Interviews.
-5. Улучшить формат сообщений по результатам живого диалога.
-6. Подключить и проверить Synology.
-7. Провести ограниченный production canary.
-8. Включить ежедневное расписание после отдельного approval.
-9. Подготовить rollout на Sylvanas.
+1. Реализовать checkpoints 1–4 нового completion plan и пройти локальные gates и два review.
+2. Повторить Mila read-only inventory и согласовать точный remote mutation/rollback manifest.
+3. После approval установить runtime/test stack и repository skill, направленный на test Backend.
+4. После отдельных approvals выполнить Mila agent canary и первый allowlisted DM.
+5. Провести rollback rehearsal без удаления named volumes.
+6. После отдельного approval доказать один фактический запуск в 18:00 recruiter-local и снова
+   выключить scheduler.
+7. Production promotion и Sylvanas оставить отдельными rollout.

@@ -117,9 +117,10 @@ opening a separate thread for every recording, while durable Backend state preve
 memory from becoming the workflow source of truth.
 **Status:** Target decision; current Phase 4 review contract still requires a thread and must be
 reconciled before Mila deployment.
-**Reminder cadence:** Send the consolidated summary and repeat unresolved questions once per day
-at 18:00 in the recruiter's configured local timezone. Accepted answers receive immediate
-processing-start and completion/error feedback.
+**Reminder cadence:** Send the consolidated summary at 18:00 in the recruiter's configured local
+timezone. An unanswered question is repeated once in the next eligible summary, then remains
+durable but is suppressed from later automatic summaries unless explicitly reopened. Accepted
+answers receive immediate processing-start and completion/error feedback.
 **Date:** 2026-07-22
 
 ## ADR-017: Notion interview date and recording link are pipeline outputs
@@ -162,4 +163,17 @@ a raw storage mutation primitive and free-form text never becomes an unchecked f
 **Consequence:** A successful non-interview route returns the storage link and completes without a
 candidate Notion update. An invalid, escaping, inaccessible, or ambiguous destination fails closed
 and remains actionable.
+**Date:** 2026-07-22
+
+## ADR-020: The Mila completion plan supersedes unfinished Phase 4 design
+**Decision:** `swarm-report/recording-agent-mila-completion-plan.md` is authoritative for all
+unfinished implementation and rollout work. Earlier Phase 4 documents retain historical facts but
+do not override its ordinary-DM queue, one-reminder suppression, explicit multi-Spot selection,
+fixed 18:00 recruiter-local schedule, manual-only Yandex cleanup, or approval gates.
+**Manual trigger:** A recruiter can always ask Mila to scan for new recordings. The narrow manual
+scan remains supported while the Backend scheduler is disabled and uses the same durable Backend
+state and idempotency boundaries.
+**Deployment:** Mila currently lacks Docker/Compose. Runtime installation, test-stack deployment,
+skill installation, agent invocation, real Mattermost DM, scheduled proof, and production effects
+follow the separate approval checkpoints in the plan.
 **Date:** 2026-07-22

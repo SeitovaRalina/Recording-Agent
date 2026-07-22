@@ -41,9 +41,10 @@ DM channel, recording/review ID, recording version, an opaque one-time capabilit
 thread ID is not part of the target binding. Wrong-user, stale, expired, ambiguous, and replayed
 answers fail closed. An unrelated Mila conversation must not consume a Recording Agent question.
 
-Unanswered questions remain pending and are repeated once per day in the 18:00 recruiter-local
-summary. Do not send additional reminder spam between daily summaries. Closed or suppressed
-questions are never repeated.
+An unanswered question remains pending and is repeated once in the next eligible 18:00
+recruiter-local summary. It is then automatically suppressed from later summaries unless
+explicitly reopened. Do not send reminder spam between summaries. Closed or suppressed questions
+are never repeated automatically.
 
 ## Q4: Яндекс.Диск — where Telemost recordings land ✅ CLOSED
 **Answer:** Fixed folder `/Записи Телемоста/` on organizer's Яндекс.Диск.
@@ -220,18 +221,36 @@ production base path and credentials remain an operational Synology preflight re
 partial free-form reply and repeat them later. Closed questions must never be repeated. Reminder
 state and deduplication belong to Backend/PostgreSQL.
 
-**Answer (2026-07-22):** Send the consolidated summary and repeat unresolved questions once per
-day at 18:00 in the recruiter's configured local timezone. Do not send additional reminders during
-the day. A user may still answer at any time; accepted work gets immediate start and completion or
-error feedback. "Skip" closes the relevant question according to the selected action, and closed
-questions are not repeated.
+**Answer (2026-07-22):** Send the consolidated summary at 18:00 in the recruiter's configured
+local timezone. Repeat each unanswered question once in the next eligible summary, then keep it
+durable but set it to `suppressed` so it does not appear in later automatic summaries unless
+explicitly reopened. Do not send additional reminders during the day. A user may still answer an
+active question at any time; accepted work gets immediate start and completion or error feedback.
+"Skip" closes the relevant question according to the selected action.
 
-## Q15: Multiple related `📍 Spots` in Notion [IMPLEMENTATION BLOCKER]
+## Q15: Multiple related `📍 Spots` in Notion ✅ CLOSED FOR TARGET UX
 
 **Question:** If a candidate card relates to more than one `📍 Spots` page, which value belongs in the
 single `<project_or_spot>` filename component and Synology path?
 **Known:** Zero relations use `unspecified`; exactly one relation resolves that page's title. The
 reported `unspecified` result came from reading the legacy `Spot Client/rich_text` property instead
 of the literal `📍 Spots/relation` property; explicit relation resolution is being added.
-**Status:** Open only for the multiple-relation case. Do not choose the first relation based on API
-order.
+**Answer (2026-07-22):** Fail closed and create a structured recruiter question. Show every
+bounded related Spot title and Notion URL. The recruiter explicitly selects one Spot; Backend
+persists that selection and rechecks the filename/storage collision before transfer. Never choose
+or merge relations by API order. An unanswered selection follows the normal one-reminder then
+automatic-suppression policy.
+
+## Operational rollout blockers (2026-07-22)
+
+- Mila has no Docker/Compose runtime. Exact package installation and service mutations require an
+  approved remote manifest.
+- Production Synology endpoint/API key/share/root and permission proof are unavailable.
+- Mattermost values require an approved safe Mila-side transfer; the first real allowlisted DM is
+  separately approved.
+- Backend runtime must repeat the read-only Notion schema/formula probe before the first test
+  write. Lili production activation remains blocked on sharing/schema proof.
+- Mila agent invocation, the actual scheduled 18:00 test, and all production Notion/Yandex/
+  Synology effects require separate explicit approvals.
+- Manual message-triggered scan remains supported while the scheduler is disabled. No scheduled
+  Yandex cleanup is part of the target system.

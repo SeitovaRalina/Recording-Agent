@@ -191,6 +191,32 @@ shared-channel fallback. Backend persists the DM channel and pending-question st
 is required for proactive scheduled summaries, reminders, processing-start feedback, and
 completion/error messages. OpenClaw never receives or prints the bot token.
 
+The initial question may be presented once and repeated only in the next eligible 18:00
+recruiter-local summary. Backend then suppresses it from later automatic summaries unless an
+explicit audited reopen occurs. Manual message-triggered scan and status requests do not require
+the scheduler to be enabled.
+
+## Mila production-host approval boundary
+
+As of the 2026-07-22 read-only inventory, Mila has no Docker/Compose runtime. Before any remote
+mutation, repeat the targeted inventory and present exact packages, paths, files, services,
+containers, loopback ports, commands, reload/restart operations, health checks, and rollback
+commands. Obtain approval for that exact manifest before installing Docker, starting services,
+deploying the isolated test stack, or installing the workspace skill.
+
+The following approvals remain separate and are not implied by deployment approval:
+
+- invoking the Mila agent for forward/canary prompts;
+- sending the first real DM to the allowlisted Mattermost user;
+- enabling the one actual Backend-owned scheduled test at 18:00 recruiter-local;
+- any production Notion write, Yandex mutation, or Synology operation;
+- promotion from test Backend/test Notion/MinIO scope to production scope.
+
+Mattermost values are read from Mila's existing configuration only through an approved safe
+operator mechanism and injected into the Backend service environment or protected credential
+file. Never print them, copy them into the repository/workspace skill, dump the full OpenClaw
+configuration, or restart the Gateway without explicit approval.
+
 ---
 
 ## Secrets reference

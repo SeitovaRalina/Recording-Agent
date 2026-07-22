@@ -1,334 +1,168 @@
 ---
 type: reference
-status: draft
-last_updated: 2026-07-13
+status: target
+last_updated: 2026-07-22
 sources:
-  - TOR.md (раздел 11)
   - .memory-bank/architecture.md
+  - .memory-bank/decisions.md
+  - swarm-report/recording-agent-mila-completion-plan.md
 ---
 
-# Status Machine — Машина состояний обработки записей
+# Status Machine — Recording Processing
 
-## Диаграмма переходов
+The approved completion plan is authoritative for unfinished behavior. PostgreSQL owns every
+workflow transition; Mila presents bounded intents and never becomes workflow memory.
 
-```
-[START: новый файл обнаружен на Диске]
-          │
-          ▼
-        found
-          │
-          ├─── события не найдены / неоднозначность ──► manual_review_required
-          │                                                      │
-          ▼                                                      │ рекрутер подтвердил
-  calendar_event_found                                           │
-          │                                                      │
-          ├─── карточка не найдена / несколько совпадений ──►──┘
-          │
-          ▼
-  candidate_matched
-          │
-          ▼
-  transfer_started
-          │
-          ├─── ошибка при передаче ──► failed
-          │
-          ▼
-  uploaded_to_synology
-          │
-          ▼
-  synology_link_created
-          │
-          ├─── ошибка Notion ──► failed
-          │
-          ▼
-  notion_updated
-          │
-          ▼
-  source_marked_processed
-          │
-          ▼
-  source_deleted (after soft-delete cron + separately approved permanent purge)
-          │
-          ▼
-       completed
-          
-Отдельные ветки:
-  ignored  — рекрутер явно отказался обрабатывать запись
-  failed   — необратимая ошибка (после retry)
+## Recording lifecycle
+
+```text
+found
+  -> calendar_event_found
+  -> candidate_matched
+  -> transfer_started
+  -> uploaded_to_synology
+  -> synology_link_created
+  -> notion_updated
+  -> source_marked_processed
+  -> completed
+
+Any ambiguous matching/storage decision -> manual_review_required
+Explicit no-transfer decision           -> ignored
+Exhausted or permanent safe failure      -> failed
+Confirmed non-interview route            -> transfer_started -> ... -> completed
 ```
 
----
+`source_deleted` may remain as historical compatibility state for migrated rows, but it is not a
+scheduled target transition. There is no automatic source cleanup or permanent-purge transition.
 
-## Все 13 статусов
+### `found`
 
-### 1. `found`
+The source is durably discovered and deduplicated by `disk_file_id`. Calendar correlation uses
+the timestamp parsed from a supported Telemost filename and the complete eligible calendar
+snapshot. An incomplete snapshot remains resumable in `found`.
 
-Calendar lookup uses the start parsed from a supported Telemost filename in
-`RECORDING_FILENAME_TIMEZONE` (default: `Europe/Moscow`), not `disk_created_at`, as the
-event-correlation timestamp. `SCAN_LOCAL_TIMEZONE` remains the recruiter's business timezone for
-local-day boundaries and Notion dates. An incomplete all-calendar query leaves this status
-resumable.
+Manual message-triggered scans may enter this state at any time, including while the scheduler is
+disabled. The same idempotency rules apply to manual and scheduled scans.
 
-**Когда устанавливается:** файл обнаружен в списке Яндекс.Диска, ещё не обрабатывался.
+### `calendar_event_found`
 
-**Что следует:** поиск события в Яндекс.Календаре в ±2h окне от времени записи.
+Exactly one compatible occurrence exists in the effective selected calendar set, no compatible
+outside collision exists, and the confidence threshold is met. Calendar provenance is persisted.
+Next, search Notion by candidate name without a `General Interview Date` filter.
 
-**При ошибке:** если диск недоступен — ждать следующего цикла, не менять статус.
+### `candidate_matched`
 
----
+The candidate card and required storage identity are unambiguous. Email from the `TBD` formula is
+supporting evidence only. Duplicate cards remain distinct by page ID/URL and bounded differences.
+Multiple `📍 Spots` relations require an explicit recruiter selection before entering this state;
+API order never selects a Spot.
 
-### 2. `calendar_event_found`
+### `manual_review_required`
 
-This status is set only when the recording filename parses, its normalized title exactly equals
-the VEVENT `SUMMARY`, its parsed local start is temporally compatible, exactly one compatible
-occurrence belongs to the effective monitored calendar set, no compatible occurrence exists in
-an unmonitored calendar, and confidence meets the threshold. Identical occurrences are deduplicated
-only by `(calendar_id, UID, RECURRENCE-ID)`.
+The recording needs one or more durable Backend-owned questions: calendar ambiguity, no/duplicate
+Notion card, multi-Spot choice, storage collision, route choice, or another bounded reason.
 
-The confirmed row stores calendar provenance: the calendar row ID and immutable canonical URL and
-display-name snapshots. A partial or stale all-calendar snapshot never produces this status.
+The question queue, not chat memory, stores recruiter, exact DM channel, recording/review,
+recording version, question-set identity, capability hash, TTL, idempotency, reminder state, and
+result. Threads are not required.
 
-**Что следует:** поиск карточки кандидата в Notion.
+An initial daily summary presents bounded numbered questions. A free-form reply is interpreted by
+Mila, confirmed to the recruiter, and submitted as exact question/action tuples. Backend closes
+only independently valid unambiguous items. Omitted or ambiguous questions remain pending.
+Unrelated messages consume nothing.
 
-**При ошибке / неоднозначности:** → `manual_review_required` (никогда не `ignored` автоматически).
+### `transfer_started`
 
----
+The destination and collision check are persisted before upload. Same-recording retry may reuse
+the same object; a different recording with the same key returns to manual review. No overwrite or
+silent suffix is allowed.
 
-### 3. `candidate_matched`
+### `uploaded_to_synology`
 
-**Когда устанавливается:** найдена ровно одна карточка Notion с достаточной уверенностью.
+Storage confirmed the upload. Test canary may use isolated MinIO, but a test presigned URL is not
+proof of durable production archival. A fallback temp file is removed immediately; a separate
+four-hour temp-file TTL guard may clean abandoned local temp files.
 
-**Что следует:** начать передачу файла в Synology.
+### `synology_link_created`
 
-**При ошибке:** если несколько карточек → `manual_review_required`. Если 0 → `manual_review_required`.
+A durable storage link exists. Interview flow proceeds to one idempotent Notion update containing
+both matched calendar date and recording link. Non-interview flow skips Notion and proceeds toward
+completion.
 
----
+### `notion_updated`
 
-### 4. `manual_review_required`
+Notion confirmed the idempotent date-plus-link update. This state is used only for interview
+routes. Schema/page drift fails safely without repeating completed storage work.
 
-**Когда устанавливается:**
-- Событие календаря не найдено или неоднозначно
-- Карточка Notion не найдена или найдено несколько
-- Рекрутер не уверен / низкий confidence score
+### `source_marked_processed`
 
-**Flow:**
+This is historical/current-code compatibility for a Yandex custom-property marker. Initial canary
+keeps all Yandex mutations disabled. The target workflow does not schedule a later delete from
+this state.
+
+### `completed`
+
+The selected route has a durable final link and all required side effects completed. The row
+remains for audit and idempotency. A deduplicated completion DM is emitted through the outbox.
+
+### `ignored`
+
+An explicit recruiter decision ends processing without transfer. This differs from a confirmed
+non-interview route, which transfers to an allowed destination and completes with a storage link.
+
+### `failed`
+
+The retry budget is exhausted or a safe permanent error occurred. Source data remains untouched.
+A deduplicated sanitized actionable error DM is emitted; stack traces and credentials are never
+included.
+
+## Question lifecycle
+
+```text
+pending -> answered -> processing -> completed
+   |          |            |
+   |          |            -> failed
+   |          -> pending (item rejected/ambiguous; no consumption)
+   -> suppressed (after one next-summary reminder)
 ```
-1. db.set_status("manual_review_required")
-2. mattermost.send_dm(recruiter, disambiguation_message)
-3. context сохранён в recordings.manual_review_context (JSON)
-4. Ожидание ответа рекрутера (WebSocket / polling)
-5. OpenClaw NLU парсит свободный текст ответа
-6. Определяем action: прикрепить к карточке N / ignore / URL
-7. db.set_status("candidate_matched") → resume pipeline
-```
 
-**Хранить контекст:** `manual_review_context` в PostgreSQL — это всё что нужно для возобновления:
-- ID записи
-- ID кандидатов-претендентов
-- ID Mattermost thread/channel
-
-**При timeout рекрутера:** запись остаётся в `manual_review_required`. Reminder через 24h.
-
-**Только явный `"ignore"` от рекрутера** переводит запись в `ignored`.
-
-Calendar correlation uses structured reasons: `filename_parse_failed`, `no_compatible_event`,
-`unmonitored_calendar_only`, `multiple_compatible_events`,
-`monitored_unmonitored_collision`, and `confidence_below_threshold`. These outcomes persist no
-confirmed event or calendar provenance. Candidate diagnostics are bounded summaries and must not
-contain raw ICS, app passwords, authorization headers, or other credentials.
-
-An incomplete calendar snapshot is transient: keep the row resumable as `found` instead of making
-a partial automatic decision.
-
-### Calendar-match remediation
-
-The remediation command is dry-run by default. It identifies non-terminal
-`calendar_event_found` rows whose stored event title is incompatible with the recording filename.
-Explicit `--apply` clears confirmed calendar fields/provenance and requeues only the listed rows to
-`found`, recording operator audit output. It never rewrites terminal rows and never touches Disk,
-Notion, Synology, retention, or transfer state.
-
----
-
-### 5. `transfer_started`
-
-**Когда устанавливается:** перед началом streaming-передачи Диск → Synology.
-
-**Что следует:** chunk-by-chunk streaming upload.
-
-**Идемпотентность:** если агент перезапустился — проверить что файл не загружен уже в Synology. Если загружен — перейти в `uploaded_to_synology` без повторной загрузки.
-
-**При ошибке:** → `failed` (transient: retry; permanent: alert)
-
----
-
-### 6. `uploaded_to_synology`
-
-**Когда устанавливается:** Synology подтвердил upload (200 OK).
-
-**Что следует:** создать share link.
-
-**Временный файл:** если использовался fallback (temp file) — удалить немедленно.
-
----
-
-### 7. `synology_link_created`
-
-**Когда устанавливается:** получен share URL от Synology.
-
-**Что следует:** обновить карточку Notion.
-
-**При ошибке создания ссылки:** → `failed`, файл на Synology уже есть — не удалять.
-
----
-
-### 8. `notion_updated`
-
-**Когда устанавливается:** PATCH `/pages/{id}` вернул 200, поле `General Interview recording` обновлено.
-
-**Что следует:** пометить исходный файл на Диске как обработанный.
-
----
-
-### 9. `source_marked_processed`
-
-**Set when:** after Synology upload and the downstream update succeed, PATCH
-`/disk/resources` stores `custom_properties.processed="true"` and a UTC ISO 8601
-`custom_properties.processed_at` value on the source file.
-
-**Semantics:** the source remains at its original path. Scanner discovery skips it by reading
-the custom property, independently of the PostgreSQL idempotency check. If `processed=true` but
-`processed_at` is missing or invalid, discovery repairs it to current UTC and still excludes the
-source. The cleanup fallback performs the same repair but does not delete the source in that run.
-
-**Next:** remain in this state until a separate daily cleanup considers the source after
-`processed_at` is at least seven days old.
-
----
-
-### 10. `source_deleted`
-
-**Set when:** the daily soft-delete cron previously moved the eligible source to Trash with
-`DELETE /disk/resources`, and a separate explicitly approved purge permanently deleted the
-actual `trash:/...` resource with `DELETE /disk/trash/resources`.
-
-**Preconditions:** `source_marked_processed` succeeded, `processed_at` is at least seven days
-old, and an operator explicitly approved this purge invocation. Approval contains a non-empty
-operator identity, timezone-aware timestamp no more than five minutes old, and non-empty unique
-nonce. Freshness uses a trusted injected aware UTC clock; callers cannot supply `now`. The nonce
-is consumed before any request and cannot be reused after success or failure. Approval cannot
-come from a standing environment/configuration value; age, scheduler execution, and prior
-processing success never grant permanent-delete authority.
-
-**Resumability:** the purge enumerates current Trash resources and uses their actual paths,
-correlating them through `origin_path`. A partial failure leaves remaining resources discoverable;
-a later retry requires newly issued approval with a new nonce and re-enumerates Trash. A 404 is success only when
-retained state proves that deletion was already requested/completed.
-
-**Next:** → `completed`.
-
----
-
-### 11. `completed`
-
-**Когда устанавливается:** все шаги пройдены, запись полностью обработана.
-
-**Финальный статус.** Запись в PostgreSQL остаётся для аудита.
-
----
-
-### 12. `ignored`
-
-**Когда устанавливается:** рекрутер явно ответил `"ignore"` / `"не моё"` / `"пропусти"` в Mattermost.
-
-**Финальный статус.** Файл на Диске не трогать. Агент его больше не обрабатывает.
-
----
-
-### 13. `failed`
-
-**Когда устанавливается:** необратимая ошибка или исчерпан лимит retry.
-
-**Действия:**
-1. `db.set_status("failed", error_message=...)`
-2. `db.increment_attempts()`
-3. Уведомить рекрутера через Mattermost
-4. Источник на Диске не трогать
-
-**Retry:** агент не повторяет `failed` автоматически. Только по команде `/recordings retry <id>`.
-
----
-
-## Retry Policy
-
-### Transient ошибки (retry допустим)
-
-| Ошибка | Стратегия |
-|--------|-----------|
-| Network timeout | Exponential backoff, max 5 попыток |
-| HTTP 429 (rate limit) | Backoff по Retry-After |
-| HTTP 503/504 (overload) | Backoff 30s, 60s, 120s |
-| Synology 106 (session timeout) | Re-login, retry |
-| Диск 423 (maintenance) | Ждать 30 мин, retry |
-
-### Permanent ошибки (не retry)
-
-| Ошибка | Действие |
-|--------|----------|
-| 404 файл не найден на Диске | → `failed` + alert |
-| Notion 404 database_id | → `failed` + alert (нужен Q5) |
-| Synology 415 quota exceeded | → `failed` + alert |
-| Неверный OAuth token | → `failed` + alert (нужна ротация) |
-| CalDAV 401 (app password) | → `failed` + alert |
-
----
-
-## Идемпотентность (защита от двойной обработки)
-
-Каждый шаг должен быть идемпотентным:
-
-1. **`found`** — перед добавлением записи проверить `disk_file_id` в PostgreSQL. Если уже есть — пропустить.
-2. **`transfer_started`** — перед upload проверить что файл не существует в Synology по имени/пути.
-3. **`notion_updated`** — перед PATCH проверить текущее значение поля. Если уже заполнено нашим URL — пропустить.
-4. **`source_marked_processed`** — read the existing custom properties before PATCH; an
-   existing valid `processed=true` and `processed_at` is success. A missing/invalid timestamp on
-   a processed source is repaired to current UTC; discovery excludes it, and cleanup skips
-   deletion for that repair run.
-5. **`source_deleted`** — the scheduled stage is soft-delete-only. A separate purge verifies
-   the seven-day boundary and a fresh named per-run approval, enumerates real Trash paths, and
-   can resume after partial failure. Treat 404 as success only for a stage previously recorded
-   as requested/completed.
-
-### First-run discovery cutoff
-
-By default, a recruiter's first discovery scan inserts only Disk files created at or after the
-start of the current local date. `SCAN_LOCAL_TIMEZONE` defines the local date (default:
-`Asia/Omsk`), and `SCAN_IGNORE_BEFORE_TODAY` can disable the cutoff. The cutoff applies only to
-new Disk files: existing `recordings` rows, including older `found` rows, remain resumable.
-
-Scanner insert and match-decision entries are application logs, not PostgreSQL logs.
-
----
-
-## Confidence Scoring
-
-| Signal | Weight |
-|--------|--------|
-| Time overlap | high (0.35) |
-| `calink.ru` booking marker | high (0.30) |
-| Candidate name in event title | medium/high (0.25) |
-| Telemost URL | low (0.05), diagnostic only |
-| Interview keywords | low (0.05) |
-
-If `total_confidence < threshold`, transition to `manual_review_required`, not `ignored`.
-Start with a threshold of `0.7`.
-
----
-
-## Связи
-
-- [[data-model]] → таблица `recordings` + поле `status`
-- [[architecture]] → data flow happy path
-- [[mattermost]] → disambiguation flow
-- [[yandex-disk]] → операции mark_processed, delete
-- open-questions: Q9 (closed two-stage retention policy)
+- `pending`: eligible for an answer; initial presentation or one reminder may be due.
+- `answered`: an exact validated action has consumed the one-time capability.
+- `processing`: Backend owns execution; one processing-start outbox item exists.
+- `completed`: action and required effects succeeded; never repeated.
+- `failed`: safe terminal/actionable result is recorded and notified once.
+- `suppressed`: still durable and reopenable, but absent from automatic summaries.
+
+An unanswered question appears initially, repeats once in the next eligible 18:00 recruiter-local
+summary, then is automatically suppressed. There is no reminder spam between summaries.
+
+## Scheduler lifecycle
+
+Backend schedules one scan/summary at 18:00 in each active recruiter's configured IANA timezone.
+A recruiter/local-date key and claim lease provide DST, restart, misfire, and concurrent-instance
+deduplication. OpenClaw heartbeat is not a scheduler.
+
+The scheduler defaults to disabled and stays disabled through manual canary. Enabling the single
+real scheduled test requires separate approval; it is disabled again afterward unless continued
+operation is separately approved. Manual scan and status remain supported while disabled.
+
+No scheduled Yandex cleanup job is registered. Manual cleanup is a separate preview/confirm
+workflow and can move only revalidated Backend-proven completed sources with durable production
+storage links to Yandex Trash. Permanent purge is unavailable.
+
+## Notification lifecycle
+
+Summary, processing-start, completion, and error notifications enter a durable outbox with stable
+delivery keys. Workers claim with expiring leases. Restart recovery may reclaim stale rows but may
+not create a second logical delivery. Mattermost delivery is exact-DM-only; no shared-channel
+fallback exists.
+
+## Retry and safety invariants
+
+- network/rate-limit failures use bounded backoff and persisted attempt state;
+- discovery and matching ambiguity return to a resumable/manual state, never `ignored`;
+- each side effect is guarded by stored identity, expected version, and idempotency result;
+- stale version, expired/reused capability, wrong recruiter, or wrong/non-DM channel fails closed;
+- Notion writes occur only after a fresh Backend-runtime schema probe;
+- canary cannot access production Notion, Yandex mutations, or Synology;
+- normal deterministic processing does not invoke an LLM.

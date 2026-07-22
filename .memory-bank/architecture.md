@@ -1,5 +1,8 @@
 # Architecture
 
+For unfinished Recording Agent work, `swarm-report/recording-agent-mila-completion-plan.md` is the
+implementation authority. The earlier Phase 4 plan remains historical input.
+
 ## Component diagram
 
 ```
@@ -71,15 +74,19 @@
   chat memory is not workflow state.
 - Unrelated requests to Mila must continue normally and must not consume a pending recording
   question. Ambiguous answer-to-question mapping requires clarification.
-- Send the consolidated summary and repeat unresolved questions once per day at 18:00 in the
-  recruiter's configured local timezone. Accepted work receives immediate start/result feedback.
+- Send the consolidated summary at 18:00 in the recruiter's configured local timezone. An
+  unanswered question is repeated once in the next eligible summary and then suppressed from
+  later automatic summaries unless explicitly reopened. Accepted work receives immediate
+  start/result feedback.
 - `General Interview Date` is no longer a candidate-lookup prerequisite. Candidate lookup is by
   name. Email is an optional supporting signal extracted from the mixed contacts returned by the
   Notion `TBD` formula; Calendar attendee mismatch never rejects a name match. After a match,
   Backend writes the matched calendar event date and final storage link to Notion.
 - Project/spot property is configured by both name and expected type. Test and production use
   the exact Notion API property `📍 Spots/relation` after their own schema preflights. One
-  relation resolves the related page title, zero uses `unspecified`, and multiple fail closed.
+  relation resolves the related page title, zero uses `unspecified`, and multiple relations
+  create a structured recruiter choice. Every bounded Spot title/URL is shown, API order never
+  chooses one, and the explicit selection is persisted before filename/key generation.
 - A non-interview may be routed to a confirmed Synology destination and completed without a
   Notion candidate update. This is distinct from `ignored`. The recruiter may request a new folder,
   but Backend creates it only under the configured recruiter storage root after canonical-path and
@@ -141,6 +148,9 @@ MANUAL SOURCE CLEANUP (never scheduled):
     Backend records an idempotent per-file result
     permanent Trash purge is not exposed to Mila
 ```
+
+The manual message-triggered scan is a first-class flow and remains available while the scheduler
+is disabled. It uses the same Backend scan, idempotency, and status paths as a scheduled run.
 
 The current code still contains the older `processed=true` plus seven-day scheduled cleanup model,
 but that behavior is superseded for the target workflow and remains disabled. The Telemost folder
@@ -233,6 +243,9 @@ Backend → PostgreSQL: closes answered questions and leaves unanswered question
 Mila → recruiter: reports completion/error and later repeats only unanswered questions
 ```
 
+Only the next eligible summary repeats an unanswered question. After that one reminder, Backend
+keeps it durable but suppresses it from further automatic summaries until explicit reopening.
+
 ## Deployment
 
 - **Runtime:** VDS (Yandex Cloud or bare metal)
@@ -242,6 +255,19 @@ Mila → recruiter: reports completion/error and later repeats only unanswered q
 - **PostgreSQL:** managed service or Docker container
 - **Secrets:** Yandex Lockbox (production) / `.env` file (development)
 - **Scheduler:** APScheduler inside Backend Tools Service (not OpenClaw)
+
+### Mila deployment gates (confirmed 2026-07-22)
+
+- Mila currently has no Docker, Docker Compose, Podman, or Nerdctl. Installing Docker/Compose,
+  starting/enabling its services, and creating the isolated test stack are remote mutations that
+  require an exact manifest and explicit approval.
+- Installing the repository skill into
+  `/root/.openclaw/workspace/skills/recording-agent/` is allowed only after that manifest approval;
+  it initially calls a loopback test Backend.
+- Mila agent invocation, the first real allowlisted Mattermost DM, the one actual scheduled 18:00
+  test, and any production Notion/Yandex/Synology scope each require separate approvals.
+- OpenClaw, its loopback Gateway bind, Sylvanas, and existing Mila skills/connections are not
+  changed. Rollback preserves named volumes; `docker compose down -v` is forbidden.
 
 ## Test environment
 

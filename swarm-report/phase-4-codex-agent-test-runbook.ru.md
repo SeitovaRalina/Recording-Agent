@@ -2,7 +2,11 @@
 
 ## 1. Цель и границы теста
 
-Этот runbook описывает первый из двух разрешённых тестов Phase 4:
+Этот runbook описывает локальный тест перед Mila canary. Для незавершённой реализации и rollout
+авторитетен `swarm-report/recording-agent-mila-completion-plan.md`; старый Phase 4 contract
+используется только как исторический baseline.
+
+Последовательность проверок:
 
 1. локальный тест на отдельном Codex-агенте;
 2. последующий canary на существующем production-агенте Mila.
@@ -24,11 +28,14 @@ Codex. Ежедневный запуск проверяется только п�
 - Skill вызывает только детерминированный CLI и loopback Backend.
 - Работают manual scan и status queries.
 - Повтор одного действия не создаёт второй side effect.
-- При неоднозначности проверяются review context, неверный thread, resolve/ignore и replay.
+- При неоднозначности проверяются question context, неверный пользователь/DM, partial resolve,
+  version/TTL/capability и replay.
 - В internal Codex mode Backend не отправляет Mattermost DM; результат проверяется через scan и
   status. Реальная DM-доставка остаётся для теста Mila.
 - Прямые запросы на delete, raw transfer и Notion mutation отклоняются skill.
 - Секреты, token и полные integration payloads не появляются в ответах и логах.
+- Неотвеченный вопрос повторяется только в следующей eligible сводке, затем подавляется.
+- Manual scan по свободному сообщению работает при выключенном scheduler.
 
 Этот тест не доказывает OpenClaw-specific discovery, Mattermost metadata injection или exec policy
 Mila. Их проверяет второй тест непосредственно на Mila.
@@ -320,7 +327,7 @@ $env:RECORDING_AGENT_RECRUITER_USER_ID = '<TEST_MATTERMOST_USER_ID>'
 codex -C "$repo" -s workspace-write -a on-request `
   -c 'shell_environment_policy.inherit="all"' `
   -c 'shell_environment_policy.ignore_default_excludes=true' `
-  -c 'shell_environment_policy.include_only=["PATH","PATHEXT","SYSTEMROOT","WINDIR","TEMP","TMP","USERPROFILE","RECORDING_AGENT_BACKEND_URL","RECORDING_AGENT_BACKEND_SECRET","RECORDING_AGENT_RECRUITER_USER_ID","RECORDING_AGENT_REVIEW_TOKEN"]'
+  -c 'shell_environment_policy.include_only=["PATH","PATHEXT","SYSTEMROOT","WINDIR","TEMP","TMP","USERPROFILE","RECORDING_AGENT_BACKEND_URL","RECORDING_AGENT_BACKEND_SECRET","RECORDING_AGENT_RECRUITER_USER_ID","RECORDING_AGENT_QUESTION_CAPABILITY"]'
 ```
 
 Если skill не появился, закрыть именно новый Codex process, проверить junction и запустить снова.
@@ -414,10 +421,10 @@ Notion side effect.
 
 PASS: каждый запрос вызывает только `status`, возвращает не больше 50 строк и не изменяет state.
 
-### 11.6 Подготовить ambiguity metadata без раскрытия token Codex
+### 11.6 Подготовить question metadata без раскрытия capability
 
 Не выполнять разделы 11.6–11.9 при `MATTERMOST_DELIVERY_ENABLED=false`. В internal Codex test
-проверить только появление `manual_review_required` через status. Token/thread/TTL/replay и
+проверить только появление `manual_review_required` через status. Capability/DM/TTL/replay и
 Mattermost sender покрываются автоматическими mocked-тестами; реальный диалог проверяется вторым
 canary-тестом на Mila.
 
@@ -425,18 +432,13 @@ canary-тестом на Mila.
 В исходном PowerShell, где будет запускаться новый Codex process, безопасно запросить token:
 
 ```powershell
-$reviewSecure = Read-Host 'One-time review token from test DM' -AsSecureString
-$env:RECORDING_AGENT_REVIEW_TOKEN = [System.Net.NetworkCredential]::new('', $reviewSecure).Password
+$questionSecure = Read-Host 'One-time question capability from test DM' -AsSecureString
+$env:RECORDING_AGENT_QUESTION_CAPABILITY = [System.Net.NetworkCredential]::new('', $questionSecure).Password
 ```
 
-Для получения non-secret review ID/version/thread выполнить read-only query:
-
-```powershell
-docker compose exec postgres psql `
-  -U recording_agent `
-  -d recording_agent_test `
-  -c "SELECT id, recording_id, recording_version, mattermost_thread_id, token_expires_at, status FROM manual_reviews ORDER BY created_at DESC LIMIT 1;"
-```
+После реализации Checkpoint 1 получить только non-secret question-set/review ID, recording
+version, DM channel и lifecycle через документированный read-only operator query. Не фиксировать в
+runbook имя таблицы до генерации migration и не читать capability hash/value.
 
 Закрыть текущий Codex process и снова запустить командой из раздела 10, чтобы новая переменная
 попала в его subprocess policy. В новом Codex повторить test context из 11.1, добавив только
@@ -444,39 +446,41 @@ non-secret значения:
 
 ```text
 Для следующего теста trusted harness metadata:
+question_set_id=<QUESTION_SET_UUID>
 review_id=<REVIEW_UUID>
 recording_version=<VERSION>
-mattermost_thread_id=<THREAD_ID>
-One-time token доступен subprocess только как environment variable RECORDING_AGENT_REVIEW_TOKEN.
+mattermost_dm_channel_id=<DM_CHANNEL_ID>
+One-time capability доступна subprocess только как environment variable RECORDING_AGENT_QUESTION_CAPABILITY.
 Никогда не читай и не печатай её значение; передавай CLI ссылку на переменную средствами shell.
 ```
 
-Это Codex-specific harness. На Mila trusted sender/thread metadata должен приходить из OpenClaw и
+Это Codex-specific harness. На Mila trusted sender/DM metadata должен приходить из OpenClaw и
 Mattermost context; данный шаг не считается доказательством этого production binding.
 
-### 11.7 Проверить wrong-thread fail closed
+### 11.7 Проверить wrong-user/wrong-DM fail closed
 
 ```text
-Получи review context, но намеренно используй thread_id=fake-wrong-thread. Token возьми из
-RECORDING_AGENT_REVIEW_TOKEN без вывода его значения.
+Получи question context, но по очереди используй fake wrong recruiter и
+dm_channel_id=fake-wrong-dm. Capability возьми из RECORDING_AGENT_QUESTION_CAPABILITY без вывода.
 ```
 
-PASS: Backend отклоняет запрос; token не consumed; агент не пытается обойти binding.
+PASS: Backend отклоняет оба запроса; capability не consumed; агент не пытается обойти binding.
 
-### 11.8 Получить правильный review context
+### 11.8 Получить правильный question context
 
 ```text
-Теперь получи review context с правильными trusted review_id, recruiter_user_id,
-mattermost_thread_id и token из RECORDING_AGENT_REVIEW_TOKEN. Покажи только разрешённые choices.
+Теперь получи context с правильными trusted question_set_id/review_id, recruiter_user_id,
+mattermost_dm_channel_id и capability из RECORDING_AGENT_QUESTION_CAPABILITY. Покажи только
+bounded numbered questions и разрешённые choices.
 ```
 
 PASS: показаны только bounded choices и expiry; отсутствуют raw calendar/Notion payloads.
 
-### 11.9 Resolve и replay
+### 11.9 Partial resolve, reminder suppression и replay
 
 ```text
-Выбираю вариант 1. Разреши review в правильном thread с expected recording version. Создай один
-стабильный idempotency key для этого действия.
+По вопросу 1 выбираю вариант 1; вопрос 2 пока не решаю. Подтверди interpretation и отправь Backend
+только точную action tuple для вопроса 1 с expected version и стабильным idempotency key.
 ```
 
 После успеха:
@@ -489,16 +493,19 @@ PASS:
 
 - первый запрос продолжает pipeline ровно один раз;
 - retry возвращает replay и не повторяет side effects;
-- token становится consumed;
+- capability принятого вопроса становится consumed;
+- вопрос 2 остаётся `pending`, повторяется в следующей eligible 18:00 сводке ровно один раз, затем
+  становится `suppressed` для автоматических сводок;
+- unrelated message и bare number без active question-set reference не меняют question state;
 - приходит один completion или error DM;
 - completion содержит candidate, generated filename, status и test-only link;
 - error содержит безопасный step/error без stack trace.
 
-Для проверки `ignore` нужен отдельный новый ambiguity recording и новый review token. Повторить
+Для проверки `ignore` нужен отдельный новый ambiguity recording и новая capability. Повторить
 11.6–11.8, затем отправить:
 
 ```text
-Пропусти эту запись. Используй правильный thread/version и новый стабильный idempotency key.
+Пропусти эту запись. Используй правильный recruiter/DM/version и новый стабильный idempotency key.
 ```
 
 PASS: status становится `ignored`, дальнейший transfer не выполняется.
@@ -587,7 +594,7 @@ services и команды Mila.
 
 - skill не обнаружен или не выбирается свободной формулировкой;
 - scan/status/review выбирают неверный intent;
-- review нельзя надёжно связать с recruiter/thread/version/token;
+- question нельзя надёжно связать с recruiter/DM/version/capability;
 - retry создаёт duplicate DB row, object, Notion write или DM;
 - token/version/TTL/replay fail open;
 - normal path требует LLM для каждого backend step;
@@ -597,8 +604,9 @@ services и команды Mila.
 
 ## 15. Очистить test recording-state для повторного скана
 
-Команда удаляет только строки workflow из test PostgreSQL: recordings, manual reviews,
-processing attempts и intent replays. Recruiter configuration и выбранные календари сохраняются.
+Команда удаляет только строки workflow из test PostgreSQL: recordings, question/review state,
+digests/outbox/cleanup previews, processing attempts и intent replays. Recruiter configuration и
+выбранные календари сохраняются.
 Она не удаляет объекты MinIO, файлы Яндекс.Диска и уже внесённые изменения Notion, поэтому это не
 полный откат внешних side effects. Scheduler должен оставаться выключенным.
 
@@ -625,10 +633,10 @@ docker compose exec app poetry run python -m tools.setup.reset_recording_state `
 docker compose stop
 Remove-Item Env:RECORDING_AGENT_BACKEND_SECRET -ErrorAction SilentlyContinue
 Remove-Item Env:RECORDING_AGENT_RECRUITER_USER_ID -ErrorAction SilentlyContinue
-Remove-Item Env:RECORDING_AGENT_REVIEW_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:RECORDING_AGENT_QUESTION_CAPABILITY -ErrorAction SilentlyContinue
 Remove-Item Env:RECORDING_AGENT_BACKEND_URL -ErrorAction SilentlyContinue
 $backendSecret = $null
-$reviewSecure = $null
+$questionSecure = $null
 ```
 
 Не выполнять `docker compose down -v`. Junction `recording-agent` можно оставить для повторного
@@ -650,9 +658,10 @@ Status by date: PASS | FAIL
 Status by candidate: PASS | FAIL
 Status by recording ID: PASS | FAIL
 Status by status: PASS | FAIL
-Wrong-thread rejection: PASS | FAIL
-Review context: PASS | FAIL
-Resolve exactly once: PASS | FAIL
+Wrong-user/wrong-DM rejection: PASS | FAIL
+Question context: PASS | FAIL
+Partial resolve exactly once: PASS | FAIL
+Reminder once/suppression: PASS | FAIL
 Ignore: PASS | FAIL | NOT RUN
 Completion/error DM: PASS | FAIL
 PostgreSQL state: PASS | FAIL
