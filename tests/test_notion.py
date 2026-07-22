@@ -267,6 +267,82 @@ def register_chain(
 
 
 @pytest.mark.anyio
+async def test_preflight_validates_selected_synthetic_row_contacts_formula() -> None:
+    synthetic_page_id = "df3fe300-f311-82b4-98f5-013eb4ca475d"
+    synthetic_page = page(synthetic_page_id)
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        **database("source"),
+                        "title": [{"plain_text": "Candidates"}],
+                    },
+                )
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [synthetic_page]})
+            )
+
+            inspection = await client.preflight_database(
+                "db", synthetic_page_id, NAME, DATE, RECORDING
+            )
+
+    assert inspection.schema.id == "source"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "synthetic_payload",
+    [
+        {"id": "synthetic-page"},
+        {"id": "synthetic-page", "properties": {}},
+        {
+            "id": "synthetic-page",
+            "properties": {
+                CONTACTS: {"type": "formula", "formula": {"type": "number", "number": 1}}
+            },
+        },
+        {
+            "id": "synthetic-page",
+            "properties": {
+                CONTACTS: {"type": "formula", "formula": {"type": "string", "string": []}}
+            },
+        },
+    ],
+)
+async def test_preflight_rejects_invalid_synthetic_contacts_payload(
+    synthetic_payload: dict[str, object],
+) -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        **database("source"),
+                        "title": [{"plain_text": "Candidates"}],
+                    },
+                )
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [synthetic_payload]})
+            )
+
+            with pytest.raises(NotionMalformedResponseError):
+                await client.preflight_database("db", "synthetic-page", NAME, DATE, RECORDING)
+
+
+@pytest.mark.anyio
 async def test_discovers_validates_and_queries_current_data_source() -> None:
     async with httpx.AsyncClient() as http:
         client = NotionClient(SecretStr("token"), http)

@@ -418,14 +418,24 @@ class NotionClient:
         if not isinstance(results, list):
             raise NotionMalformedResponseError("Notion synthetic-row query has invalid results")
         expected = synthetic_page_id.replace("-", "").casefold()
-        found = any(
-            isinstance(item, dict)
-            and isinstance(item.get("id"), str)
-            and item["id"].replace("-", "").casefold() == expected
-            for item in results
+        selected = next(
+            (
+                item
+                for item in results
+                if isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item["id"].replace("-", "").casefold() == expected
+            ),
+            None,
         )
-        if not found:
+        if selected is None:
             raise NotionQueryError("Selected synthetic Notion row was not returned by query")
+        properties = selected.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError(
+                "Selected synthetic Notion row has malformed properties"
+            )
+        self._formula_emails(properties.get(contacts_prop))
         return inspection
 
     async def _retrieve_database(self, database_id: str) -> dict[str, Any]:
