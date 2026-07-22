@@ -32,6 +32,7 @@ class TransferError(RuntimeError):
 class TransferResult:
     folder_path: str
     file_path: str
+    storage_is_durable: bool = False
 
 
 class TransferService:
@@ -91,7 +92,13 @@ class TransferService:
                 raise TransferError("upload", error) from error
         except Exception as error:
             raise TransferError("upload", error) from error
-        return TransferResult(folder_path=folder, file_path=path)
+        return TransferResult(
+            folder_path=folder,
+            file_path=path,
+            storage_is_durable=(
+                getattr(self._storage, "durable_for_source_cleanup", False) is True
+            ),
+        )
 
     async def create_share_link(self, path: str) -> str:
         try:

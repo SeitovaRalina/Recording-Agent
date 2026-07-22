@@ -80,7 +80,7 @@ class NonInterviewService:
             await session.commit()
             link = await self._transfer.create_share_link(result.file_path)
             recording.synology_share_url = link
-            recording.storage_is_durable = True
+            recording.storage_is_durable = result.storage_is_durable is True
             recording.transition_to(RecordingStatus.SYNOLOGY_LINK_CREATED)
             recording.transition_to(RecordingStatus.COMPLETED)
             recording.completed_at = datetime.now(UTC)

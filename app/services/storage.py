@@ -14,6 +14,9 @@ MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024
 
 
 class StorageBackend(Protocol):
+    @property
+    def durable_for_source_cleanup(self) -> bool: ...
+
     async def ensure_folder(self, path: str) -> None: ...
 
     async def upload(
@@ -68,6 +71,10 @@ class MinIOBackend:
         self._secret_key = secret_key
         self._bucket = bucket
         self._client = client
+
+    @property
+    def durable_for_source_cleanup(self) -> bool:
+        return False
 
     async def ensure_folder(self, path: str) -> None:
         del path

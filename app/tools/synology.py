@@ -48,6 +48,10 @@ class SynologyBackend:
         self._client = client
 
     @property
+    def durable_for_source_cleanup(self) -> bool:
+        return True
+
+    @property
     def _headers(self) -> dict[str, str]:
         return {"X-SYNO-Token": self._api_key.get_secret_value()}
 
@@ -208,12 +212,57 @@ class SynologyBackend:
         recording_id: str,
         content_identity: str,
     ) -> str:
-        del size, recording_id, content_identity
         target = f"{folder.rstrip('/')}/{filename}"
-        if await self._exists(target):
+        expected_owner: dict[str, object] = {
+            "content_identity": content_identity,
+            "recording_id": recording_id,
+            "size": size,
+            "v": 1,
+        }
+        owner = await self._read_owner_marker(folder, filename)
+        existing_size = await self._file_size(target)
+        if owner is not None:
+            self._require_same_owner(target, owner, expected_owner)
+            if existing_size is not None:
+                self._require_complete_size(target, existing_size, size)
+                return target
+        elif existing_size is not None:
             raise StorageCollisionError(
                 "Synology destination already exists; overwrite is forbidden"
             )
+
+        if owner is None:
+            await self._claim_owner(folder, filename, expected_owner)
+            existing_size = await self._file_size(target)
+            if existing_size is not None:
+                self._require_complete_size(target, existing_size, size)
+                return target
+
+        try:
+            await self._upload_file(folder, filename, stream)
+        except Exception:
+            recovered_owner = await self._read_owner_marker(folder, filename)
+            recovered_size = await self._file_size(target)
+            if recovered_owner is None or recovered_size is None:
+                raise
+            self._require_same_owner(target, recovered_owner, expected_owner)
+            self._require_complete_size(target, recovered_size, size)
+        return target
+
+    async def _claim_owner(
+        self, folder: str, filename: str, expected_owner: dict[str, object]
+    ) -> None:
+        marker_name = self._owner_marker_name(filename)
+        body = json.dumps(expected_owner, sort_keys=True, separators=(",", ":")).encode()
+        try:
+            await self._upload_file(folder, marker_name, self._bytes(body))
+        except Exception:
+            owner = await self._read_owner_marker(folder, filename)
+            if owner is None:
+                raise
+            self._require_same_owner(f"{folder.rstrip('/')}/{filename}", owner, expected_owner)
+
+    async def _upload_file(self, folder: str, filename: str, stream: AsyncIterator[bytes]) -> None:
         boundary = f"recording-agent-{uuid.uuid4().hex}"
         response = await self._client.post(
             f"{self._base_url}/webapi/entry.cgi",
@@ -224,10 +273,9 @@ class SynologyBackend:
             },
             content=self._multipart(boundary, folder, filename, stream),
         )
-        self._validate(response, allowed_error_codes={408})
-        return f"{folder.rstrip('/')}/{filename}"
+        self._validate(response)
 
-    async def _exists(self, path: str) -> bool:
+    async def _file_size(self, path: str) -> int | None:
         response = await self._client.get(
             f"{self._base_url}/webapi/entry.cgi",
             params={
@@ -235,7 +283,7 @@ class SynologyBackend:
                 "method": "getinfo",
                 "version": "2",
                 "path": json.dumps([path]),
-                "additional": '["perm","real_path"]',
+                "additional": '["size"]',
             },
             headers=self._headers,
         )
@@ -246,11 +294,73 @@ class SynologyBackend:
         error = payload.get("error") if isinstance(payload, dict) else None
         code = error.get("code") if isinstance(error, dict) else None
         if response.status_code == 404 or code == 408:
-            return False
+            return None
         validated = self._validate(response)
         data = validated.get("data")
         files = data.get("files") if isinstance(data, dict) else None
-        return isinstance(files, list) and bool(files)
+        if not isinstance(files, list) or not files:
+            return None
+        item = files[0]
+        if not isinstance(item, dict) or not isinstance(item.get("size"), int):
+            raise StorageCollisionError(
+                f"Synology destination exists but its size cannot be verified: {path}"
+            )
+        return int(item["size"])
+
+    async def _read_owner_marker(self, folder: str, filename: str) -> dict[str, object] | None:
+        marker_path = f"{folder.rstrip('/')}/{self._owner_marker_name(filename)}"
+        response = await self._client.get(
+            f"{self._base_url}/webapi/entry.cgi",
+            params={
+                "api": "SYNO.FileStation.Download",
+                "method": "download",
+                "version": "2",
+                "path": marker_path,
+                "mode": "open",
+            },
+            headers=self._headers,
+        )
+        if response.status_code == 404:
+            return None
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise StorageCollisionError("Synology ownership marker is malformed") from error
+        if isinstance(payload, dict) and payload.get("success") is False:
+            marker_error = payload.get("error")
+            code = marker_error.get("code") if isinstance(marker_error, dict) else None
+            if code == 408:
+                return None
+            self._validate(response)
+        if not isinstance(payload, dict):
+            raise StorageCollisionError("Synology ownership marker is malformed")
+        return payload
+
+    @staticmethod
+    def _owner_marker_name(filename: str) -> str:
+        return f".{filename}.recording-agent-owner.json"
+
+    @staticmethod
+    async def _bytes(value: bytes) -> AsyncIterator[bytes]:
+        yield value
+
+    @staticmethod
+    def _require_same_owner(
+        target: str, actual: dict[str, object], expected: dict[str, object]
+    ) -> None:
+        if actual == expected:
+            return
+        raise StorageCollisionError(
+            f"Synology destination already exists with different ownership: {target}"
+        )
+
+    @staticmethod
+    def _require_complete_size(target: str, actual: int, expected: int | None) -> None:
+        if expected is not None and actual == expected:
+            return
+        raise StorageCollisionError(
+            f"Synology destination cannot be proven complete for safe reuse: {target}"
+        )
 
     async def _get_info(self, path: str) -> SynologyFolder:
         response = await self._client.get(
@@ -332,7 +442,7 @@ class SynologyBackend:
         filename: str,
         stream: AsyncIterator[bytes],
     ) -> AsyncIterator[bytes]:
-        fields = {"path": folder, "create_parents": "true"}
+        fields = {"path": folder, "create_parents": "true", "overwrite": "false"}
         for name, value in fields.items():
             yield (
                 f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'

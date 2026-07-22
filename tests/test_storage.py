@@ -163,5 +163,9 @@ async def test_minio_rejects_existing_key_owned_by_another_recording() -> None:
 
 
 def test_storage_factory_selects_provider() -> None:
-    assert isinstance(StorageFactory.create(Settings(storage_provider="minio")), MinIOBackend)
-    assert isinstance(StorageFactory.create(Settings(storage_provider="synology")), SynologyBackend)
+    minio = StorageFactory.create(Settings(storage_provider="minio"))
+    synology = StorageFactory.create(Settings(storage_provider="synology"))
+    assert isinstance(minio, MinIOBackend)
+    assert minio.durable_for_source_cleanup is False
+    assert isinstance(synology, SynologyBackend)
+    assert synology.durable_for_source_cleanup is True

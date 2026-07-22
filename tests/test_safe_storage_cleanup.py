@@ -344,6 +344,7 @@ async def test_non_interview_route_uses_opaque_destination_and_skips_notion() ->
     assert result.route_type == "non_interview"
     assert result.notion_page_id is None
     assert result.synology_share_url == "https://nas.test/share/final"
+    assert result.storage_is_durable is False
 
 
 @pytest.mark.anyio
