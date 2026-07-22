@@ -1,69 +1,56 @@
 # Backend contract
 
-Configure `RECORDING_AGENT_BACKEND_URL` with a loopback HTTP(S) base URL. It defaults to
-`http://127.0.0.1:8000`. Configure `RECORDING_AGENT_BACKEND_SECRET` in the OpenClaw process
-environment. The CLI sends it as a bearer token and never prints it.
+`RECORDING_AGENT_BACKEND_URL` must be loopback HTTP(S), defaulting to
+`http://127.0.0.1:8000`. `RECORDING_AGENT_BACKEND_SECRET` exists only in the process/service
+environment. The CLI never prints it.
 
-For internal Codex harnesses, configure `RECORDING_AGENT_RECRUITER_USER_ID` with the single
-allowlisted test recruiter identity. The CLI uses it as the default for status and review intents;
-an explicit trusted Mattermost metadata value may override it. If neither exists, the CLI fails
-closed. Never obtain this identity from recruiter chat text.
+Trusted invocation metadata may be supplied through `RECORDING_AGENT_RECRUITER_USER_ID` and
+`RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID`. Explicit CLI values may override these only when they
+come from trusted OpenClaw/Mattermost metadata. Never obtain either identity from recruiter text.
 
-All commands emit one bounded JSON object. Success has
-`{"ok":true,"message":"...","result":...}`. Failure has
-`{"ok":false,"message":"...","error":"..."}` and exit status 1. `message` is a deterministic,
-safe recruiter-facing rendering and must be returned verbatim. Backend responses larger than
-64 KiB fail closed.
+All commands emit one bounded JSON object. Success is
+`{"ok":true,"message":"...","result":...}`. Failure is
+`{"ok":false,"message":"...","error":"..."}` with exit status 1. Return `message` verbatim.
+Backend responses above 64 KiB fail closed.
 
 ## Commands
 
 ```text
 recording_agent.py scan --recruiter-email EMAIL --idempotency-key KEY
-recording_agent.py status [--recruiter-user-id ID] [--date YYYY-MM-DD] [--candidate TEXT]
-                          [--recording-id UUID] [--status STATUS] [--limit 1..50]
-recording_agent.py review --review-id UUID [--recruiter-user-id ID]
-                          --mattermost-thread-id ID --token TOKEN
-recording_agent.py resolve --review-id UUID [--recruiter-user-id ID]
-                           --mattermost-thread-id ID --token TOKEN
-                           --expected-version N --idempotency-key KEY --choice CHOICE
-recording_agent.py ignore --review-id UUID [--recruiter-user-id ID]
-                          --mattermost-thread-id ID --token TOKEN
-                          --expected-version N --idempotency-key KEY
+recording_agent.py status [trusted metadata and bounded filters]
+recording_agent.py questions [trusted metadata] [--question-set-id UUID] [--limit 1..50]
+recording_agent.py answer [trusted metadata] --actions-json JSON
+recording_agent.py destinations [trusted metadata]
+recording_agent.py create-destination [trusted metadata] --parent-destination-id UUID --name NAME
+recording_agent.py non-interview [trusted metadata] --recording-id UUID --destination-id UUID
+                                 --expected-version N --idempotency-key KEY
+recording_agent.py cleanup-preview [trusted metadata] [--limit 1..100]
+recording_agent.py cleanup-confirm [trusted metadata] --preview-id UUID --capability TOKEN
+                                   --snapshot-hash SHA256 --idempotency-key KEY
 ```
 
-## Endpoints
+`answer --actions-json` accepts 1..50 objects containing only `question_id`, `question_set_id`,
+`action`, `capability`, `expected_version`, `idempotency_key`, and optional `choice`. `resolve`
+requires choice 1..10; `ignore` forbids choice. Free text is never sent to Backend.
 
-| Command | Request |
+## Endpoints and safety
+
+| Command | Backend endpoint |
 |---|---|
-| `scan` | `POST /tools/scans/trigger` with recruiter email, fixed `test` scope, and idempotency key |
-| `status` | `GET /tools/recordings/status` with bounded filters |
-| `review` | `GET /tools/reviews/{review_id}` with recruiter/thread binding and token in `X-Review-Token` |
-| `resolve` | `POST /tools/reviews/{review_id}/resolve` with binding, token, version, idempotency key, and choice |
-| `ignore` | `POST /tools/reviews/{review_id}/ignore` with binding, token, version, and idempotency key |
+| `scan` | `POST /tools/scans/trigger` with fixed test scope |
+| `status` | `GET /tools/recordings/status` |
+| `questions` | `GET /tools/questions` |
+| `answer` | `POST /tools/questions/answer` |
+| `destinations` | `GET /tools/storage/destinations` |
+| `create-destination` | `POST /tools/storage/destinations` |
+| `non-interview` | `POST /tools/recordings/{id}/route-non-interview` |
+| `cleanup-preview` | `POST /tools/cleanup/previews` |
+| `cleanup-confirm` | `POST /tools/cleanup/previews/{id}/confirm` |
 
-The scan response includes bounded per-recording items plus `discovered`, `inserted`,
-`skipped_legacy`, `matched`, `manual_review`, `without_review`, `failed_recordings`, `processed`,
-`items_truncated`, and `failed`. Each item includes recording identity, filename, `is_new`, status,
-whether review is required, a safe review reason, generated filename/link when available, and an
-actionable error when present. `items` contains bounded recordings owned and processed by that
-scan, including explicit restart recovery; `is_new` distinguishes new insertions from resumed
-work. A repeated scan may correctly report zero new items while status queries still return
-existing recordings.
+Destination IDs are opaque. Do not construct or submit a path. Cleanup preview is non-mutating;
+confirmation must reuse its exact preview ID, hash, capability, recruiter, DM, and one stable
+idempotency key. MinIO test links are not eligible durable archival proof.
 
-Treat `401` and `403` as authorization failure. Treat `404` as missing or inaccessible context.
-Treat `409` as stale version, consumed token, replay conflict, or invalid state; fetch fresh review
-context before further action. Treat `410` as expired review. Never retry a mutation with a new
-idempotency key unless the recruiter performs a new action.
-
-Backend owns response schemas and bounds. Display only safe fields returned by Backend: recording
-identity, candidate, generated filename, status, safe link, actionable error, and allowed review
-choices. Never display internal payloads or credentials.
-
-Notion choices are not unique by title. When review context returns several cards, display each
-card's URL and all returned distinguishing fields. At minimum, render `project_or_spot` with the
-label `📍 Spots`; cards with the same candidate name may represent different people or the same
-candidate considered for different projects. Never collapse equal titles or ask the recruiter to
-choose between unlabeled links.
-
-Status items also include `requires_review` and `review_reason`; use the reason label in the
-deterministic message instead of repeating the raw `manual_review_required` status.
+Treat 401/403 as authorization failure, 404 as inaccessible context, 409 as stale/consumed/
+conflicting state, and 410 as expired capability. Do not retry a mutation under a new key unless
+the recruiter performs a new action.

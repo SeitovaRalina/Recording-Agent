@@ -78,6 +78,15 @@ def _add_recruiter_user_id_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dm_channel_argument(parser: argparse.ArgumentParser) -> None:
+    trusted_channel_id = os.environ.get("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "").strip()
+    parser.add_argument(
+        "--mattermost-dm-channel-id",
+        default=trusted_channel_id or None,
+        required=not trusted_channel_id,
+    )
+
+
 def _request(
     method: str,
     path: str,
@@ -156,7 +165,104 @@ def _parser() -> argparse.ArgumentParser:
         mutation.add_argument("--idempotency-key", required=True)
         if name == "resolve":
             mutation.add_argument("--choice", required=True, type=int, choices=range(1, 11))
+
+    questions = subparsers.add_parser("questions", help="list active DM questions")
+    _add_recruiter_user_id_argument(questions)
+    _add_dm_channel_argument(questions)
+    questions.add_argument("--question-set-id", type=uuid.UUID)
+    questions.add_argument("--limit", type=int, default=50, choices=range(1, 51), metavar="1..50")
+
+    answer = subparsers.add_parser("answer", help="submit bounded partial question actions")
+    _add_recruiter_user_id_argument(answer)
+    _add_dm_channel_argument(answer)
+    answer.add_argument("--actions-json", required=True)
+
+    destinations = subparsers.add_parser("destinations", help="list safe storage destinations")
+    _add_recruiter_user_id_argument(destinations)
+    _add_dm_channel_argument(destinations)
+
+    create_destination = subparsers.add_parser(
+        "create-destination", help="create one folder below an opaque destination"
+    )
+    _add_recruiter_user_id_argument(create_destination)
+    _add_dm_channel_argument(create_destination)
+    create_destination.add_argument("--parent-destination-id", required=True, type=uuid.UUID)
+    create_destination.add_argument("--name", required=True)
+
+    non_interview = subparsers.add_parser(
+        "non-interview", help="route one recording to a safe non-interview destination"
+    )
+    _add_recruiter_user_id_argument(non_interview)
+    _add_dm_channel_argument(non_interview)
+    non_interview.add_argument("--recording-id", required=True, type=uuid.UUID)
+    non_interview.add_argument("--destination-id", required=True, type=uuid.UUID)
+    non_interview.add_argument("--expected-version", required=True, type=int)
+    non_interview.add_argument("--idempotency-key", required=True)
+
+    cleanup_preview = subparsers.add_parser(
+        "cleanup-preview", help="preview eligible completed source recordings"
+    )
+    _add_recruiter_user_id_argument(cleanup_preview)
+    _add_dm_channel_argument(cleanup_preview)
+    cleanup_preview.add_argument(
+        "--limit", type=int, default=50, choices=range(1, 101), metavar="1..100"
+    )
+
+    cleanup_confirm = subparsers.add_parser(
+        "cleanup-confirm", help="confirm one immutable cleanup preview"
+    )
+    _add_recruiter_user_id_argument(cleanup_confirm)
+    _add_dm_channel_argument(cleanup_confirm)
+    cleanup_confirm.add_argument("--preview-id", required=True, type=uuid.UUID)
+    cleanup_confirm.add_argument("--capability", required=True)
+    cleanup_confirm.add_argument("--snapshot-hash", required=True)
+    cleanup_confirm.add_argument("--idempotency-key", required=True)
     return parser
+
+
+def _question_actions(raw: str) -> list[dict[str, Any]]:
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ClientError("Question actions must be valid JSON") from None
+    if not isinstance(decoded, list) or not 1 <= len(decoded) <= 50:
+        raise ClientError("Question actions must contain 1..50 items")
+    allowed = {
+        "question_id",
+        "question_set_id",
+        "action",
+        "capability",
+        "expected_version",
+        "idempotency_key",
+        "choice",
+    }
+    actions: list[dict[str, Any]] = []
+    for item in decoded:
+        if not isinstance(item, dict) or set(item) - allowed:
+            raise ClientError("Question action contains unsupported fields")
+        try:
+            action = str(item["action"])
+            normalized = {
+                "question_id": str(uuid.UUID(str(item["question_id"]))),
+                "question_set_id": str(uuid.UUID(str(item["question_set_id"]))),
+                "action": action,
+                "capability": str(item["capability"]),
+                "expected_version": int(item["expected_version"]),
+                "idempotency_key": str(item["idempotency_key"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            raise ClientError("Question action is malformed") from None
+        choice = item.get("choice")
+        if action == "resolve":
+            if not isinstance(choice, int) or not 1 <= choice <= 10:
+                raise ClientError("Resolve action requires choice 1..10")
+            normalized["choice"] = choice
+        elif action != "ignore" or choice is not None:
+            raise ClientError("Question action must be resolve or ignore")
+        if not normalized["capability"] or len(normalized["idempotency_key"]) < 8:
+            raise ClientError("Question action capability or idempotency key is invalid")
+        actions.append(normalized)
+    return actions
 
 
 def _execute(args: argparse.Namespace) -> Any:
@@ -192,6 +298,81 @@ def _execute(args: argparse.Namespace) -> Any:
                 "mattermost_thread_id": args.mattermost_thread_id,
             },
             headers={"X-Review-Token": args.token},
+        )
+    if args.command == "questions":
+        return _request(
+            "GET",
+            "/tools/questions",
+            query={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "question_set_id": str(args.question_set_id) if args.question_set_id else None,
+                "limit": args.limit,
+            },
+        )
+    if args.command == "answer":
+        return _request(
+            "POST",
+            "/tools/questions/answer",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "actions": _question_actions(args.actions_json),
+            },
+        )
+    if args.command == "destinations":
+        return _request(
+            "GET",
+            "/tools/storage/destinations",
+            query={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+            },
+        )
+    if args.command == "create-destination":
+        return _request(
+            "POST",
+            "/tools/storage/destinations",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "parent_destination_id": str(args.parent_destination_id),
+                "name": args.name,
+            },
+        )
+    if args.command == "non-interview":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/route-non-interview",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "destination_id": str(args.destination_id),
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "cleanup-preview":
+        return _request(
+            "POST",
+            "/tools/cleanup/previews",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "limit": args.limit,
+            },
+        )
+    if args.command == "cleanup-confirm":
+        return _request(
+            "POST",
+            f"/tools/cleanup/previews/{args.preview_id}/confirm",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "capability": args.capability,
+                "snapshot_hash": args.snapshot_hash,
+                "idempotency_key": args.idempotency_key,
+            },
         )
     body = {
         "recruiter_user_id": args.recruiter_user_id,
@@ -318,10 +499,80 @@ def _mutation_message(command: str, result: dict[str, Any]) -> str:
     replay = (
         " Повторный запрос не создал дополнительную обработку." if result.get("replayed") else ""
     )
+
     return (
         f"{action}. recording ID: {result.get('recording_id', '')}; "
-        f"статус: {_status_label(result.get('status'))}.{replay}"
+        f"status: {_status_label(result.get('status'))}.{replay}"
     )
+
+
+def _questions_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return "No active Recording Agent questions."
+    lines = [f"Active Recording Agent questions: {len(items)}."]
+    for number, item in enumerate(items, start=1):
+        lines.append(
+            f"{number}. {str(item.get('filename') or 'recording')[:240]} — "
+            f"{str(item.get('reason') or 'clarification required')[:240]}"
+        )
+        choices = [choice for choice in item.get("choices", []) if isinstance(choice, dict)]
+        for choice_number, choice in enumerate(choices[:10], start=1):
+            details = [str(choice.get("name") or choice.get("summary") or "option")[:160]]
+            if choice.get("project_or_spot"):
+                details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
+            if choice.get("url"):
+                details.append(str(choice["url"])[:500])
+            lines.append(f"   {choice_number}) " + " — ".join(details))
+    return "\n".join(lines)
+
+
+def _answer_message(result: dict[str, Any]) -> str:
+    accepted = [item for item in result.get("accepted", []) if isinstance(item, dict)]
+    rejected = [item for item in result.get("rejected", []) if isinstance(item, dict)]
+    pending = [item for item in result.get("pending", []) if item]
+    lines = [
+        f"Answers accepted: {len(accepted)}; rejected: {len(rejected)}; "
+        f"still pending: {len(pending)}."
+    ]
+    for item in rejected:
+        reason = str(item.get("reason") or "rejected")[:300]
+        lines.append(f"- Question {item.get('question_id', '')}: {reason}")
+    if accepted:
+        lines.append("Processing started for the accepted answers.")
+    return "\n".join(lines)
+
+
+def _destinations_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return "No writable storage destinations are available."
+    lines = [f"Writable storage destinations: {len(items)}."]
+    for number, item in enumerate(items, start=1):
+        lines.append(f"{number}. {str(item.get('display_name') or 'folder')[:200]}")
+    return "\n".join(lines)
+
+
+def _cleanup_preview_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    lines = [f"Cleanup preview contains {len(items)} completed recordings."]
+    for number, item in enumerate(items, start=1):
+        lines.append(
+            f"{number}. {str(item.get('filename') or 'recording')[:240]} "
+            f"(recording ID: {item.get('recording_id', '')})"
+        )
+    lines.append("Nothing has been moved. Explicit confirmation is required.")
+    return "\n".join(lines)
+
+
+def _cleanup_confirm_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    states: dict[str, int] = {}
+    for item in items:
+        state = str(item.get("state") or "unknown")
+        states[state] = states.get(state, 0) + 1
+    summary = ", ".join(f"{state}: {count}" for state, count in sorted(states.items()))
+    return f"Cleanup confirmation completed. {summary or 'No eligible recordings.'}"
 
 
 def _message_for(command: str, result: Any) -> str:
@@ -333,6 +584,23 @@ def _message_for(command: str, result: Any) -> str:
         return _status_message(result)
     if command == "review":
         return _review_message(result)
+    if command == "questions":
+        return _questions_message(result)
+    if command == "answer":
+        return _answer_message(result)
+    if command == "destinations":
+        return _destinations_message(result)
+    if command == "create-destination":
+        return f"Storage destination created: {str(result.get('display_name') or 'folder')[:200]}."
+    if command == "non-interview":
+        return (
+            f"Working-meeting recording processed; status: {_status_label(result.get('status'))}; "
+            f"link: {result.get('safe_link') or 'unavailable'}."
+        )
+    if command == "cleanup-preview":
+        return _cleanup_preview_message(result)
+    if command == "cleanup-confirm":
+        return _cleanup_confirm_message(result)
     return _mutation_message(command, result)
 
 

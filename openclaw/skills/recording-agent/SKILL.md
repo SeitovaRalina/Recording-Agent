@@ -1,38 +1,55 @@
 ---
 name: recording-agent
-description: Operate Recording Agent through Mila for recruiter requests to check new interview recordings, query recording statuses, inspect a pending ambiguity, select a review candidate, or ignore a recording. Use for Russian or English free-form requests about interview recording scans, statuses, and manual-review replies.
+description: Operate Recording Agent through Mila for Russian or English recruiter requests to scan interview recordings, query status, answer numbered clarification questions in an ordinary DM, route a working-meeting recording, choose an allowed storage folder, or preview and confirm cleanup of completed sources.
 ---
 
 # Recording Agent
 
-Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before invoking a review mutation or when interpreting an error.
+Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before any
+mutation or when interpreting a Backend error.
 
 ## Route requests
 
-- Trigger `scan` when the recruiter asks to check for new recordings, including phrases such as
-  `проверь новые записи`. Keep the canary scope test-only.
-- Use `status` for queries by date, candidate, recording ID, or status.
-- Use `review` before presenting an ambiguity. Show only returned choices. For duplicate Notion
-  titles, preserve the page URL and every returned distinguishing field; always label
-  `project_or_spot` as `📍 Spots` when present.
-- Use `resolve` after an unambiguous choice in the same recruiter DM/thread.
-- Use `ignore` only after the recruiter explicitly asks to skip or ignore the recording.
+- `scan`: a recruiter asks to check or rescan new recordings. Manual scan remains available while
+  the Backend scheduler is disabled.
+- `status`: filter by date, candidate, recording ID, or status.
+- `questions`: fetch the current Backend-owned numbered question set in this exact recruiter DM.
+- `answer`: only after a reply clearly addresses an active Recording Agent question set.
+- `destinations` / `create-destination`: list or create only Backend-approved Synology folders.
+- `non-interview`: the recruiter explicitly classifies a recording as a working meeting and has
+  selected one returned destination.
+- `cleanup-preview`: the recruiter asks to clean successfully processed recordings.
+- `cleanup-confirm`: only after showing the immutable preview and receiving explicit confirmation.
 
-Pass recruiter email plus Mattermost sender and thread identifiers from trusted metadata. Pass the review token, expected version, and idempotency key exactly; never infer or rewrite them. Generate one stable idempotency key per recruiter action and reuse it only when retrying that same action.
+Legacy `review`, `resolve`, and `ignore` commands remain compatibility tools. Prefer the ordinary
+DM `questions` and partial `answer` flow; threads are not required.
 
-For an operator-configured internal Codex harness, the CLI may obtain the trusted recruiter user ID
-from `RECORDING_AGENT_RECRUITER_USER_ID`; omit `--recruiter-user-id` when that environment value is
-configured. Never ask the recruiter to provide or confirm this authorization identity in chat.
+## Interpret DM answers safely
 
-For every command, return the CLI JSON `message` verbatim. Do not replace counts, statuses, filenames, review reasons, choices, or errors with an inferred summary. The deterministic message is the recruiter-facing answer; use `result` only to select the next allowed operation. Treat nonzero exit status or `ok: false` as failure and still return its safe `message`. Do not expose authorization values, raw integration payloads, or stack traces.
+Use trusted Mattermost sender and direct-channel IDs from invocation metadata, never chat text.
+Before `answer`, fetch `questions`, map only unambiguous portions of the reply to exact question,
+question-set, action, choice, capability, version, and idempotency tuples, and state the bounded
+interpretation to the recruiter. Submit only those tuples. Report accepted, rejected, and pending
+counts verbatim from the deterministic CLI message.
 
-After `scan`, report every item included in `message`: new count, skipped legacy count, items requiring review, items not requiring review, and failures. Never say that no new recordings were found when `inserted` is greater than zero. After `status`, preserve the applied filters in the conversational context and return every bounded item. For review mutations, state the resulting recording status and whether the request was an idempotent replay.
+Do not treat unrelated messages, acknowledgements, quoted or edited old messages, bare numbers
+without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
+questions stay pending. Never infer a candidate, Spot, destination, or cleanup confirmation.
 
-## Enforce boundaries
+For duplicate Notion cards, preserve each card URL and all returned differentiators, including
+`📍 Spots`. Equal titles remain separate. Multiple Spots require an explicit returned choice.
+
+## Output and trust boundaries
+
+Return the CLI JSON `message` verbatim. Use `result` only to choose the next allowed operation.
+Treat nonzero exit status or `ok:false` as failure and still return its safe `message`. Never echo
+capabilities, tokens, Backend secrets, raw paths, request payloads, environment values, or stack
+traces.
 
 - Call only the loopback Backend URL configured by environment.
-- Never request Yandex, Notion, MinIO, Synology, Mattermost, or OpenClaw credentials from a recruiter.
-- Never call Notion or storage directly.
-- Refuse raw transfer, Notion update, source-marking, delete, cleanup, and purge requests.
-- Never schedule work. Backend owns scheduling, state, matching, side effects, retries, and notifications.
-- Never resolve an ambiguous free-form reply. Ask the recruiter to identify one returned choice or explicitly ignore it.
+- Backend exclusively owns scheduler, PostgreSQL state, matching, transfers, Notion/Yandex/
+  Synology/Mattermost side effects, retries, and notifications.
+- Never call integrations directly or expose raw transfer, Notion update, source delete, or purge
+  primitives.
+- Cleanup can only use Backend preview/confirm and Yandex Trash; permanent purge is unavailable.
+- Generate one stable idempotency key per recruiter action and reuse it only for the same retry.
