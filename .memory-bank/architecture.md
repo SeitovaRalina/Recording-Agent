@@ -112,7 +112,8 @@ TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │
 └─ Case B: ambiguous (low confidence OR multiple cards OR no calendar event)
     └─ Backend persists a versioned manual review and sends a recruiter-only DM summary
-        → Mila presents numbered bounded questions and accepts partial free-form answers
+        → Mila presents numbered bounded questions and accepts partial free-form answers;
+          duplicate Notion titles retain page URLs and distinguishing fields, at minimum 📍 Spots
         → skill CLI submits one or more narrow actions with review token,
           expected version, DM binding, and idempotency key
         → Backend consumes the token once and executes HAPPY PATH or marks ignored

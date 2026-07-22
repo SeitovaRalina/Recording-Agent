@@ -12,7 +12,9 @@ Use `scripts/recording_agent.py` for every operation. Read `references/contract.
 - Trigger `scan` when the recruiter asks to check for new recordings, including phrases such as
   `проверь новые записи`. Keep the canary scope test-only.
 - Use `status` for queries by date, candidate, recording ID, or status.
-- Use `review` before presenting an ambiguity. Show only returned choices.
+- Use `review` before presenting an ambiguity. Show only returned choices. For duplicate Notion
+  titles, preserve the page URL and every returned distinguishing field; always label
+  `project_or_spot` as `📍 Spots` when present.
 - Use `resolve` after an unambiguous choice in the same recruiter DM/thread.
 - Use `ignore` only after the recruiter explicitly asks to skip or ignore the recording.
 

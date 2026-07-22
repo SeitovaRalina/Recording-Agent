@@ -303,7 +303,7 @@ def _review_message(result: dict[str, Any]) -> str:
             url = choice.get("url")
             details = [label]
             if project:
-                details.append(str(project))
+                details.append(f"📍 Spots: {project}")
             if url:
                 details.append(str(url))
             lines.append(f"{index}. " + " — ".join(details))

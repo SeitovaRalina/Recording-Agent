@@ -133,6 +133,11 @@ After a confirmed match, write the matched calendar event date to
 `General Interview Date` and the final storage URL to `General Interview recording`.
 **Why:** Recruiters do not fill these fields before processing. Requiring the date prevents the
 agent from finding the intended card.
+**Ambiguity presentation:** Interview card titles are not unique. Each numbered option must retain
+the Notion page URL and bounded distinguishing fields. Always show `📍 Spots` when available because
+the same candidate can have separate Interview cards for different projects; additional safe
+Candidate or project evidence may be shown when Backend returns it. Equal titles must never be
+collapsed into indistinguishable links.
 **Date:** 2026-07-22
 
 ## ADR-018: No scheduled Yandex cleanup; keep a manual safe cleanup action

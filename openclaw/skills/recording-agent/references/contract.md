@@ -59,5 +59,11 @@ Backend owns response schemas and bounds. Display only safe fields returned by B
 identity, candidate, generated filename, status, safe link, actionable error, and allowed review
 choices. Never display internal payloads or credentials.
 
+Notion choices are not unique by title. When review context returns several cards, display each
+card's URL and all returned distinguishing fields. At minimum, render `project_or_spot` with the
+label `📍 Spots`; cards with the same candidate name may represent different people or the same
+candidate considered for different projects. Never collapse equal titles or ask the recruiter to
+choose between unlabeled links.
+
 Status items also include `requires_review` and `review_reason`; use the reason label in the
 deterministic message instead of repeating the raw `manual_review_required` status.

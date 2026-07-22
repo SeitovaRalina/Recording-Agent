@@ -190,7 +190,7 @@ def test_review_message_lists_only_returned_choices() -> None:
         },
     )
 
-    assert "1. Иван Иванов — Spot — https://notion/1" in message
+    assert "1. Иван Иванов — 📍 Spots: Spot — https://notion/1" in message
     assert "2. Иван Петров — https://notion/2" in message
     assert "Ответьте номером" in message
 

@@ -96,10 +96,15 @@ class ReviewService:
         delivery_nonce = delivery_nonce or secrets.token_urlsafe(16)
         token = self._derive_review_token(review_id, delivery_nonce, recording.version)
         choices = (recording.manual_review_candidates or [])[:10]
-        rendered = "\n".join(
-            f"{index}. {str(choice.get('name') or choice.get('event_summary') or 'option')[:160]}"
-            for index, choice in enumerate(choices, start=1)
-        )
+        rendered_choices: list[str] = []
+        for index, choice in enumerate(choices, start=1):
+            details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
+            if choice.get("project_or_spot"):
+                details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
+            if choice.get("url"):
+                details.append(str(choice["url"])[:500])
+            rendered_choices.append(f"{index}. " + " — ".join(details))
+        rendered = "\n".join(rendered_choices)
         message = (
             f"Recording {recording.disk_filename} needs review.\n{rendered}\n"
             f"Reply with a choice or skip. Token: {token}"

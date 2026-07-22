@@ -842,7 +842,13 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
     item = found("concurrent-review")
     item.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
     item.manual_review_reason = "multiple_candidates"
-    item.manual_review_candidates = [{"name": "Candidate"}]
+    item.manual_review_candidates = [
+        {
+            "name": "Candidate",
+            "project_or_spot": "Backend Spot",
+            "url": "https://notion.example/card",
+        }
+    ]
     async with factory() as session:
         session.add(item)
         await session.commit()
@@ -854,6 +860,8 @@ async def test_concurrent_review_notification_has_single_claim() -> None:
 
     async def send_dm(_user_id: str, _message: str, **_kwargs: object) -> object:
         nonlocal durable_claim_seen
+        assert "📍 Spots: Backend Spot" in _message
+        assert "https://notion.example/card" in _message
         async with factory() as check_session:
             claimed = await check_session.get(Recording, item.id)
             durable_claim_seen = (

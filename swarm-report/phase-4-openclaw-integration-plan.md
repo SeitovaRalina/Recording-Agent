@@ -76,6 +76,9 @@ The completed Phase 4 must support all customer-facing scenarios:
    recording. The recruiter answers all questions or a subset in ordinary free-form text. Mila
    confirms the interpreted actions; ambiguous answer-to-question mapping causes clarification,
    not a guess. Backend closes only answered questions and preserves the rest for reminders.
+   If several Notion Interview cards have the same title, every option includes its page link and
+   bounded differences; `📍 Spots` is mandatory when available because one candidate may be
+   considered for multiple projects. Equal titles are never collapsed into unlabeled choices.
 4. **Completion/error:** Mila first acknowledges that accepted work started, then sends a concise
    DM with candidate, generated filename, terminal
    status, and safe link or actionable error. Secrets and raw integration payloads are omitted.
