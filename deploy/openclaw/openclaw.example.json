@@ -1,0 +1,81 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "default",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "recordings-saver",
+        "name": "Recordings Saver",
+        "workspace": "/srv/openclaw/workspaces/recordings-saver",
+        "agentDir": "/var/lib/openclaw/agents/recordings-saver/agent",
+        "model": {
+          "primary": "llm-gateway/gpt-5.4",
+          "fallbacks": [
+            "llm-gateway/gpt-5.4-mini"
+          ]
+        }
+      }
+    ]
+  },
+  "models": {
+    "providers": {
+      "llm-gateway": {
+        "baseUrl": "https://llm.effective.land/v1",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-5.4",
+            "name": "gpt-5.4"
+          },
+          {
+            "id": "gpt-5.4-mini",
+            "name": "gpt-5.4-mini"
+          }
+        ]
+      }
+    }
+  },
+  "channels": {
+    "mattermost": {
+      "accounts": {
+        "recordings-saver": {
+          "baseUrl": "${MATTERMOST_URL}",
+          "botToken": {
+            "source": "env",
+            "provider": "default",
+            "id": "RECORDINGS_SAVER_MATTERMOST_BOT_TOKEN"
+          },
+          "dmPolicy": "allowlist",
+          "allowFrom": [
+            "${RECORDINGS_SAVER_RECRUITER_USER_ID}"
+          ]
+        }
+      }
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "recordings-saver",
+      "match": {
+        "channel": "mattermost",
+        "accountId": "recordings-saver"
+      }
+    }
+  ],
+  "tools": {
+    "agentToAgent": {
+      "enabled": false
+    }
+  }
+}

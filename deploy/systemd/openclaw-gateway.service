@@ -1,0 +1,50 @@
+[Unit]
+Description=OpenClaw shared multi-agent Gateway
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsReadWrite=/var/lib/openclaw
+ConditionPathExists=/etc/openclaw/openclaw.json
+
+[Service]
+Type=simple
+User=openclaw
+Group=openclaw
+UMask=0077
+Environment=HOME=/var/lib/openclaw
+Environment=OPENCLAW_STATE_DIR=/var/lib/openclaw
+Environment=OPENCLAW_CONFIG_PATH=/etc/openclaw/openclaw.json
+EnvironmentFile=/etc/openclaw/gateway.env
+ExecStartPre=/opt/openclaw/bin/openclaw config validate
+ExecStart=/opt/openclaw/bin/openclaw gateway --bind loopback --port 18789
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=78
+OOMPolicy=continue
+KillMode=control-group
+TimeoutStartSec=90s
+TimeoutStopSec=30s
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=256
+LimitNOFILE=8192
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/openclaw /srv/openclaw/workspaces
+ReadOnlyPaths=/etc/openclaw /opt/openclaw
+
+[Install]
+WantedBy=multi-user.target
