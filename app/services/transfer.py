@@ -16,6 +16,7 @@ from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.storage import StorageBackend, StreamingUnsupportedError
 from app.tools.disk import DISK_API_BASE, DiskScanner
+from app.tools.synology import SynologyBackend
 
 TEMP_ROOT = Path("/tmp/recording-agent")
 TEMP_TTL = timedelta(hours=4)
@@ -58,6 +59,14 @@ class TransferService:
             folder, _, filename = recording.storage_key.rpartition("/")
             if not folder or filename != recording.generated_filename:
                 raise TransferError("destination", ValueError("persisted storage key is invalid"))
+            if isinstance(self._storage, SynologyBackend):
+                try:
+                    folder = SynologyBackend.canonical_under_root(
+                        recruiter.synology_base_folder,
+                        f"{recruiter.synology_base_folder.rstrip('/')}/{folder}",
+                    )
+                except ValueError as error:
+                    raise TransferError("destination", error) from error
         else:
             if recording.calendar_dtstart is None:
                 raise TransferError("destination", ValueError("calendar start is missing"))
