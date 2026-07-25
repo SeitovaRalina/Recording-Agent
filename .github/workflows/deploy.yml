@@ -1,0 +1,175 @@
+name: Deploy Recordings Saver
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full commit SHA to deploy
+        required: true
+        type: string
+      image_digest:
+        description: Optional verified sha256 digest (resolved from commit tag when omitted)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: recording-agent-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/seitovaralina/recording-agent
+  DEPLOY_HOST: 217.149.19.21
+  DEPLOY_PORT: "22"
+  STAGE_USER: recording-stage
+  DEPLOY_USER: deploy
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Resolve immutable release
+        id: release
+        shell: bash
+        env:
+          DISPATCH_COMMIT: ${{ inputs.commit_sha }}
+          DISPATCH_DIGEST: ${{ inputs.image_digest }}
+          CI_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit="${DISPATCH_COMMIT:-${CI_COMMIT}}"
+          if [[ ! "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Commit must be a full lowercase Git SHA."
+            exit 1
+          fi
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          resolved="$(docker buildx imagetools inspect "${IMAGE_NAME}:${commit}" --format '{{.Manifest.Digest}}')"
+          digest="${DISPATCH_DIGEST:-${resolved}}"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || [[ "${digest}" != "${resolved}" ]]; then
+            echo "::error::Requested digest does not match the image published for this commit."
+            exit 1
+          fi
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+          echo "image=${IMAGE_NAME}@${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the exact release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.release.outputs.commit }}
+          persist-credentials: false
+
+      - name: Package scoped release assets
+        id: package
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.release.outputs.commit }}
+        run: |
+          release_dir="${RUNNER_TEMP}/recording-agent-release"
+          install -d -m 0755 "${release_dir}"
+          cp compose.prod.yml "${release_dir}/compose.prod.yml"
+          cp deploy/release-metadata.json "${release_dir}/release-metadata.json"
+          source_date_epoch="$(git show -s --format=%ct "${COMMIT_SHA}")"
+          tar \
+            --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C openclaw/skills \
+            -cf - \
+            recording-agent \
+            | gzip -n > "${release_dir}/recording-agent-skill.tar.gz"
+          (
+            cd "${release_dir}"
+            sha256sum compose.prod.yml > compose.prod.yml.sha256
+            sha256sum recording-agent-skill.tar.gz > recording-agent-skill.tar.gz.sha256
+            compose_sha="$(sha256sum compose.prod.yml | awk '{print $1}')"
+            skill_sha="$(sha256sum recording-agent-skill.tar.gz | awk '{print $1}')"
+            metadata_sha="$(sha256sum release-metadata.json | awk '{print $1}')"
+            printf 'compose_sha=%s\n' "${compose_sha}" >> "${GITHUB_OUTPUT}"
+            printf 'skill_sha=%s\n' "${skill_sha}" >> "${GITHUB_OUTPUT}"
+            printf 'metadata_sha=%s\n' "${metadata_sha}" >> "${GITHUB_OUTPUT}"
+          )
+
+      - name: Install deploy identity and pinned host key
+        shell: bash
+        env:
+          STAGE_KEY: ${{ secrets.PRODUCTION_STAGE_KEY }}
+          DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
+        run: |
+          install -d -m 0700 "${HOME}/.ssh"
+          install -m 0600 /dev/null "${HOME}/.ssh/stage_ed25519"
+          printf '%s\n' "${STAGE_KEY}" > "${HOME}/.ssh/stage_ed25519"
+          install -m 0600 /dev/null "${HOME}/.ssh/deploy_ed25519"
+          printf '%s\n' "${DEPLOY_KEY}" > "${HOME}/.ssh/deploy_ed25519"
+          install -m 0644 deploy/ssh/known_hosts "${HOME}/.ssh/known_hosts"
+          if [[ -z "${STAGE_KEY}" || -z "${DEPLOY_KEY}" ]]; then
+            echo "::error::Restricted production staging/deploy keys are required."
+            exit 1
+          fi
+
+      - name: Stage scoped release assets
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.release.outputs.commit }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          if [[ -z "${DEPLOY_HOST}" || -z "${STAGE_USER}" ]]; then
+            echo "::error::Restricted staging host/user variables are required."
+            exit 1
+          fi
+          incoming="/incoming/${COMMIT_SHA}"
+          batch="${RUNNER_TEMP}/sftp-batch"
+          {
+            printf -- '-mkdir %s\n' "${incoming}"
+            printf 'put %s %s/compose.prod.yml\n' "${RUNNER_TEMP}/recording-agent-release/compose.prod.yml" "${incoming}"
+            printf 'put %s %s/compose.prod.yml.sha256\n' "${RUNNER_TEMP}/recording-agent-release/compose.prod.yml.sha256" "${incoming}"
+            printf 'put %s %s/recording-agent-skill.tar.gz\n' "${RUNNER_TEMP}/recording-agent-release/recording-agent-skill.tar.gz" "${incoming}"
+            printf 'put %s %s/recording-agent-skill.tar.gz.sha256\n' "${RUNNER_TEMP}/recording-agent-release/recording-agent-skill.tar.gz.sha256" "${incoming}"
+            printf 'put %s %s/release-metadata.json\n' "${RUNNER_TEMP}/recording-agent-release/release-metadata.json" "${incoming}"
+          } > "${batch}"
+          sftp \
+            -b "${batch}" \
+            -i "${HOME}/.ssh/stage_ed25519" \
+            -P "${port}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            "${STAGE_USER}@${DEPLOY_HOST}"
+
+      - name: Run constrained server-side deployment
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.release.outputs.commit }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          COMPOSE_SHA: ${{ steps.package.outputs.compose_sha }}
+          SKILL_SHA: ${{ steps.package.outputs.skill_sha }}
+          METADATA_SHA: ${{ steps.package.outputs.metadata_sha }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          if [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" ]]; then
+            echo "::error::Production deploy host and user variables are required."
+            exit 1
+          fi
+          ssh \
+            -i "${HOME}/.ssh/deploy_ed25519" \
+            -p "${port}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            sudo -n /usr/local/sbin/recording-agent-deploy \
+            "${COMMIT_SHA}" "${IMAGE}" "${COMPOSE_SHA}" "${SKILL_SHA}" "${METADATA_SHA}"

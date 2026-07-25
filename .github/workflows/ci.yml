@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  POETRY_VERSION: "2.2.1"
+  OPENCLAW_VERSION: "2026.6.11"
+  OPENCLAW_NPM_INTEGRITY: sha512-T+P/g19IheeT1ckXMoPN61dYuE8vBF4MderI+kWkvpuFYxPkJxn8AXLpu9IXCnN9g36Acpm9+mMD/V+lsvOkyA==
+  PYTHON_BASE_IMAGE: python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91
+  IMAGE_NAME: ghcr.io/seitovaralina/recording-agent
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install locked development dependencies
+        run: |
+          python -m pip install "poetry==${POETRY_VERSION}" "detect-secrets==1.5.0"
+          poetry install --with dev --no-root --no-interaction
+
+      - name: Test
+        run: poetry run pytest
+
+      - name: Lint
+        run: poetry run ruff check .
+
+      - name: Type check
+        run: poetry run mypy app
+
+      - name: Validate deployment scripts and multi-agent invariants
+        shell: bash
+        run: |
+          bash deploy/scripts/validate-static.sh
+          poetry run python -c "import json,pathlib,yaml; c=json.loads(pathlib.Path('deploy/openclaw/openclaw.example.json').read_text()); i=yaml.safe_load(pathlib.Path('deploy/inventory/agents.example.yml').read_text()); ca={a['id'] for a in c['agents']['list']}; ia={a['id'] for a in i['agents']}; assert len(ca) >= 1 and ca == ia; assert len(c['bindings']) == len(ca); assert all(b['agentId'] == b['match']['accountId'] for b in c['bindings']); print('JSON/YAML additive agent registry and explicit route invariants passed')"
+
+      - name: Validate GitHub Actions workflows
+        shell: bash
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Validate OpenClaw configuration with pinned secretless CLI
+        shell: bash
+        env:
+          MATTERMOST_URL: https://mattermost.invalid
+          OPENCLAW_GATEWAY_TOKEN: ci-placeholder-not-a-secret
+          RECORDINGS_SAVER_MATTERMOST_BOT_TOKEN: ci-placeholder-not-a-secret
+          RECORDINGS_SAVER_RECRUITER_USER_ID: ci-recordings-saver-user
+        run: |
+          openclaw_root="${RUNNER_TEMP}/openclaw-validation"
+          install -d -m 0700 "${openclaw_root}/package" "${openclaw_root}/state"
+          npm pack --json --pack-destination "${openclaw_root}" \
+            "openclaw@${OPENCLAW_VERSION}" > "${openclaw_root}/pack.json"
+          integrity="$(jq -r '.[0].integrity' "${openclaw_root}/pack.json")"
+          tarball="$(jq -r '.[0].filename' "${openclaw_root}/pack.json")"
+          if [[ "${integrity}" != "${OPENCLAW_NPM_INTEGRITY}" ]]; then
+            echo "::error::OpenClaw npm package integrity mismatch."
+            exit 1
+          fi
+          npm install \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --prefix "${openclaw_root}/package" \
+            "${openclaw_root}/${tarball}"
+          HOME="${openclaw_root}/state" \
+          OPENCLAW_STATE_DIR="${openclaw_root}/state" \
+          OPENCLAW_CONFIG_PATH="${GITHUB_WORKSPACE}/deploy/openclaw/openclaw.example.json" \
+            "${openclaw_root}/package/node_modules/.bin/openclaw" config validate
+
+      - name: Scan repository for secrets
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          base="${PR_BASE_SHA:-${PUSH_BASE_SHA}}"
+          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ ]] || [[ "${base}" =~ ^0+$ ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          baseline_tree="${RUNNER_TEMP}/secret-baseline-tree"
+          baseline_file="${RUNNER_TEMP}/detect-secrets-baseline.json"
+          git worktree add --detach "${baseline_tree}" "${base}"
+          (
+            cd "${baseline_tree}"
+            detect-secrets scan -n \
+              --exclude-files '(^|/)(poetry\.lock|\.git/|swarm-report/)' \
+              > "${baseline_file}"
+          )
+          mapfile -d '' changed < <(git diff --name-only --diff-filter=ACMR -z "${base}" HEAD)
+          if (( ${#changed[@]} == 0 )); then
+            echo "No changed files to scan."
+            exit 0
+          fi
+          if ! detect-secrets-hook --baseline "${baseline_file}" "${changed[@]}" \
+            > "${RUNNER_TEMP}/detect-secrets-hook.log" 2>&1; then
+            echo "::error::Potential secret detected in changed files; run detect-secrets locally."
+            exit 1
+          fi
+          echo "No new secret findings."
+
+      - name: Require an immutable Python base image
+        shell: bash
+        run: |
+          if [[ ! "${PYTHON_BASE_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::PYTHON_BASE_IMAGE must be pinned by digest."
+            exit 1
+          fi
+
+      - name: Validate production Compose configuration
+        shell: bash
+        env:
+          RECORDING_AGENT_IMAGE: ghcr.io/example/recording-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          POSTGRES_IMAGE: postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          RECORDING_AGENT_ENV_FILE: .env.production.example
+        run: docker compose -f compose.prod.yml config --quiet
+
+      - name: Prepare Docker Buildx
+        run: docker buildx create --name recording-agent-builder --driver docker-container --use
+
+      - name: Build application image
+        shell: bash
+        run: |
+          args=(
+            --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}"
+            --file Dockerfile
+            --tag "${IMAGE_NAME}:${GITHUB_SHA}"
+            --provenance=mode=max
+            --sbom=true
+          )
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+            docker buildx build "${args[@]}" --push .
+          else
+            docker buildx build "${args[@]}" --load .
+          fi
+
+      - name: Verify published digest
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Registry did not return an immutable image digest."
+            exit 1
+          fi
+          echo "Published ${IMAGE_NAME}@${digest}"
