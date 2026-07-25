@@ -56,24 +56,22 @@ def test_questions_reject_conflicting_explicit_dm_metadata(
         )
 
 
-def test_explicit_dm_metadata_remains_available_without_trusted_environment(
+def test_explicit_dm_metadata_cannot_establish_missing_trusted_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("RECORDING_AGENT_RECRUITER_USER_ID", raising=False)
     monkeypatch.delenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", raising=False)
 
-    args = CLIENT._parser().parse_args(
-        [
-            "questions",
-            "--recruiter-user-id",
-            "local-user",
-            "--mattermost-dm-channel-id",
-            "local-dm",
-        ]
-    )
-
-    assert args.recruiter_user_id == "local-user"
-    assert args.mattermost_dm_channel_id == "local-dm"
+    with pytest.raises(CLIENT.ClientError, match="Trusted recruiter identity"):
+        CLIENT._parser().parse_args(
+            [
+                "questions",
+                "--recruiter-user-id",
+                "local-user",
+                "--mattermost-dm-channel-id",
+                "local-dm",
+            ]
+        )
 
 
 def test_conflict_failure_does_not_print_backend_secret(
@@ -101,6 +99,8 @@ def test_partial_answer_sends_only_validated_exact_actions(
     question_id = "11111111-1111-1111-1111-111111111111"
     question_set_id = "22222222-2222-2222-2222-222222222222"
     captured: dict[str, object] = {}
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
+    monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
 
     def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
         captured.update(method=method, path=path, **kwargs)

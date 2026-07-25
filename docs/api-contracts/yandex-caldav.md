@@ -43,9 +43,20 @@ Discovery follows `current-user-principal` and `calendar-home-set`, then accepts
 `VEVENT`. Relative collection hrefs are canonicalized against the validated calendar home.
 Every requested or redirected URL must remain HTTPS and same-origin with the configured CalDAV
 endpoint. Redirects to another origin, arbitrary client-provided URLs, and failed property sets are
-rejected before recruiter Basic credentials are sent. Discovery records `DAV:displayname` and
-marks missing known collections unavailable; it does not delete them or change selection/default
-state.
+rejected before recruiter Basic credentials are sent.
+
+Every manual and scheduled recruiter scan performs discovery exactly once before Disk listing.
+Backend stages the complete parsed collection set in memory and requires it to be non-empty before
+opening the persistence update. It validates the staged canonical URLs against stored selection:
+every selected calendar must still be available; when selection is empty, there must be exactly
+one available explicit default. Response order, display name, and URL shape never repair or
+replace an invalid selection.
+
+Only a fully validated refresh is persisted. One database transaction upserts the staged
+collections, updates availability and `last_seen_at`, and marks missing unselected collections
+unavailable without deleting them or changing selection/default state. HTTP/auth/XML failures,
+empty or incomplete discovery, and selection/default validation failures roll back the entire
+refresh and preserve the previous snapshot.
 
 Each recruiter has exactly one explicit default and zero or more selected available calendars.
 When selection is non-empty it is the effective match-eligible set; otherwise the default alone is
@@ -65,6 +76,22 @@ These operations are localhost/internal-only. They use constant-time OpenClaw-se
 scope every read and mutation to the requested recruiter, and audit actor, timestamp, version, and
 before/after IDs. Passwords, authorization headers, and service secrets never appear in responses
 or audit logs.
+
+## Refresh-before-scan failure contract
+
+Calendar refresh is a mandatory scan precondition. If it fails, that recruiter scan aborts before
+Disk listing, matching of existing `found` rows, transfer resume, review creation, or any other
+recording mutation. Existing rows and the previous calendar snapshot remain unchanged and
+retryable.
+
+A manual scan returns exactly one sanitized, bounded scan-level error with stage
+`calendar_discovery`, a stable error code, and an explicit retryability flag. It never exposes a
+raw exception, requested URL, credential, authorization material, or CalDAV payload. A scheduled
+failure for one recruiter is isolated and does not stop scans for other recruiters.
+
+Scans for the same recruiter are serialized by an in-process lock in the current single Backend
+instance. This is not a distributed lock; any future multi-instance deployment must add
+cross-process serialization before preserving this contract.
 
 ## Complete event snapshot and match eligibility
 

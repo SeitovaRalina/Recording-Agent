@@ -6,12 +6,13 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db.engine import get_session
 from app.db.models.intent_replay import IntentReplay
+from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.routers.events import verify_openclaw_secret
@@ -20,6 +21,7 @@ from app.services.canary import enforce_recruiter_scope
 from app.services.cleanup import CleanupRejectedError, CleanupService
 from app.services.destinations import DestinationRejectedError, DestinationService
 from app.services.intents import (
+    IntentClaim,
     IntentRejectedError,
     claim_intent,
     complete_intent,
@@ -27,7 +29,12 @@ from app.services.intents import (
 )
 from app.services.non_interview import NonInterviewRejectedError, NonInterviewService
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
-from app.services.reviews import ReviewRejectedError, ReviewService
+from app.services.reviews import (
+    InteractionBinding,
+    InteractionBindingConflict,
+    ReviewRejectedError,
+    ReviewService,
+)
 
 router = APIRouter(
     prefix="/tools",
@@ -42,6 +49,8 @@ class ScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     recruiter_email: str = Field(min_length=3, max_length=320)
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
     scope: Literal["test", "production"] = "test"
     idempotency_key: str = Field(min_length=8, max_length=200)
 
@@ -59,6 +68,13 @@ class ScanItem(BaseModel):
     error: str | None
 
 
+class ScanErrorItem(BaseModel):
+    stage: str
+    code: str
+    message: str
+    retryable: bool
+
+
 class ScanResponse(BaseModel):
     accepted: bool
     recruiter_email: str
@@ -68,8 +84,11 @@ class ScanResponse(BaseModel):
     matched: int
     manual_review: int
     without_review: int = 0
+    pending: int = 0
     failed: int
     failed_recordings: int = 0
+    aborted: bool = False
+    errors: list[ScanErrorItem] = Field(default_factory=list)
     processed: int = 0
     items_truncated: bool = False
     items: list[ScanItem] = Field(default_factory=list)
@@ -426,6 +445,9 @@ async def trigger_scan(
         raise HTTPException(status_code=404, detail="Active recruiter not found")
     try:
         enforce_recruiter_scope(settings, recruiter)
+        interaction_binding = _scan_interaction_binding(settings, recruiter, body)
+        if interaction_binding is not None:
+            await _ensure_offline_binding_available(session, recruiter, interaction_binding)
         claim = await claim_intent(
             session,
             actor=recruiter.email,
@@ -452,7 +474,11 @@ async def trigger_scan(
             notion=request.app.state.notion_client,
             review_service=request.app.state.review_service,
             question_queue_service=request.app.state.question_queue_service,
+            interaction_binding=interaction_binding,
         )
+    except InteractionBindingConflict as error:
+        await _release_scan_intent(session, claim)
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
     scan_ids = list(dict.fromkeys(result.recording_ids))
@@ -621,7 +647,10 @@ async def list_questions(
 
 @router.post("/questions/answer", response_model=QuestionBatchResponse)
 async def answer_questions(
-    body: QuestionBatchRequest, session: Session, request: Request
+    body: QuestionBatchRequest,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
 ) -> QuestionBatchResponse:
     answers = tuple(
         QuestionAnswer(
@@ -643,15 +672,12 @@ async def answer_questions(
             answers=answers,
         )
         await session.commit()
-        recruiter = await session.scalar(
-            select(RecruiterConfig).where(
-                RecruiterConfig.mattermost_user_id == body.recruiter_user_id,
-                RecruiterConfig.mattermost_dm_channel == body.mattermost_dm_channel_id,
-                RecruiterConfig.active.is_(True),
-            )
+        recruiter, interaction_binding = await _question_recruiter(
+            session,
+            settings,
+            body.recruiter_user_id,
+            body.mattermost_dm_channel_id,
         )
-        if recruiter is None:
-            raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
         for mutation in result.accepted:
             recording = await session.get(Recording, mutation.recording_id)
             if recording is None or recording.status not in {
@@ -672,10 +698,15 @@ async def answer_questions(
                 request.app.state.transfer_service,
                 request.app.state.status_service,
                 request.app.state.notion_client,
-                get_settings(),
+                settings,
             )
         session.expire_all()
-        await _question_queue_service(request).reconcile_processing(session, recruiter=recruiter)
+        await session.refresh(recruiter)
+        await _question_queue_service(request).reconcile_processing(
+            session,
+            recruiter=recruiter,
+            interaction_binding=interaction_binding,
+        )
         await session.commit()
     except ReviewRejectedError as error:
         await session.rollback()
@@ -785,6 +816,81 @@ def _question_queue_service(request: Request) -> QuestionQueueService:
     return cast(QuestionQueueService, request.app.state.question_queue_service)
 
 
+def _scan_interaction_binding(
+    settings: Settings,
+    recruiter: RecruiterConfig,
+    body: ScanRequest,
+) -> InteractionBinding | None:
+    if recruiter.mattermost_user_id != body.recruiter_user_id:
+        raise PermissionError("Scan requester does not match recruiter configuration")
+    offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
+    if offline:
+        return InteractionBinding(body.recruiter_user_id, body.mattermost_dm_channel_id)
+    if recruiter.mattermost_dm_channel != body.mattermost_dm_channel_id:
+        raise PermissionError("Scan channel does not match recruiter configuration")
+    return None
+
+
+async def _question_recruiter(
+    session: AsyncSession,
+    settings: Settings,
+    recruiter_user_id: str,
+    dm_channel_id: str,
+) -> tuple[RecruiterConfig, InteractionBinding | None]:
+    offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
+    criteria = [
+        RecruiterConfig.mattermost_user_id == recruiter_user_id,
+        RecruiterConfig.active.is_(True),
+    ]
+    if not offline:
+        criteria.append(RecruiterConfig.mattermost_dm_channel == dm_channel_id)
+    recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
+    if recruiter is None:
+        raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
+    try:
+        enforce_recruiter_scope(settings, recruiter)
+    except PermissionError as error:
+        raise ReviewRejectedError(str(error)) from error
+    return (
+        recruiter,
+        InteractionBinding(recruiter_user_id, dm_channel_id) if offline else None,
+    )
+
+
+async def _ensure_offline_binding_available(
+    session: AsyncSession,
+    recruiter: RecruiterConfig,
+    binding: InteractionBinding,
+) -> None:
+    conflicting = await session.scalar(
+        select(ManualReview.id)
+        .join(ManualReview.recording)
+        .where(
+            Recording.disk_owner_email == recruiter.email,
+            ManualReview.status == ManualReviewStatus.PENDING,
+            or_(
+                ManualReview.recruiter_user_id.is_distinct_from(binding.recruiter_user_id),
+                ManualReview.mattermost_channel_id.is_distinct_from(binding.dm_channel_id),
+            ),
+        )
+    )
+    if conflicting is not None:
+        raise PermissionError("Pending question belongs to another interaction")
+
+
+async def _release_scan_intent(session: AsyncSession, claim: IntentClaim) -> None:
+    if claim.owner is None:
+        return
+    await session.execute(
+        delete(IntentReplay).where(
+            IntentReplay.id == claim.replay.id,
+            IntentReplay.state == "pending",
+            IntentReplay.claim_owner == claim.owner,
+        )
+    )
+    await session.commit()
+
+
 def _destination_service(request: Request) -> DestinationService:
     service = getattr(request.app.state, "destination_service", None)
     if service is None:
@@ -851,6 +957,8 @@ def _scan_response(
     processed = sum(counts.values())
     manual_review = counts.get(RecordingStatus.MANUAL_REVIEW_REQUIRED, 0)
     failed_recordings = counts.get(RecordingStatus.FAILED, 0)
+    pending = counts.get(RecordingStatus.FOUND, 0)
+    excluded_without_review = manual_review + failed_recordings + pending
     return ScanResponse(
         accepted=True,
         recruiter_email=email,
@@ -859,9 +967,12 @@ def _scan_response(
         skipped_legacy=summary.skipped_legacy,
         matched=summary.matched,
         manual_review=manual_review,
-        without_review=max(0, processed - manual_review - failed_recordings),
+        without_review=max(0, processed - excluded_without_review),
+        pending=pending,
         failed=summary.failed,
         failed_recordings=failed_recordings,
+        aborted=summary.aborted,
+        errors=[ScanErrorItem(**vars(item)) for item in summary.errors],
         processed=processed,
         items_truncated=processed > len(items),
         items=items,

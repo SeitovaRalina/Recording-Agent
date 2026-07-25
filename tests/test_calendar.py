@@ -12,6 +12,7 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.tools.calendar import (
     CalDAVAuthError,
     CalDAVClient,
+    CalendarConfigurationError,
     CalendarSnapshotIncomplete,
 )
 
@@ -235,3 +236,133 @@ async def test_selected_unavailable_or_stale_calendar_never_falls_back_to_defaul
     await session.commit()
     with pytest.raises(CalendarSnapshotIncomplete, match="stale"):
         await client._calendar_snapshot(recruiter.email)
+
+
+@pytest.mark.anyio
+async def test_refresh_snapshot_atomically_preserves_flags_and_updates_availability(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    session.add(recruiter)
+    await session.flush()
+    selected = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/selected/",
+        display_name="Old selected",
+        selected=True,
+        available=False,
+        last_seen_at=datetime.now(UTC) - timedelta(days=2),
+    )
+    missing = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/missing/",
+        display_name="Missing",
+        available=True,
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add_all([selected, missing])
+    await session.commit()
+    client = CalDAVClient(Settings(CALDAV_BASE_URL="https://caldav.test"), session)
+
+    async def staged(_email: str) -> list[tuple[str, str]]:
+        return [
+            ("https://caldav.test/selected/", "Selected"),
+            ("https://caldav.test/new/", "New"),
+        ]
+
+    monkeypatch.setattr(client, "_fetch_calendar_collections", staged)
+    rows = await client.refresh_snapshot(recruiter.email)
+
+    assert {row.canonical_url for row in rows if row.available} == {
+        "https://caldav.test/selected/",
+        "https://caldav.test/new/",
+    }
+    assert selected.selected is True
+    assert selected.display_name == "Selected"
+    assert missing.available is False
+
+
+@pytest.mark.anyio
+async def test_refresh_snapshot_empty_discovery_preserves_previous_snapshot(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    session.add(recruiter)
+    await session.flush()
+    existing = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/default/",
+        display_name="Default",
+        is_default=True,
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add(existing)
+    await session.commit()
+    before = existing.last_seen_at
+    client = CalDAVClient(Settings(CALDAV_BASE_URL="https://caldav.test"), session)
+
+    async def staged(_email: str) -> list[tuple[str, str]]:
+        return []
+
+    monkeypatch.setattr(client, "_fetch_calendar_collections", staged)
+    with pytest.raises(CalendarSnapshotIncomplete, match="no VEVENT"):
+        await client.refresh_snapshot(recruiter.email)
+    await session.refresh(existing)
+
+    assert existing.available is True
+    assert existing.display_name == "Default"
+    assert existing.last_seen_at == before.replace(tzinfo=None)
+
+
+@pytest.mark.anyio
+async def test_refresh_snapshot_rejects_missing_selected_and_missing_default_without_mutation(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = RecruiterConfig(
+        email="recruiter@example.com",
+        notion_database_id="notion",
+        synology_base_folder="/recordings",
+    )
+    session.add(recruiter)
+    await session.flush()
+    selected = RecruiterCalendar(
+        recruiter_id=recruiter.id,
+        canonical_url="https://caldav.test/selected/",
+        display_name="Selected",
+        selected=True,
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add(selected)
+    await session.commit()
+    recruiter_email = recruiter.email
+    client = CalDAVClient(Settings(CALDAV_BASE_URL="https://caldav.test"), session)
+
+    async def staged(_email: str) -> list[tuple[str, str]]:
+        return [("https://caldav.test/other/", "Other")]
+
+    monkeypatch.setattr(client, "_fetch_calendar_collections", staged)
+    with pytest.raises(CalendarSnapshotIncomplete, match="selected"):
+        await client.refresh_snapshot(recruiter_email)
+    selected_row = await session.scalar(
+        select(RecruiterCalendar).where(RecruiterCalendar.selected)
+    )
+    assert selected_row is selected
+
+    selected.selected = False
+    await session.commit()
+    with pytest.raises(CalendarConfigurationError, match="default"):
+        await client.refresh_snapshot(recruiter_email)
+    other = await session.scalar(
+        select(RecruiterCalendar).where(
+            RecruiterCalendar.canonical_url == "https://caldav.test/other/"
+        )
+    )
+    assert other is None

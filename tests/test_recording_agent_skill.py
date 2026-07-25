@@ -51,6 +51,8 @@ def test_scan_uses_trusted_recruiter_email_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
+    monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
     captured: dict[str, object] = {}
 
     def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
@@ -65,6 +67,8 @@ def test_scan_uses_trusted_recruiter_email_from_environment(
     assert args.recruiter_email == "trusted@example.com"
     assert captured["body"] == {
         "recruiter_email": "trusted@example.com",
+        "recruiter_user_id": "trusted-user",
+        "mattermost_dm_channel_id": "trusted-dm",
         "scope": "test",
         "idempotency_key": "scan-0001",
     }
@@ -74,6 +78,8 @@ def test_scan_rejects_conflicting_explicit_recruiter_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
+    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
+    monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
 
     with pytest.raises(CLIENT.ClientError, match="trusted recruiter email"):
         CLIENT._parser().parse_args(
@@ -87,22 +93,27 @@ def test_scan_rejects_conflicting_explicit_recruiter_email(
         )
 
 
-def test_scan_accepts_explicit_recruiter_email_without_trusted_metadata(
+def test_scan_rejects_explicit_identity_without_trusted_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("RECORDING_AGENT_RECRUITER_EMAIL", raising=False)
+    monkeypatch.delenv("RECORDING_AGENT_RECRUITER_USER_ID", raising=False)
+    monkeypatch.delenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", raising=False)
 
-    args = CLIENT._parser().parse_args(
-        [
-            "scan",
-            "--recruiter-email",
-            "local-codex@example.com",
-            "--idempotency-key",
-            "scan-0001",
-        ]
-    )
-
-    assert args.recruiter_email == "local-codex@example.com"
+    with pytest.raises(CLIENT.ClientError, match="Trusted recruiter email"):
+        CLIENT._parser().parse_args(
+            [
+                "scan",
+                "--recruiter-email",
+                "local-codex@example.com",
+                "--recruiter-user-id",
+                "local-user",
+                "--mattermost-dm-channel-id",
+                "local-dm",
+                "--idempotency-key",
+                "scan-0001",
+            ]
+        )
 
 
 def test_scan_message_reports_counts_and_every_category() -> None:
@@ -177,6 +188,51 @@ def test_empty_scan_message_is_explicit_without_claiming_disk_is_empty() -> None
     assert "Новых записей добавлено: 0." in message
     assert "Обнаружено файлов для проверки: 7." in message
     assert "Старых записей пропущено по правилу canary: 7." in message
+
+
+def test_scan_message_explains_calendar_discovery_abort() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "aborted": True,
+            "failed": 1,
+            "errors": [
+                {
+                    "stage": "calendar_discovery",
+                    "code": "calendar_discovery_failed",
+                    "message": "Calendar discovery could not be refreshed; retry the scan.",
+                    "retryable": True,
+                }
+            ],
+        },
+    )
+
+    assert "Проверка остановлена до сканирования записей." in message
+    assert "Не удалось обновить список календарей." in message
+    assert "повторите проверку новым запросом" in message
+
+
+def test_scan_message_lists_found_as_pending_not_without_review() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "processed": 1,
+            "pending": 1,
+            "without_review": 0,
+            "items": [
+                {
+                    "id": "pending-id",
+                    "filename": "pending.webm",
+                    "status": "found",
+                    "requires_review": False,
+                }
+            ],
+        },
+    )
+
+    assert "Ожидают повторной обработки: 1." in message
+    assert message.count("pending.webm") == 1
+    assert "Не требуют review: 0." in message
 
 
 def test_scan_message_explains_truncation_without_double_counting_failures() -> None:

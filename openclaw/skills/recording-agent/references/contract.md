@@ -17,7 +17,7 @@ Backend responses above 64 KiB fail closed.
 ## Commands
 
 ```text
-recording_agent.py scan --recruiter-email EMAIL --idempotency-key KEY
+recording_agent.py scan --idempotency-key KEY
 recording_agent.py status [trusted metadata and bounded filters]
 recording_agent.py questions [trusted metadata] [--question-set-id UUID] [--limit 1..50]
 recording_agent.py answer [trusted metadata] --actions-json JSON
@@ -55,3 +55,8 @@ idempotency key. MinIO test links are not eligible durable archival proof.
 Treat 401/403 as authorization failure, 404 as inaccessible context, 409 as stale/consumed/
 conflicting state, and 410 as expired capability. Do not retry a mutation under a new key unless
 the recruiter performs a new action.
+`scan`, `questions`, and `answer` require all applicable identity fields from trusted invocation
+environment variables: `RECORDING_AGENT_RECRUITER_EMAIL`,
+`RECORDING_AGENT_RECRUITER_USER_ID`, and
+`RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID`. Command-line values may only repeat those injected
+values; they cannot establish a missing identity or channel.

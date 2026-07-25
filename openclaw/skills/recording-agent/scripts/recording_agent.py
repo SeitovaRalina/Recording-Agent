@@ -74,10 +74,14 @@ def _add_trusted_argument(
     option: str,
     environment_name: str,
     conflict_label: str,
+    *,
+    trusted_only: bool = False,
 ) -> None:
     trusted_value = os.environ.get(environment_name, "").strip()
 
     def verified_value(explicit_value: str) -> str:
+        if trusted_only and not trusted_value:
+            raise ClientError(f"Trusted {conflict_label} metadata is required")
         if trusted_value and explicit_value != trusted_value:
             raise ClientError(f"Explicit value conflicts with trusted {conflict_label}")
         return trusted_value or explicit_value
@@ -90,30 +94,39 @@ def _add_trusted_argument(
     )
 
 
-def _add_recruiter_email_argument(parser: argparse.ArgumentParser) -> None:
+def _add_recruiter_email_argument(
+    parser: argparse.ArgumentParser, *, trusted_only: bool = False
+) -> None:
     _add_trusted_argument(
         parser,
         "--recruiter-email",
         "RECORDING_AGENT_RECRUITER_EMAIL",
         "recruiter email",
+        trusted_only=trusted_only,
     )
 
 
-def _add_recruiter_user_id_argument(parser: argparse.ArgumentParser) -> None:
+def _add_recruiter_user_id_argument(
+    parser: argparse.ArgumentParser, *, trusted_only: bool = False
+) -> None:
     _add_trusted_argument(
         parser,
         "--recruiter-user-id",
         "RECORDING_AGENT_RECRUITER_USER_ID",
         "recruiter identity",
+        trusted_only=trusted_only,
     )
 
 
-def _add_dm_channel_argument(parser: argparse.ArgumentParser) -> None:
+def _add_dm_channel_argument(
+    parser: argparse.ArgumentParser, *, trusted_only: bool = False
+) -> None:
     _add_trusted_argument(
         parser,
         "--mattermost-dm-channel-id",
         "RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID",
         "DM channel",
+        trusted_only=trusted_only,
     )
 
 
@@ -168,7 +181,9 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="trigger one recruiter scan")
-    _add_recruiter_email_argument(scan)
+    _add_recruiter_email_argument(scan, trusted_only=True)
+    _add_recruiter_user_id_argument(scan, trusted_only=True)
+    _add_dm_channel_argument(scan, trusted_only=True)
     scan.add_argument("--idempotency-key", required=True)
 
     status = subparsers.add_parser("status", help="query bounded recording statuses")
@@ -197,14 +212,14 @@ def _parser() -> argparse.ArgumentParser:
             mutation.add_argument("--choice", required=True, type=int, choices=range(1, 11))
 
     questions = subparsers.add_parser("questions", help="list active DM questions")
-    _add_recruiter_user_id_argument(questions)
-    _add_dm_channel_argument(questions)
+    _add_recruiter_user_id_argument(questions, trusted_only=True)
+    _add_dm_channel_argument(questions, trusted_only=True)
     questions.add_argument("--question-set-id", type=uuid.UUID)
     questions.add_argument("--limit", type=int, default=50, choices=range(1, 51), metavar="1..50")
 
     answer = subparsers.add_parser("answer", help="submit bounded partial question actions")
-    _add_recruiter_user_id_argument(answer)
-    _add_dm_channel_argument(answer)
+    _add_recruiter_user_id_argument(answer, trusted_only=True)
+    _add_dm_channel_argument(answer, trusted_only=True)
     answer.add_argument("--actions-json", required=True)
 
     destinations = subparsers.add_parser("destinations", help="list safe storage destinations")
@@ -302,6 +317,8 @@ def _execute(args: argparse.Namespace) -> Any:
             "/tools/scans/trigger",
             body={
                 "recruiter_email": args.recruiter_email,
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
                 "scope": "test",
                 "idempotency_key": args.idempotency_key,
             },
@@ -455,9 +472,21 @@ def _scan_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     review_items = [item for item in items if item.get("requires_review")]
     failed_items = [item for item in items if item.get("status") == "failed"]
+    pending_items = [item for item in items if item.get("status") == "found"]
     clear_items = [
-        item for item in items if not item.get("requires_review") and item.get("status") != "failed"
+        item
+        for item in items
+        if not item.get("requires_review") and item.get("status") not in {"failed", "found"}
     ]
+    if result.get("aborted"):
+        errors = [item for item in result.get("errors", []) if isinstance(item, dict)]
+        message = "Проверка остановлена до сканирования записей."
+        if any(item.get("stage") == "calendar_discovery" for item in errors):
+            message += (
+                " Не удалось обновить список календарей. "
+                "Проверьте доступ к Яндекс.Календарю и повторите проверку новым запросом."
+            )
+        return message
     lines = [
         "Проверка завершена.",
         f"Новых записей добавлено: {int(result.get('inserted', 0))}.",
@@ -469,6 +498,8 @@ def _scan_message(result: dict[str, Any]) -> str:
     lines.append(f"Обработано в этом запуске: {int(result.get('processed', len(items)))}.")
     lines.append(f"Требуют review: {int(result.get('manual_review', len(review_items)))}.")
     lines.extend(_item_line(item, review=True) for item in review_items)
+    lines.append(f"Ожидают повторной обработки: {int(result.get('pending', len(pending_items)))}.")
+    lines.extend(_item_line(item) for item in pending_items)
     lines.append(f"Не требуют review: {int(result.get('without_review', len(clear_items)))}.")
     lines.extend(_item_line(item) for item in clear_items)
     failed_recordings = int(result.get("failed_recordings", len(failed_items)))

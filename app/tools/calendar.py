@@ -115,6 +115,19 @@ class CalDAVClient:
         return response
 
     async def discover_calendars(self, recruiter_email: str) -> list[RecruiterCalendar]:
+        discovered = await self._fetch_calendar_collections(recruiter_email)
+        return await self._persist_discovery(recruiter_email, discovered, validate_selection=False)
+
+    async def refresh_snapshot(self, recruiter_email: str) -> list[RecruiterCalendar]:
+        """Refresh a recruiter's complete collection snapshot before a scan."""
+        discovered = await self._fetch_calendar_collections(recruiter_email)
+        if not discovered:
+            raise CalendarSnapshotIncomplete("CalDAV discovery returned no VEVENT calendars")
+        return await self._persist_discovery(recruiter_email, discovered, validate_selection=True)
+
+    async def _fetch_calendar_collections(
+        self, recruiter_email: str
+    ) -> list[tuple[str, str]]:
         principal_url, home_url = await self._discover_home(recruiter_email)
         del principal_url
         response = await self._request(
@@ -129,59 +142,99 @@ class CalDAVClient:
             headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
         )
         discovered = self._parse_collection_discovery(response.content, home_url)
+        by_url: dict[str, str] = {}
+        for canonical_url, display_name in discovered:
+            previous_name = by_url.setdefault(canonical_url, display_name)
+            if previous_name != display_name:
+                raise CalendarSnapshotIncomplete(
+                    "CalDAV discovery returned conflicting calendar collections"
+                )
+        return sorted(by_url.items())
+
+    async def _persist_discovery(
+        self,
+        recruiter_email: str,
+        discovered: list[tuple[str, str]],
+        *,
+        validate_selection: bool,
+    ) -> list[RecruiterCalendar]:
         now = datetime.now(UTC)
         async with self._session_scope() as session:
-            recruiter = await session.scalar(
-                select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email)
-            )
-            if recruiter is None:
-                raise KeyError(f"Unknown recruiter {recruiter_email}")
-            rows = list(
-                (
-                    await session.scalars(
-                        select(RecruiterCalendar).where(
-                            RecruiterCalendar.recruiter_id == recruiter.id
+            try:
+                recruiter = await session.scalar(
+                    select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email)
+                )
+                if recruiter is None:
+                    raise KeyError(f"Unknown recruiter {recruiter_email}")
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(RecruiterCalendar).where(
+                                RecruiterCalendar.recruiter_id == recruiter.id
+                            )
                         )
-                    )
-                ).all()
-            )
-            by_url = {row.canonical_url: row for row in rows}
-            seen: set[str] = set()
-            for canonical_url, display_name in discovered:
-                seen.add(canonical_url)
-                row = by_url.get(canonical_url)
-                if row is None:
-                    row = RecruiterCalendar(
-                        recruiter_id=recruiter.id,
-                        canonical_url=canonical_url,
-                        display_name=display_name,
-                        last_seen_at=now,
-                    )
-                    session.add(row)
-                    rows.append(row)
-                else:
-                    row.display_name = display_name
-                    row.available = True
-                    row.last_seen_at = now
-                    row.updated_at = now
-            for row in rows:
-                if row.canonical_url not in seen:
-                    row.available = False
-                    row.updated_at = now
-            default_rows = [row for row in rows if row.is_default]
-            if not default_rows and recruiter.caldav_calendar_url:
-                try:
-                    legacy_url = self._canonical_url(recruiter.caldav_calendar_url)
-                except CalendarOriginError:
-                    legacy_url = None
-                if legacy_url is not None:
-                    legacy_row = next(
-                        (row for row in rows if row.canonical_url == legacy_url and row.available),
-                        None,
-                    )
-                    if legacy_row is not None:
-                        legacy_row.is_default = True
-            await session.commit()
+                    ).all()
+                )
+                discovered_urls = {item[0] for item in discovered}
+                selected = [row for row in rows if row.selected]
+                if validate_selection:
+                    if selected:
+                        if any(row.canonical_url not in discovered_urls for row in selected):
+                            raise CalendarSnapshotIncomplete(
+                                "A selected calendar is missing from CalDAV discovery"
+                            )
+                    else:
+                        available_defaults = [
+                            row
+                            for row in rows
+                            if row.is_default and row.canonical_url in discovered_urls
+                        ]
+                        if len(available_defaults) != 1:
+                            raise CalendarConfigurationError(
+                                "Exactly one available default calendar is required"
+                            )
+                by_url = {row.canonical_url: row for row in rows}
+                for canonical_url, display_name in discovered:
+                    row = by_url.get(canonical_url)
+                    if row is None:
+                        row = RecruiterCalendar(
+                            recruiter_id=recruiter.id,
+                            canonical_url=canonical_url,
+                            display_name=display_name,
+                            last_seen_at=now,
+                        )
+                        session.add(row)
+                        rows.append(row)
+                    else:
+                        row.display_name = display_name
+                        row.available = True
+                        row.last_seen_at = now
+                        row.updated_at = now
+                for row in rows:
+                    if row.canonical_url not in discovered_urls:
+                        row.available = False
+                        row.updated_at = now
+                default_rows = [row for row in rows if row.is_default]
+                if not validate_selection and not default_rows and recruiter.caldav_calendar_url:
+                    try:
+                        legacy_url = self._canonical_url(recruiter.caldav_calendar_url)
+                    except CalendarOriginError:
+                        legacy_url = None
+                    if legacy_url is not None:
+                        legacy_row = next(
+                            (
+                                row
+                                for row in rows
+                                if row.canonical_url == legacy_url and row.available
+                            ),
+                            None,
+                        )
+                        if legacy_row is not None:
+                            legacy_row.is_default = True
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
             return sorted(rows, key=lambda item: (item.display_name.casefold(), item.canonical_url))
 
     async def find_events(
@@ -365,7 +418,7 @@ class CalDAVClient:
                 canonical_url = self._canonical_url(urljoin(home_url, href))
                 display_name = prop.findtext("d:displayname", namespaces=CALDAV_NS)
                 calendars.append((canonical_url, (display_name or canonical_url).strip()))
-        return sorted(set(calendars), key=lambda item: item[0])
+        return sorted(calendars, key=lambda item: item[0])
 
     @classmethod
     def parse_vevents(cls, raw_ics: str) -> list[ParsedVEVENT]:

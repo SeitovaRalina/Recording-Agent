@@ -16,7 +16,13 @@ from app.db.models.notification_outbox import NotificationOutbox, OutboxStatus
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
-from app.services.reviews import ReviewMutation, ReviewRejectedError, ReviewService
+from app.services.canary import enforce_recruiter_scope
+from app.services.reviews import (
+    InteractionBinding,
+    ReviewMutation,
+    ReviewRejectedError,
+    ReviewService,
+)
 from app.tools.mattermost import MattermostClient, MattermostError
 
 QuestionAction = Literal["resolve", "ignore"]
@@ -113,14 +119,15 @@ class QuestionQueueService:
                     bind_dm=True,
                 )
                 accepted.append(mutation)
-                await self.queue_notification(
-                    session,
-                    dedupe_key=f"question:{answer.question_id}:start:{mutation.version}",
-                    kind="processing_started",
-                    recruiter_user_id=recruiter_user_id,
-                    dm_channel_id=dm_channel_id,
-                    message=f"Recording {mutation.recording_id}: processing started.",
-                )
+                if not self._offline_test_mode:
+                    await self.queue_notification(
+                        session,
+                        dedupe_key=f"question:{answer.question_id}:start:{mutation.version}",
+                        kind="processing_started",
+                        recruiter_user_id=recruiter_user_id,
+                        dm_channel_id=dm_channel_id,
+                        message=f"Recording {mutation.recording_id}: processing started.",
+                    )
             except ReviewRejectedError as error:
                 rejected.append((answer.question_id, str(error)))
         await session.flush()
@@ -289,7 +296,7 @@ class QuestionQueueService:
         question_id: uuid.UUID,
         succeeded: bool,
         safe_message: str,
-    ) -> NotificationOutbox:
+    ) -> NotificationOutbox | None:
         question = await session.get(ManualReview, question_id)
         if question is None:
             raise ReviewRejectedError("Question not found")
@@ -310,6 +317,9 @@ class QuestionQueueService:
             question.failed_at = now
             kind = "error"
         question.result = {"succeeded": succeeded, "message": safe_message[:300]}
+        if self._offline_test_mode:
+            await session.flush()
+            return None
         return await self.queue_notification(
             session,
             dedupe_key=f"question:{question.id}:{kind}:{question.recording_version}",
@@ -324,8 +334,23 @@ class QuestionQueueService:
         session: AsyncSession,
         *,
         recruiter: RecruiterConfig,
+        interaction_binding: InteractionBinding | None = None,
     ) -> None:
         """Recover and finalize accepted answers from durable recording state."""
+        if interaction_binding is not None:
+            if not self._offline_test_mode:
+                raise ReviewRejectedError("Offline interaction binding is unavailable")
+            if recruiter.mattermost_user_id != interaction_binding.recruiter_user_id:
+                raise ReviewRejectedError(
+                    "Interaction requester does not match recruiter configuration"
+                )
+            user_id = interaction_binding.recruiter_user_id
+            channel_id = interaction_binding.dm_channel_id
+        else:
+            if not recruiter.mattermost_user_id or not recruiter.mattermost_dm_channel:
+                raise ReviewRejectedError("Recruiter Mattermost DM binding is incomplete")
+            user_id = recruiter.mattermost_user_id
+            channel_id = recruiter.mattermost_dm_channel
         questions = list(
             (
                 await session.scalars(
@@ -333,8 +358,8 @@ class QuestionQueueService:
                     .join(ManualReview.recording)
                     .where(
                         ManualReview.status == ManualReviewStatus.PROCESSING,
-                        ManualReview.recruiter_user_id == recruiter.mattermost_user_id,
-                        ManualReview.mattermost_channel_id == recruiter.mattermost_dm_channel,
+                        ManualReview.recruiter_user_id == user_id,
+                        ManualReview.mattermost_channel_id == channel_id,
                     )
                     .options(joinedload(ManualReview.recording))
                 )
@@ -377,7 +402,12 @@ class QuestionQueueService:
                         f"Processed the answer for {filename}; another decision is required."
                     ),
                 )
-                await self._reviews.enqueue_review(session, recording, recruiter)
+                await self._reviews.enqueue_review(
+                    session,
+                    recording,
+                    recruiter,
+                    interaction_binding=interaction_binding,
+                )
         await session.flush()
 
     async def claim_outbox(
@@ -486,17 +516,36 @@ class QuestionQueueService:
     async def _validate_dm(
         self, session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
     ) -> RecruiterConfig:
-        recruiter = await session.scalar(
-            select(RecruiterConfig).where(
-                RecruiterConfig.mattermost_user_id == recruiter_user_id,
-                RecruiterConfig.mattermost_dm_channel == dm_channel_id,
-                RecruiterConfig.active.is_(True),
-            )
-        )
+        criteria = [
+            RecruiterConfig.mattermost_user_id == recruiter_user_id,
+            RecruiterConfig.active.is_(True),
+        ]
+        if not self._offline_test_mode:
+            criteria.append(RecruiterConfig.mattermost_dm_channel == dm_channel_id)
+        recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
         if recruiter is None:
             raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
-        await self._mattermost.validate_direct_channel(recruiter_user_id, dm_channel_id)
+        if self._offline_test_mode:
+            try:
+                enforce_recruiter_scope(self._settings, recruiter)
+            except PermissionError as error:
+                raise ReviewRejectedError(str(error)) from error
+            conflicting = await session.scalar(
+                select(ManualReview.id).where(
+                    ManualReview.recruiter_user_id == recruiter_user_id,
+                    ManualReview.status == ManualReviewStatus.PENDING,
+                    ManualReview.mattermost_channel_id.is_distinct_from(dm_channel_id),
+                )
+            )
+            if conflicting is not None:
+                raise ReviewRejectedError("Pending question belongs to another Mattermost DM")
+        else:
+            await self._mattermost.validate_direct_channel(recruiter_user_id, dm_channel_id)
         return recruiter
+
+    @property
+    def _offline_test_mode(self) -> bool:
+        return self._settings.test_mode_enabled and not self._settings.mattermost_delivery_enabled
 
     @staticmethod
     def _pending_post_id(dedupe_key: str) -> str:

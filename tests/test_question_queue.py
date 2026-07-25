@@ -12,7 +12,7 @@ from app.db.models.notification_outbox import NotificationOutbox, OutboxStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
-from app.services.reviews import ReviewService
+from app.services.reviews import InteractionBinding, ReviewRejectedError, ReviewService
 
 
 def _question(file_id: str, token: str) -> ManualReview:
@@ -370,3 +370,130 @@ async def test_outbox_recovers_stale_claim_and_terminal_is_deduplicated(
     await service.deliver_claimed(session, recovered[0], worker_id="worker-2")
     assert item.status == OutboxStatus.SENT
     assert mattermost.send_dm.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_offline_questions_enforce_immutable_binding_and_create_no_outbox(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(
+        openclaw_secret="secret",
+        test_mode_enabled=True,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={"r@example.com"},
+        test_notion_database_allowlist={"db"},
+        test_mattermost_user_allowlist={"recruiter"},
+        minio_test_prefix="root",
+    )
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("offline-ignore", "valid-token")
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="recruiter",
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+
+    listed = await service.list_active(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm"
+    )
+    assert [item.id for item in listed] == [question.id]
+    with pytest.raises(ReviewRejectedError, match="another Mattermost DM"):
+        await service.list_active(
+            session, recruiter_user_id="recruiter", dm_channel_id="attacker-dm"
+        )
+
+    result = await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(
+            QuestionAnswer(
+                question_id=question.id,
+                question_set_id=question.question_set_id,
+                action="ignore",
+                token="valid-token",
+                expected_version=3,
+                idempotency_key="offline-ignore-1",
+            ),
+        ),
+    )
+    await service.reconcile_processing(
+        session,
+        recruiter=recruiter,
+        interaction_binding=InteractionBinding("recruiter", "dm"),
+    )
+
+    assert len(result.accepted) == 1
+    assert question.recording.status == RecordingStatus.IGNORED
+    assert question.status == ManualReviewStatus.COMPLETED
+    assert await session.scalar(select(NotificationOutbox.id)) is None
+    mattermost.validate_direct_channel.assert_not_awaited()
+    mattermost.send_dm.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_offline_resolve_preserves_choice_version_and_idempotent_replay(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(
+        openclaw_secret="secret",
+        test_mode_enabled=True,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={"r@example.com"},
+        test_notion_database_allowlist={"db"},
+        test_mattermost_user_allowlist={"recruiter"},
+        minio_test_prefix="root",
+    )
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("offline-resolve", "valid-token")
+    question.question_context = {
+        "choices": [
+            {
+                "id": "notion-page",
+                "name": "Candidate",
+                "url": "https://notion.example/candidate",
+                "project_or_spot": "Backend",
+            }
+        ]
+    }
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="recruiter",
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+    answer = QuestionAnswer(
+        question_id=question.id,
+        question_set_id=question.question_set_id,
+        action="resolve",
+        token="valid-token",
+        expected_version=3,
+        idempotency_key="offline-resolve-1",
+        choice=1,
+    )
+
+    first = await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(answer,),
+    )
+    replay = await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(answer,),
+    )
+
+    assert first.accepted[0].status == RecordingStatus.CANDIDATE_MATCHED
+    assert first.accepted[0].version == 4
+    assert replay.accepted[0].replayed is True
+    assert question.recording.notion_page_id == "notion-page"
+    assert await session.scalar(select(NotificationOutbox.id)) is None

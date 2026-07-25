@@ -152,6 +152,20 @@ MANUAL SOURCE CLEANUP (never scheduled):
 The manual message-triggered scan is a first-class flow and remains available while the scheduler
 is disabled. It uses the same Backend scan, idempotency, and status paths as a scheduled run.
 
+Calendar refresh is a mandatory precondition for both manual and scheduled scans, not a periodic
+best-effort job. Before Disk listing, Backend discovers and parses a complete, non-empty CalDAV
+collection set in memory. Every selected calendar must remain available; when none are selected,
+exactly one available explicit default is required. Only a fully validated set atomically updates
+calendar availability and `last_seen_at`.
+
+A failed HTTP/auth/XML request, empty or incomplete discovery, unavailable selected calendar, or
+invalid default selection preserves the previous calendar snapshot and aborts that recruiter's
+scan before Disk listing or any recording, transfer, review, or notification mutation. The manual
+result contains one sanitized, bounded, retryable `calendar_discovery` scan-level error; scheduled
+failure isolation allows other recruiters to continue. Existing recordings remain unchanged and
+retryable. Same-recruiter scans are serialized in-process in the current single Backend instance;
+multi-instance deployment requires a distributed lock.
+
 The current code still contains the older `processed=true` plus seven-day scheduled cleanup model,
 but that behavior is superseded for the target workflow and remains disabled. The Telemost folder
 is reported to expire automatically after 90 days without consuming normal cloud quota. Exact

@@ -27,6 +27,16 @@ class ReviewRejectedError(ValueError):
     pass
 
 
+class InteractionBindingConflict(ReviewRejectedError):
+    pass
+
+
+@dataclass(frozen=True)
+class InteractionBinding:
+    recruiter_user_id: str
+    dm_channel_id: str
+
+
 @dataclass(frozen=True)
 class ReviewMutation:
     review_id: uuid.UUID
@@ -72,6 +82,7 @@ class ReviewService:
         session: AsyncSession,
         recording: Recording,
         recruiter: RecruiterConfig,
+        interaction_binding: InteractionBinding | None = None,
     ) -> ManualReview:
         """Create a durable DM-bound question without sending an individual post."""
         existing = await session.scalar(
@@ -81,20 +92,56 @@ class ReviewService:
             )
         )
         if existing is not None:
+            if interaction_binding is not None and (
+                existing.recruiter_user_id != interaction_binding.recruiter_user_id
+                or existing.mattermost_channel_id != interaction_binding.dm_channel_id
+            ):
+                raise ReviewRejectedError("Pending question belongs to another interaction")
             return existing
-        if not recruiter.mattermost_user_id or not recruiter.mattermost_dm_channel:
-            raise ReviewRejectedError("Recruiter has no exact Mattermost DM mapping")
-        self._enforce_user(recruiter.mattermost_user_id)
-        await self._mattermost.validate_direct_channel(
-            recruiter.mattermost_user_id, recruiter.mattermost_dm_channel
-        )
+        if interaction_binding is not None:
+            if not self._offline_test_mode:
+                raise ReviewRejectedError("Offline interaction binding is unavailable")
+            if recruiter.mattermost_user_id != interaction_binding.recruiter_user_id:
+                raise ReviewRejectedError(
+                    "Interaction requester does not match recruiter configuration"
+                )
+            self._enforce_user(interaction_binding.recruiter_user_id)
+            try:
+                enforce_recruiter_scope(self._settings, recruiter)
+            except PermissionError as error:
+                raise ReviewRejectedError(str(error)) from error
+            user_id = interaction_binding.recruiter_user_id
+            channel_id = interaction_binding.dm_channel_id
+            conflicting = await session.scalar(
+                select(ManualReview.id)
+                .join(ManualReview.recording)
+                .where(
+                    Recording.disk_owner_email == recruiter.email,
+                    ManualReview.status == ManualReviewStatus.PENDING,
+                    or_(
+                        ManualReview.recruiter_user_id.is_distinct_from(user_id),
+                        ManualReview.mattermost_channel_id.is_distinct_from(channel_id),
+                    ),
+                )
+            )
+            if conflicting is not None:
+                raise ReviewRejectedError("Pending question belongs to another interaction")
+        else:
+            if not recruiter.mattermost_user_id or not recruiter.mattermost_dm_channel:
+                raise ReviewRejectedError("Recruiter has no exact Mattermost DM mapping")
+            self._enforce_user(recruiter.mattermost_user_id)
+            await self._mattermost.validate_direct_channel(
+                recruiter.mattermost_user_id, recruiter.mattermost_dm_channel
+            )
+            user_id = recruiter.mattermost_user_id
+            channel_id = recruiter.mattermost_dm_channel
         review = ManualReview(
             id=uuid.uuid4(),
             recording_id=recording.id,
             question_type=recording.manual_review_reason or "manual_review",
             question_context={"choices": (recording.manual_review_candidates or [])[:10]},
-            recruiter_user_id=recruiter.mattermost_user_id,
-            mattermost_channel_id=recruiter.mattermost_dm_channel,
+            recruiter_user_id=user_id,
+            mattermost_channel_id=channel_id,
             recording_version=recording.version,
             delivery_nonce=secrets.token_urlsafe(16),
         )
@@ -106,6 +153,10 @@ class ReviewService:
         session.add(review)
         await session.flush()
         return review
+
+    @property
+    def _offline_test_mode(self) -> bool:
+        return self._settings.test_mode_enabled and not self._settings.mattermost_delivery_enabled
 
     async def issue_review(
         self,

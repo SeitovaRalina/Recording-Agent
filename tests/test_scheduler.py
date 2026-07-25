@@ -12,11 +12,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models.manual_review import ManualReview
-from app.db.models.question_digest import QuestionDigest
+from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
 from app.scheduler.cron import (
+    ScanSummary,
     _claim_daily_digest,
     _due_recruiter_local_date,
     _persist_found_recording,
@@ -25,13 +26,19 @@ from app.scheduler.cron import (
     _send_recruiter_notifications,
     local_today_start_utc,
     register_jobs,
+    run_due_recruiter_summaries,
     scan_all_recruiters,
     scan_recruiter,
 )
 from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
-from app.services.reviews import ReviewService
+from app.services.reviews import (
+    InteractionBinding,
+    InteractionBindingConflict,
+    ReviewRejectedError,
+    ReviewService,
+)
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
@@ -131,6 +138,113 @@ async def test_successful_scan_logs_insert_match_and_summary(
     assert "recruiter scan summary:" in caplog.text
     assert summary.recording_ids == summary.inserted_recording_ids
     assert len(summary.recording_ids) == 1
+
+
+@pytest.mark.anyio
+async def test_scan_refreshes_calendar_once_before_disk_listing() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    order: list[str] = []
+
+    async def refresh_snapshot(_email: str) -> None:
+        order.append("calendar")
+
+    async def list_new(_email: str) -> list[object]:
+        order.append("disk")
+        return []
+
+    calendar = AsyncMock()
+    calendar.refresh_snapshot.side_effect = refresh_snapshot
+    disk = AsyncMock()
+    disk.list_new.side_effect = list_new
+
+    summary = await scan_recruiter(
+        recruiter(), factory, disk, calendar, InterviewMatcher(Settings())
+    )
+    await engine.dispose()
+
+    assert summary.aborted is False
+    assert order == ["calendar", "disk"]
+    calendar.refresh_snapshot.assert_awaited_once_with("recruiter@example.com")
+
+
+@pytest.mark.anyio
+async def test_calendar_refresh_failure_aborts_without_downstream_or_row_mutation() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        row = found("retryable")
+        session.add(row)
+        await session.commit()
+        version = row.version
+    calendar = AsyncMock()
+    calendar.refresh_snapshot.side_effect = httpx.ConnectError("secret upstream URL")
+    disk = AsyncMock()
+    review = AsyncMock()
+
+    summary = await scan_recruiter(
+        recruiter(),
+        factory,
+        disk,
+        calendar,
+        InterviewMatcher(Settings()),
+        review_service=review,
+    )
+    async with factory() as session:
+        persisted = await session.get(Recording, row.id)
+    await engine.dispose()
+
+    assert summary.aborted is True
+    assert summary.failed == 1
+    assert summary.errors[0].stage == "calendar_discovery"
+    assert summary.errors[0].code == "calendar_discovery_failed"
+    assert persisted is not None
+    assert persisted.status == RecordingStatus.FOUND
+    assert persisted.version == version
+    disk.list_new.assert_not_awaited()
+    calendar.find_events.assert_not_awaited()
+    review.enqueue_review.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_concurrent_recruiter_scans_are_serialized() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    entered = 0
+    maximum = 0
+    release = asyncio.Event()
+
+    async def refresh(_email: str) -> None:
+        nonlocal entered, maximum
+        entered += 1
+        maximum = max(maximum, entered)
+        await release.wait()
+        entered -= 1
+
+    calendar = AsyncMock()
+    calendar.refresh_snapshot.side_effect = refresh
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    first = asyncio.create_task(
+        scan_recruiter(recruiter(), factory, disk, calendar, InterviewMatcher(Settings()))
+    )
+    second = asyncio.create_task(
+        scan_recruiter(recruiter(), factory, disk, calendar, InterviewMatcher(Settings()))
+    )
+    await asyncio.sleep(0)
+    assert calendar.refresh_snapshot.await_count == 1
+    release.set()
+    await asyncio.gather(first, second)
+    await engine.dispose()
+
+    assert maximum == 1
+    assert calendar.refresh_snapshot.await_count == 2
 
 
 @pytest.mark.anyio
@@ -418,6 +532,7 @@ async def test_internal_codex_scan_skips_mattermost_delivery(
     delivery = AsyncMock()
     monkeypatch.setattr("app.scheduler.cron._send_recruiter_notifications", delivery)
     settings = Settings(
+        openclaw_secret="secret",
         test_mode_enabled=True,
         yandex_source_mutation_enabled=False,
         mattermost_delivery_enabled=False,
@@ -528,6 +643,50 @@ async def test_daily_digest_claim_deduplicates_and_recovers_after_restart() -> N
     async with factory() as session:
         assert len(list((await session.scalars(select(QuestionDigest))).all())) == 1
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_scheduled_scan_abort_skips_digest_and_preserves_retryable_failed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "user"
+    owner.mattermost_dm_channel = "dm"
+    owner.timezone = "UTC"
+    async with factory() as session:
+        session.add(owner)
+        await session.commit()
+    scan = AsyncMock(return_value=ScanSummary(aborted=True, failed=1))
+    monkeypatch.setattr("app.scheduler.cron.scan_recruiter", scan)
+    questions = AsyncMock()
+    now = datetime(2026, 7, 22, 18, tzinfo=UTC)
+
+    await run_due_recruiter_summaries(
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        MagicMock(),
+        Settings(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        questions,
+        now,
+    )
+    async with factory() as session:
+        digest = await session.scalar(select(QuestionDigest))
+    await engine.dispose()
+
+    scan.assert_awaited_once()
+    questions.build_digest.assert_not_awaited()
+    assert digest is not None
+    assert digest.status == QuestionDigestStatus.FAILED
 
 
 def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
@@ -1347,12 +1506,175 @@ async def test_scan_enqueues_manual_review_question_for_daily_digest() -> None:
         disk,
         AsyncMock(),
         InterviewMatcher(Settings()),
-        Settings(),
+        Settings(mattermost_delivery_enabled=True),
         review_service=reviews,
     )
     await engine.dispose()
 
     reviews.enqueue_review.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_test_mode_scan_skips_dm_review_enqueue_when_delivery_disabled() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "codex-user"
+    owner.active = True
+    item = found("review-without-dm")
+    item.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    reviews = AsyncMock()
+    reviews.enqueue_review.side_effect = ReviewRejectedError(
+        "Recruiter has no exact Mattermost DM mapping"
+    )
+
+    summary = await scan_recruiter(
+        owner,
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(
+            test_mode_enabled=True,
+            mattermost_delivery_enabled=False,
+            test_recruiter_allowlist={owner.email},
+            test_notion_database_allowlist={owner.notion_database_id},
+            test_mattermost_user_allowlist={"codex-user"},
+            minio_test_prefix=owner.synology_base_folder,
+        ),
+        review_service=reviews,
+    )
+    await engine.dispose()
+
+    assert summary.failed == 0
+    assert summary.errors == []
+    reviews.enqueue_review.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_offline_manual_scan_creates_exact_bound_question_without_mattermost() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "trusted-user"
+    recording = found("offline-review")
+    recording.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    recording.manual_review_reason = "multiple_candidates"
+    async with factory() as session:
+        session.add_all([owner, recording])
+        await session.commit()
+    mattermost = AsyncMock()
+    settings = Settings(
+        openclaw_secret="secret",
+        test_mode_enabled=True,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={owner.email},
+        test_notion_database_allowlist={owner.notion_database_id},
+        test_mattermost_user_allowlist={"trusted-user"},
+        minio_test_prefix=owner.synology_base_folder,
+    )
+    reviews = ReviewService(mattermost, settings)
+    calendar = AsyncMock()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+
+    await scan_recruiter(
+        owner,
+        factory,
+        disk,
+        calendar,
+        InterviewMatcher(settings),
+        settings,
+        review_service=reviews,
+        interaction_binding=InteractionBinding("trusted-user", "trusted-dm"),
+    )
+    async with factory() as session:
+        question = await session.scalar(select(ManualReview))
+        persisted_owner = await session.get(RecruiterConfig, owner.id)
+    await engine.dispose()
+
+    assert question is not None
+    assert question.recruiter_user_id == "trusted-user"
+    assert question.mattermost_channel_id == "trusted-dm"
+    assert persisted_owner is not None
+    assert persisted_owner.mattermost_dm_channel is None
+    mattermost.validate_direct_channel.assert_not_awaited()
+    mattermost.send_dm.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_concurrent_offline_channels_bind_once_and_reject_before_second_scan_effects(
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "trusted-user"
+    recording = found("concurrent-offline-review")
+    recording.status = RecordingStatus.MANUAL_REVIEW_REQUIRED
+    recording.manual_review_reason = "multiple_candidates"
+    async with factory() as session:
+        session.add_all([owner, recording])
+        await session.commit()
+    mattermost = AsyncMock()
+    settings = Settings(
+        openclaw_secret="secret",
+        test_mode_enabled=True,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={owner.email},
+        test_notion_database_allowlist={owner.notion_database_id},
+        test_mattermost_user_allowlist={"trusted-user"},
+        minio_test_prefix=owner.synology_base_folder,
+    )
+    reviews = ReviewService(mattermost, settings)
+    calendar = AsyncMock()
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+
+    results = await asyncio.gather(
+        scan_recruiter(
+            owner,
+            factory,
+            disk,
+            calendar,
+            InterviewMatcher(settings),
+            settings,
+            review_service=reviews,
+            interaction_binding=InteractionBinding("trusted-user", "dm-a"),
+        ),
+        scan_recruiter(
+            owner,
+            factory,
+            disk,
+            calendar,
+            InterviewMatcher(settings),
+            settings,
+            review_service=reviews,
+            interaction_binding=InteractionBinding("trusted-user", "dm-b"),
+        ),
+        return_exceptions=True,
+    )
+    async with factory() as session:
+        questions = list((await session.scalars(select(ManualReview))).all())
+    await engine.dispose()
+
+    assert len([item for item in results if isinstance(item, ScanSummary)]) == 1
+    assert len([item for item in results if isinstance(item, InteractionBindingConflict)]) == 1
+    assert len(questions) == 1
+    assert questions[0].mattermost_channel_id in {"dm-a", "dm-b"}
+    assert calendar.refresh_snapshot.await_count == 1
+    assert disk.list_new.await_count == 1
+    mattermost.validate_direct_channel.assert_not_awaited()
 
 
 @pytest.mark.anyio

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
+from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
@@ -33,7 +35,7 @@ from app.services.matching import (
 )
 from app.services.pipeline_trace import safe_url, trace
 from app.services.question_queue import QuestionQueueService
-from app.services.reviews import ReviewService
+from app.services.reviews import InteractionBinding, InteractionBindingConflict, ReviewService
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
@@ -46,6 +48,9 @@ logger = logging.getLogger(__name__)
 SUMMARY_LOCAL_HOUR = 18
 SUMMARY_LOCAL_MINUTE = 0
 SUMMARY_CLAIM_TTL = timedelta(minutes=15)
+_SCAN_LOCKS: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
+] = WeakKeyDictionary()
 
 TRANSFER_RESUMABLE_STATUSES = (
     RecordingStatus.CALENDAR_EVENT_FOUND,
@@ -58,6 +63,14 @@ TRANSFER_RESUMABLE_STATUSES = (
 
 
 @dataclass
+class ScanError:
+    stage: str
+    code: str
+    message: str
+    retryable: bool
+
+
+@dataclass
 class ScanSummary:
     discovered: int = 0
     inserted: int = 0
@@ -67,6 +80,8 @@ class ScanSummary:
     failed: int = 0
     recording_ids: list[uuid.UUID] = field(default_factory=list)
     inserted_recording_ids: list[uuid.UUID] = field(default_factory=list)
+    aborted: bool = False
+    errors: list[ScanError] = field(default_factory=list)
 
 
 def local_today_start_utc(settings: Settings, now: datetime | None = None) -> datetime:
@@ -91,11 +106,75 @@ async def scan_recruiter(
     notion: NotionClient | None = None,
     review_service: ReviewService | None = None,
     question_queue_service: QuestionQueueService | None = None,
+    interaction_binding: InteractionBinding | None = None,
+) -> ScanSummary:
+    loop = asyncio.get_running_loop()
+    locks = _SCAN_LOCKS.setdefault(loop, {})
+    lock = locks.setdefault(recruiter.email, asyncio.Lock())
+    async with lock:
+        return await _scan_recruiter_unlocked(
+            recruiter,
+            session_factory,
+            disk,
+            cal,
+            matcher,
+            settings,
+            now,
+            candidate_service,
+            transfer_service,
+            status_service,
+            notion,
+            review_service,
+            question_queue_service,
+            interaction_binding,
+        )
+
+
+async def _scan_recruiter_unlocked(
+    recruiter: RecruiterConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    disk: DiskScanner,
+    cal: CalDAVClient,
+    matcher: InterviewMatcher,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+    candidate_service: CandidateService | None = None,
+    transfer_service: TransferService | None = None,
+    status_service: StatusService | None = None,
+    notion: NotionClient | None = None,
+    review_service: ReviewService | None = None,
+    question_queue_service: QuestionQueueService | None = None,
+    interaction_binding: InteractionBinding | None = None,
 ) -> ScanSummary:
     active_settings = settings or get_settings()
     _enforce_recruiter_scope(active_settings, recruiter)
+    if interaction_binding is not None:
+        await _validate_offline_interaction_binding(
+            recruiter,
+            session_factory,
+            interaction_binding,
+        )
     active_status = status_service or StatusService()
     summary = ScanSummary()
+    try:
+        await cal.refresh_snapshot(recruiter.email)
+    except Exception as error:
+        logger.warning(
+            "Calendar discovery preflight failed for %s: %s",
+            recruiter.email,
+            type(error).__name__,
+        )
+        summary.aborted = True
+        summary.failed = 1
+        summary.errors.append(
+            ScanError(
+                stage="calendar_discovery",
+                code="calendar_discovery_failed",
+                message="Calendar discovery could not be refreshed; retry the scan.",
+                retryable=True,
+            )
+        )
+        return summary
     try:
         files = await disk.list_new(recruiter.email)
     except Exception:
@@ -196,9 +275,15 @@ async def scan_recruiter(
                 logger.exception("Recording %s transfer pipeline failed", recording_id)
     if question_queue_service is not None:
         async with session_factory() as session:
-            await question_queue_service.reconcile_processing(session, recruiter=recruiter)
+            await question_queue_service.reconcile_processing(
+                session,
+                recruiter=recruiter,
+                interaction_binding=interaction_binding,
+            )
             await session.commit()
-    if review_service is not None:
+    if review_service is not None and (
+        active_settings.mattermost_delivery_enabled or interaction_binding is not None
+    ):
         async with session_factory() as session:
             pending = list(
                 (
@@ -211,7 +296,12 @@ async def scan_recruiter(
                 ).all()
             )
             for recording in pending:
-                await review_service.enqueue_review(session, recording, recruiter)
+                await review_service.enqueue_review(
+                    session,
+                    recording,
+                    recruiter,
+                    interaction_binding=interaction_binding,
+                )
             await session.commit()
     logger.info(
         "recruiter scan summary: recruiter=%s discovered=%d inserted=%d skipped_legacy=%d "
@@ -225,6 +315,34 @@ async def scan_recruiter(
         summary.failed,
     )
     return summary
+
+
+async def _validate_offline_interaction_binding(
+    recruiter: RecruiterConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    binding: InteractionBinding,
+) -> None:
+    async with session_factory() as session:
+        conflicting = await session.scalar(
+            select(ManualReview.id)
+            .join(ManualReview.recording)
+            .where(
+                Recording.disk_owner_email == recruiter.email,
+                ManualReview.status == ManualReviewStatus.PENDING,
+                or_(
+                    ManualReview.recruiter_user_id.is_distinct_from(
+                        binding.recruiter_user_id
+                    ),
+                    ManualReview.mattermost_channel_id.is_distinct_from(
+                        binding.dm_channel_id
+                    ),
+                ),
+            )
+        )
+    if conflicting is not None:
+        raise InteractionBindingConflict(
+            "Pending question belongs to another interaction"
+        )
 
 
 async def _resume_transfer_recording(
@@ -1384,7 +1502,7 @@ async def run_due_recruiter_summaries(
         if not claimed:
             continue
         try:
-            await scan_recruiter(
+            summary = await scan_recruiter(
                 recruiter,
                 session_factory,
                 disk,
@@ -1399,6 +1517,17 @@ async def run_due_recruiter_summaries(
                 review_service=review_service,
                 question_queue_service=question_queue_service,
             )
+            if summary.aborted:
+                logger.warning(
+                    "Scheduled recruiter scan aborted before digest for %s", recruiter.email
+                )
+                await _mark_daily_digest_failed(
+                    session_factory,
+                    recruiter.mattermost_user_id,
+                    recruiter.mattermost_dm_channel,
+                    local_date,
+                )
+                continue
             async with session_factory() as session:
                 await question_queue_service.build_digest(
                     session,
@@ -1409,17 +1538,12 @@ async def run_due_recruiter_summaries(
                 await session.commit()
         except Exception:
             logger.exception("Scheduled recruiter scan/summary failed for %s", recruiter.email)
-            async with session_factory() as session:
-                digest = await session.scalar(
-                    select(QuestionDigest).where(
-                        QuestionDigest.recruiter_user_id == recruiter.mattermost_user_id,
-                        QuestionDigest.mattermost_channel_id == recruiter.mattermost_dm_channel,
-                        QuestionDigest.local_date == local_date,
-                    )
-                )
-                if digest is not None:
-                    digest.status = QuestionDigestStatus.FAILED
-                    await session.commit()
+            await _mark_daily_digest_failed(
+                session_factory,
+                recruiter.mattermost_user_id,
+                recruiter.mattermost_dm_channel,
+                local_date,
+            )
 
 
 async def drain_notification_outbox(
@@ -1493,6 +1617,25 @@ async def _claim_daily_digest(
             await session.rollback()
             return False
         return True
+
+
+async def _mark_daily_digest_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    recruiter_user_id: str,
+    dm_channel_id: str,
+    local_date: date,
+) -> None:
+    async with session_factory() as session:
+        digest = await session.scalar(
+            select(QuestionDigest).where(
+                QuestionDigest.recruiter_user_id == recruiter_user_id,
+                QuestionDigest.mattermost_channel_id == dm_channel_id,
+                QuestionDigest.local_date == local_date,
+            )
+        )
+        if digest is not None:
+            digest.status = QuestionDigestStatus.FAILED
+            await session.commit()
 
 
 def _next_run_time(trigger: CronTrigger, now: datetime | None = None) -> datetime:
