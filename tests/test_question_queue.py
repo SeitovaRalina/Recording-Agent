@@ -378,7 +378,7 @@ async def test_offline_questions_enforce_immutable_binding_and_create_no_outbox(
 ) -> None:
     mattermost = AsyncMock()
     settings = Settings(
-        openclaw_secret="secret",
+        openclaw_secret="secret",  # pragma: allowlist secret
         test_mode_enabled=True,
         mattermost_delivery_enabled=False,
         test_recruiter_allowlist={"r@example.com"},
@@ -441,7 +441,7 @@ async def test_offline_resolve_preserves_choice_version_and_idempotent_replay(
 ) -> None:
     mattermost = AsyncMock()
     settings = Settings(
-        openclaw_secret="secret",
+        openclaw_secret="secret",  # pragma: allowlist secret
         test_mode_enabled=True,
         mattermost_delivery_enabled=False,
         test_recruiter_allowlist={"r@example.com"},

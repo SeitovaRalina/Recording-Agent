@@ -92,7 +92,7 @@ can launch and supervise the workflow.
 ## Live evidence and current Notion blocker
 
 - The confirmed canary database is `Test Interviews`
-  (`fe5fe300f311821b96fe01233947e4c2`). Database
+  (`<test-notion-database-id>`, stored outside Git). Database
   `ef16e0bfe91b470f90a1749d0bae0ad3` is production and is forbidden in canary configuration.
 - The Backend discovers the canary data-source ID at runtime and never stores it in configuration.
 - Read-only schema retrieval confirms `Name` (title), `General Interview Date` (date),
@@ -201,7 +201,7 @@ older auth documentation does not exist. Phase 4 keeps credential issuance outsi
   succeed.
 
 For the Mila canary, store confirmed Test Interviews database ID
-`fe5fe300f311821b96fe01233947e4c2`. Discover its data-source ID at runtime; never persist it as
+`<test-notion-database-id>`, stored outside Git. Discover its data-source ID at runtime; never persist it as
 recruiter configuration. Self-service OAuth remains a later feature.
 
 ### 2. Resolve the test Notion data source

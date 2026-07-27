@@ -38,7 +38,7 @@ def test_notion_write_flag_does_not_bypass_durable_preflight() -> None:
 def test_canary_scope_normalizes_notion_database_uuid() -> None:
     recruiter = RecruiterConfig(
         email="r@example.com",
-        notion_database_id="fe5fe300-f311-821b-96fe-01233947e4c2",
+        notion_database_id="00000000-0000-0000-0000-000000000001",
         synology_base_folder="test-interviews",
         mattermost_user_id="codex-user",
         active=True,
@@ -48,7 +48,7 @@ def test_canary_scope_normalizes_notion_database_uuid() -> None:
         yandex_source_mutation_enabled=False,
         mattermost_delivery_enabled=False,
         test_recruiter_allowlist={recruiter.email},
-        test_notion_database_allowlist={"fe5fe300f311821b96fe01233947e4c2"},
+        test_notion_database_allowlist={"00000000000000000000000000000001"},
         test_mattermost_user_allowlist={recruiter.mattermost_user_id},
         minio_test_prefix=recruiter.synology_base_folder,
     )

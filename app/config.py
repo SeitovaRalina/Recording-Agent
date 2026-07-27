@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     test_mattermost_user_allowlist: set[str] = Field(default_factory=set)
 
     database_url: SecretStr = SecretStr(
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/recording_agent"
+        "postgresql+asyncpg://postgres:postgres@"  # pragma: allowlist secret
+        "localhost:5432/recording_agent"
     )
     yandex_client_id: str = Field(
         default="", validation_alias=AliasChoices("yandex_client_id", "YANDEX_CLIENT_ID")

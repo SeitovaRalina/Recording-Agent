@@ -65,7 +65,7 @@ not database retrieval. Enable the recruiter only when exactly one source has th
 name/date/recording properties with types `title`/`date`/`files`.
 **Phase 4 decision (corrected 2026-07-22):** Use a test database first; production recruiter
 databases stay disabled. The confirmed `Test Interviews` database ID is
-`fe5fe300f311821b96fe01233947e4c2`. Database
+`<test-notion-database-id>`, stored outside Git. Database
 `ef16e0bfe91b470f90a1749d0bae0ad3` is production and must never be configured in the canary.
 The read-only schema probe must confirm `Name` (title), `General Interview Date` (date),
 `General Interview recording` (files), and configured `📍 Spots` (relation). Production must
@@ -191,7 +191,7 @@ must show the result for confirmation, and then stores the ID on an inactive rec
 Workspace-wide search must never silently select a database. Data-source IDs remain runtime-only.
 
 **Current canary:** `Test Interviews` database
-`fe5fe300f311821b96fe01233947e4c2` is the confirmed test target. Database
+`<test-notion-database-id>` is the confirmed test target and its real ID is stored outside Git. Database
 `ef16e0bfe91b470f90a1749d0bae0ad3` is production and is forbidden in canary configuration.
 Repeat the schema probe with the Backend runtime token before enabling writes; discover the
 data-source ID at runtime and never persist it.

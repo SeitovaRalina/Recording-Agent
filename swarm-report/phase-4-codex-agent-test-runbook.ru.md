@@ -114,7 +114,7 @@ STORAGE_PROVIDER=minio
 MINIO_BUCKET=recording-agent-test
 MINIO_TEST_PREFIX=codex-test
 NOTION_WRITES_ENABLED=false
-TEST_NOTION_DATABASE_ALLOWLIST=["fe5fe300f311821b96fe01233947e4c2"]
+TEST_NOTION_DATABASE_ALLOWLIST=["<test-notion-database-id>"]
 APP_PORT=18000
 ```
 
@@ -125,7 +125,7 @@ APP_PORT=18000
 - `TEST_RECRUITER_ALLOWLIST` содержит только тестовый email;
 - `TEST_MATTERMOST_USER_ALLOWLIST` содержит только Mattermost user ID тестового recruiter;
 - `OPENCLAW_SECRET` — новый случайный test secret;
-- Notion database ID указан как `fe5fe300f311821b96fe01233947e4c2`;
+- Notion database ID указан как `<test-notion-database-id>`;
 - data-source ID нигде не записан: Backend обнаруживает его runtime;
 - production Notion, MinIO bucket, recruiter или Mattermost channel не используются.
 
@@ -218,7 +218,7 @@ docker compose logs app --since 10m | Select-String "Scheduled recording scan is
 ```powershell
 docker compose exec app poetry run python -m tools.setup.configure_recruiter configure `
   --email "<TEST_RECRUITER_EMAIL>" `
-  --notion "fe5fe300f311821b96fe01233947e4c2" `
+  --notion "<test-notion-database-id>" `
   --mattermost-user-id "<TEST_MATTERMOST_USER_ID>" `
   --storage-prefix "codex-test"
 ```

@@ -81,7 +81,7 @@ implementation authority for unfinished work.
     supporting evidence; absence or mismatch never rejects an otherwise valid name match.
 14. Backend-runtime preflight validates `Name:title`, `General Interview Date:date`,
     `General Interview recording:files`, `TBD:formula`, and `📍 Spots:relation` in test database
-    `fe5fe300f311821b96fe01233947e4c2`. The data-source ID is discovered at runtime and never
+    `<test-notion-database-id>`, stored outside Git. The data-source ID is discovered at runtime and never
     configured or persisted.
 15. Runtime probing establishes the actual `TBD` formula payload. Only syntactically valid,
     case-normalized emails are extracted from mixed phone/email/Telegram text. Unknown formula

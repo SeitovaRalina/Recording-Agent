@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings, get_settings
 
-OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"
+OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"  # pragma: allowlist secret
 
 router = APIRouter(prefix="/events", tags=["events"])
 

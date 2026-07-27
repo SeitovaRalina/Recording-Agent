@@ -4,7 +4,10 @@ from app.config import Settings, get_settings
 
 
 def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://user:pass@localhost/test",  # pragma: allowlist secret
+    )
     monkeypatch.setenv("NOTION_TOKEN", "notion-secret")
     monkeypatch.setenv("YANDEX_CLIENT_SECRET", "yandex-secret")
     monkeypatch.setenv("APP_ENVIRONMENT", "production")

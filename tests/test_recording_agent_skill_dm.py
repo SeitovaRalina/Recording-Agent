@@ -78,7 +78,7 @@ def test_conflict_failure_does_not_print_backend_secret(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    secret = "must-not-appear"
+    secret = "must-not-appear"  # pragma: allowlist secret
     monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", secret)
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
     monkeypatch.setattr(

@@ -25,7 +25,7 @@ from tools.setup.configure_recruiter import (
 @pytest.mark.anyio
 @respx.mock
 async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
-    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    database_id = "00000000-0000-0000-0000-000000000001"
     source_id = "0788967f-04fe-43c3-a78b-d2572e031031"
     database_route = respx.get(f"https://api.notion.com/v1/databases/{database_id}").mock(
         return_value=httpx.Response(
@@ -66,13 +66,15 @@ async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
 
 
 def test_parse_explicit_notion_target() -> None:
-    assert parse_notion_database_id("fe5fe300f311821b96fe01233947e4c2") == (
-        "fe5fe300-f311-821b-96fe-01233947e4c2"
+    assert parse_notion_database_id(
+        "00000000000000000000000000000001"
+    ) == (
+        "00000000-0000-0000-0000-000000000001"
     )
     assert (
         parse_notion_database_id(
             "https://app.notion.com/p/effectiveland/Test-Interviews-Page-"
-            "397c8889e4c8814c8acfd7da92915220"
+            "397c8889e4c8814c8acfd7da92915220"  # pragma: allowlist secret
         )
         == "397c8889-e4c8-814c-8acf-d7da92915220"
     )
@@ -84,7 +86,7 @@ def test_parse_explicit_notion_target() -> None:
 async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) -> None:
     inspector = AsyncMock()
     inspector.inspect.return_value = DatabaseInspection(
-        "fe5fe300-f311-821b-96fe-01233947e4c2",
+        "00000000-0000-0000-0000-000000000001",
         "Test Interviews",
         {"Name": "title", "📍 Spots": "relation"},
     )
@@ -97,7 +99,7 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
         inspector,
         settings,
         email="R@example.com",
-        notion_target="fe5fe300f311821b96fe01233947e4c2",
+        notion_target="00000000000000000000000000000001",
         mattermost_user_id="mm-user",
         mattermost_dm_channel="dm-channel",
         storage_prefix="test-prefix",
@@ -105,7 +107,7 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
         confirmed=True,
     )
     assert recruiter.active is False
-    assert recruiter.notion_database_id == "fe5fe300-f311-821b-96fe-01233947e4c2"
+    assert recruiter.notion_database_id == "00000000-0000-0000-0000-000000000001"
     assert recruiter.timezone == "Asia/Omsk"
     assert recruiter.mattermost_dm_channel == "dm-channel"
     inspector.inspect.assert_awaited_once()
@@ -124,7 +126,7 @@ async def test_bootstrap_rejects_invalid_recruiter_timezone(session: object) -> 
             AsyncMock(),
             settings,
             email="r@example.com",
-            notion_target="fe5fe300f311821b96fe01233947e4c2",
+            notion_target="00000000000000000000000000000001",
             mattermost_user_id="mm-user",
             mattermost_dm_channel="dm-channel",
             storage_prefix="test-prefix",
@@ -135,7 +137,7 @@ async def test_bootstrap_rejects_invalid_recruiter_timezone(session: object) -> 
 
 @pytest.mark.anyio
 async def test_bootstrap_reuses_confirmed_database_inspection(session: object) -> None:
-    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    database_id = "00000000-0000-0000-0000-000000000001"
     inspector = AsyncMock()
     inspection = DatabaseInspection(database_id, "Test Interviews", {"Name": "title"})
     settings = Settings(
@@ -163,7 +165,7 @@ async def test_bootstrap_reuses_confirmed_database_inspection(session: object) -
 async def test_operator_preflight_persists_backend_token_and_synthetic_row_proof(
     session: object,
 ) -> None:
-    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    database_id = "00000000-0000-0000-0000-000000000001"
     settings = Settings(notion_token=SecretStr("backend-token"))
     recruiter = await configure_recruiter(
         session,  # type: ignore[arg-type]
@@ -204,7 +206,7 @@ async def test_operator_preflight_persists_backend_token_and_synthetic_row_proof
 async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
     session: object, mattermost_delivery_enabled: bool
 ) -> None:
-    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    database_id = "00000000-0000-0000-0000-000000000001"
     settings = Settings(
         notion_token=SecretStr("backend-token"),
         yandex_refresh_tokens={"r@example.com": SecretStr("refresh")},
@@ -288,7 +290,7 @@ async def test_preflight_selects_explicit_default_and_keeps_recruiter_inactive(
 async def test_activation_fails_closed_then_activates_after_all_preflights(
     session: object,
 ) -> None:
-    database_id = "fe5fe300-f311-821b-96fe-01233947e4c2"
+    database_id = "00000000-0000-0000-0000-000000000001"
     settings = Settings(
         notion_token=SecretStr("backend-token"),
         notion_writes_enabled=True,
