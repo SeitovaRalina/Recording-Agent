@@ -532,7 +532,7 @@ async def test_internal_codex_scan_skips_mattermost_delivery(
     delivery = AsyncMock()
     monkeypatch.setattr("app.scheduler.cron._send_recruiter_notifications", delivery)
     settings = Settings(
-        openclaw_secret="secret",
+        openclaw_secret="secret",  # pragma: allowlist secret
         test_mode_enabled=True,
         yandex_source_mutation_enabled=False,
         mattermost_delivery_enabled=False,

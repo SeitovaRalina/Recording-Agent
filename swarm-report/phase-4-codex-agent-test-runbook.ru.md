@@ -260,7 +260,7 @@ $calendarState.calendars | Select-Object id,display_name,available,is_default
 ```powershell
 docker compose exec app poetry run python -m tools.setup.configure_recruiter preflight `
   --email "ralina.seitova@effective.band" `
-  --synthetic-page-id "41cfe300f31183929e6301ffe4bf20fa" `
+  --synthetic-page-id "<synthetic-notion-page-id>" `
   --default-calendar-id "ff90c94c-c0e0-40e4-b6e6-43edea322cfb"
 ```
 
