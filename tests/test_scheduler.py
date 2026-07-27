@@ -532,7 +532,7 @@ async def test_internal_codex_scan_skips_mattermost_delivery(
     delivery = AsyncMock()
     monkeypatch.setattr("app.scheduler.cron._send_recruiter_notifications", delivery)
     settings = Settings(
-        openclaw_secret="secret",  # pragma: allowlist secret
+        openclaw_secret="secret", # pragma: allowlist secret
         test_mode_enabled=True,
         yandex_source_mutation_enabled=False,
         mattermost_delivery_enabled=False,
@@ -1574,7 +1574,7 @@ async def test_offline_manual_scan_creates_exact_bound_question_without_mattermo
         await session.commit()
     mattermost = AsyncMock()
     settings = Settings(
-        openclaw_secret="secret",
+        openclaw_secret="secret", # pragma: allowlist secret
         test_mode_enabled=True,
         mattermost_delivery_enabled=False,
         test_recruiter_allowlist={owner.email},
@@ -1628,7 +1628,7 @@ async def test_concurrent_offline_channels_bind_once_and_reject_before_second_sc
         await session.commit()
     mattermost = AsyncMock()
     settings = Settings(
-        openclaw_secret="secret",
+        openclaw_secret="secret", # pragma: allowlist secret
         test_mode_enabled=True,
         mattermost_delivery_enabled=False,
         test_recruiter_allowlist={owner.email},
