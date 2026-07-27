@@ -61,23 +61,18 @@ jobs:
           if [[ ! "${base}" =~ ^[0-9a-f]{40}$ ]] || [[ "${base}" =~ ^0+$ ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          baseline_tree="${RUNNER_TEMP}/secret-baseline-tree"
-          baseline_file="${RUNNER_TEMP}/detect-secrets-baseline.json"
-          git worktree add --detach "${baseline_tree}" "${base}"
-          (
-            cd "${baseline_tree}"
-            detect-secrets scan -n \
-              --exclude-files '(^|/)(poetry\.lock|\.git/|swarm-report/)' \
-              > "${baseline_file}"
-          )
           mapfile -d '' changed < <(git diff --name-only --diff-filter=ACMR -z "${base}" HEAD)
           if (( ${#changed[@]} == 0 )); then
             echo "No changed files to scan."
             exit 0
           fi
-          if ! detect-secrets-hook --baseline "${baseline_file}" "${changed[@]}" \
-            > "${RUNNER_TEMP}/detect-secrets-hook.log" 2>&1; then
-            echo "::error::Potential secret detected in changed files; run detect-secrets locally."
+          scan_file="${RUNNER_TEMP}/detect-secrets-scan.json"
+          detect-secrets scan -n "${changed[@]}" > "${scan_file}"
+          if ! jq -e '([.results[]?[]?] | length) == 0' "${scan_file}" >/dev/null; then
+            jq -r '
+              .results | to_entries[] as $file | $file.value[] |
+              "::error file=\($file.key),line=\(.line_number)::Potential secret: \(.type)"
+            ' "${scan_file}"
             exit 1
           fi
           echo "No new secret findings."
