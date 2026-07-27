@@ -64,7 +64,7 @@ jobs:
           echo "image=${IMAGE_NAME}@${digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Check out the exact release source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.release.outputs.commit }}
           persist-credentials: false
@@ -97,9 +97,11 @@ jobs:
             compose_sha="$(sha256sum compose.prod.yml | awk '{print $1}')"
             skill_sha="$(sha256sum recording-agent-skill.tar.gz | awk '{print $1}')"
             metadata_sha="$(sha256sum release-metadata.json | awk '{print $1}')"
-            printf 'compose_sha=%s\n' "${compose_sha}" >> "${GITHUB_OUTPUT}"
-            printf 'skill_sha=%s\n' "${skill_sha}" >> "${GITHUB_OUTPUT}"
-            printf 'metadata_sha=%s\n' "${metadata_sha}" >> "${GITHUB_OUTPUT}"
+            {
+              printf 'compose_sha=%s\n' "${compose_sha}"
+              printf 'skill_sha=%s\n' "${skill_sha}"
+              printf 'metadata_sha=%s\n' "${metadata_sha}"
+            } >> "${GITHUB_OUTPUT}"
           )
 
       - name: Install deploy identity and pinned host key
