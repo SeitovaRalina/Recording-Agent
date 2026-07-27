@@ -95,14 +95,12 @@ jobs:
             --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}"
             --file Dockerfile
             --tag "${IMAGE_NAME}:${GITHUB_SHA}"
-            --provenance=mode=max
-            --sbom=true
           )
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-            docker buildx build "${args[@]}" --push .
+            docker buildx build "${args[@]}" --provenance=mode=max --sbom=true --push .
           else
-            docker buildx build "${args[@]}" --load .
+            docker buildx build "${args[@]}" --provenance=false --sbom=false --load .
           fi
 
       - name: Verify published digest
