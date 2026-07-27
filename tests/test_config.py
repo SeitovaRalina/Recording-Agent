@@ -4,7 +4,10 @@ from app.config import Settings, get_settings
 
 
 def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://user:pass@localhost/test",  # pragma: allowlist secret
+    )
     monkeypatch.setenv("NOTION_TOKEN", "notion-secret")
     monkeypatch.setenv("YANDEX_CLIENT_SECRET", "yandex-secret")
     monkeypatch.setenv("APP_ENVIRONMENT", "production")
@@ -17,12 +20,18 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert isinstance(settings.notion_token, SecretStr)
     assert isinstance(settings.yandex_client_secret, SecretStr)
     assert settings.storage_provider == "minio"
+    assert settings.notion_project_prop == "📍 Spots"
+    assert settings.notion_project_prop_type == "relation"
     assert settings.confidence_threshold == 0.7
     assert settings.scan_ignore_before_today is True
     assert settings.scan_local_timezone == "Asia/Omsk"
     assert settings.recording_filename_timezone == "Europe/Moscow"
     assert settings.app_environment == "production"
     assert settings.pipeline_trace_active is False
+    assert settings.scheduler_enabled is False
+    assert settings.mattermost_delivery_enabled is False
+    assert settings.notion_writes_enabled is False
+    assert settings.yandex_source_mutation_enabled is False
     get_settings.cache_clear()
 
 
@@ -53,3 +62,14 @@ def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None: 
     assert settings.scan_local_timezone == "UTC"
     assert settings.recording_filename_timezone == "Europe/Berlin"
     assert settings.pipeline_trace_active is True
+
+
+def test_side_effect_flags_are_explicitly_opt_in() -> None:
+    settings = Settings(
+        scheduler_enabled=True,
+        mattermost_delivery_enabled=True,
+        notion_writes_enabled=True,
+        yandex_source_mutation_enabled=True,
+    )
+    assert settings.scheduler_enabled is True
+    assert settings.mattermost_delivery_enabled is True

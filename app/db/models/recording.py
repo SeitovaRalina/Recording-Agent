@@ -45,6 +45,9 @@ class Recording(Base):
     __tablename__ = "recordings"
     __table_args__ = (
         CheckConstraint(STATUS_CHECK_SQL, name="ck_recordings_status"),
+        CheckConstraint(
+            "route_type IN ('interview', 'non_interview')", name="ck_recordings_route_type"
+        ),
         Index("idx_recordings_status", "status"),
         Index("idx_recordings_disk_owner", "disk_owner_email"),
         Index(
@@ -70,15 +73,19 @@ class Recording(Base):
         },
         RecordingStatus.CANDIDATE_MATCHED: {
             RecordingStatus.TRANSFER_STARTED,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.MANUAL_REVIEW_REQUIRED: {
+            RecordingStatus.CALENDAR_EVENT_FOUND,
             RecordingStatus.CANDIDATE_MATCHED,
+            RecordingStatus.TRANSFER_STARTED,
             RecordingStatus.IGNORED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.TRANSFER_STARTED: {
             RecordingStatus.UPLOADED_TO_SYNOLOGY,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.UPLOADED_TO_SYNOLOGY: {
@@ -87,10 +94,12 @@ class Recording(Base):
         },
         RecordingStatus.SYNOLOGY_LINK_CREATED: {
             RecordingStatus.NOTION_UPDATED,
+            RecordingStatus.COMPLETED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.NOTION_UPDATED: {
             RecordingStatus.SOURCE_MARKED_PROCESSED,
+            RecordingStatus.COMPLETED,
             RecordingStatus.FAILED,
         },
         RecordingStatus.SOURCE_MARKED_PROCESSED: {
@@ -130,12 +139,28 @@ class Recording(Base):
     manual_review_candidates: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
     candidate_name: Mapped[str | None] = mapped_column(Text)
     candidate_email: Mapped[str | None] = mapped_column(Text)
+    project_or_spot: Mapped[str | None] = mapped_column(Text)
+    notion_spot_id: Mapped[str | None] = mapped_column(Text)
+    notion_spot_url: Mapped[str | None] = mapped_column(Text)
     notion_database_id: Mapped[str | None] = mapped_column(Text)
     notion_page_id: Mapped[str | None] = mapped_column(Text)
     notion_page_url: Mapped[str | None] = mapped_column(Text)
     synology_folder_path: Mapped[str | None] = mapped_column(Text)
     synology_file_path: Mapped[str | None] = mapped_column(Text)
     synology_share_url: Mapped[str | None] = mapped_column(Text)
+    generated_filename: Mapped[str | None] = mapped_column(Text)
+    storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    content_identity: Mapped[str | None] = mapped_column(Text)
+    terminal_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_notification_claim: Mapped[str | None] = mapped_column(Text)
+    terminal_notification_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    review_notification_claim: Mapped[str | None] = mapped_column(Text)
+    review_notification_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_lease_token: Mapped[str | None] = mapped_column(Text)
+    processing_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(nullable=False, default=0, server_default=text("0"))
     status: Mapped[RecordingStatus] = mapped_column(
         Text,
         nullable=False,
@@ -154,6 +179,15 @@ class Recording(Base):
     deleted_from_disk_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disk_deletable_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_processed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    route_type: Mapped[str] = mapped_column(
+        Text, nullable=False, default="interview", server_default="interview"
+    )
+    storage_destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("storage_destinations.id", ondelete="SET NULL")
+    )
+    storage_is_durable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
 

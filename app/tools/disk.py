@@ -165,6 +165,18 @@ class DiskScanner:
         processed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         await self._patch_processed_properties(path, recruiter_email, processed_at)
 
+    async def move_to_trash(self, path: str, recruiter_email: str) -> None:
+        """Move one explicit source to Yandex Trash; permanent deletion is impossible here."""
+        if not path.startswith(TELEMOST_ROOT):
+            raise PermissionError("Cleanup source is outside the Telemost root")
+        response = await self._request(
+            "DELETE",
+            f"{DISK_API_BASE}/resources",
+            recruiter_email,
+            params={"path": path, "permanently": "false"},
+        )
+        await self._await_operation(response, recruiter_email)
+
     async def _patch_processed_properties(
         self, path: str, recruiter_email: str, processed_at: str
     ) -> None:

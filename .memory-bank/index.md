@@ -25,7 +25,7 @@
 - One `NOTION_TOKEN` (Internal Integration)
 - Per-recruiter `database_id` mapping in config
 - Known databases: Anton's Interviews DB, Lili's (TBD)
-- Key fields in Interviews DB: `Name`, `General Interview Date`, `General Interview recording`, `TBD` (contacts formula), `Spots` (relation)
+- Key fields in Interviews DB: `Name`, `General Interview Date`, `General Interview recording`, `TBD` (contacts formula), `📍 Spots` (relation)
 
 ## Recording statuses (PostgreSQL state machine)
 

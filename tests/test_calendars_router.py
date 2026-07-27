@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.recruiter_calendar import RecruiterCalendar
@@ -38,13 +38,15 @@ async def test_calendar_state_requires_secret_and_is_recruiter_scoped(
     app.dependency_overrides[get_session] = override_session
 
     unauthorized = await async_client.get("/internal/recruiters/first@example.com/calendars")
-    response = await async_client.get(
-        "/internal/recruiters/first@example.com/calendars",
-        headers={"X-OpenClaw-Secret": "test-secret"},
-    )
+    transport = ASGITransport(app=app, client=("172.21.0.1", 52236))
+    async with AsyncClient(transport=transport, base_url="http://test") as bridge_client:
+        response = await bridge_client.get(
+            "/internal/recruiters/first@example.com/calendars",
+            headers={"X-OpenClaw-Secret": "test-secret"},  # pragma: allowlist secret
+        )
     missing = await async_client.get(
         "/internal/recruiters/other@example.com/calendars",
-        headers={"X-OpenClaw-Secret": "test-secret"},
+        headers={"X-OpenClaw-Secret": "test-secret"},  # pragma: allowlist secret
     )
 
     assert unauthorized.status_code == 401
@@ -85,7 +87,7 @@ async def test_selection_replacement_version_clear_and_default_audit(
 
     app.dependency_overrides[get_session] = override_session
     headers = {
-        "X-OpenClaw-Secret": "test-secret",
+        "X-OpenClaw-Secret": "test-secret",  # pragma: allowlist secret
         "X-Operator-Identity": "operator@example.com",
     }
 
@@ -119,7 +121,7 @@ async def test_selection_replacement_version_clear_and_default_audit(
     await session.commit()
     incomplete = await async_client.get(
         "/internal/recruiters/recruiter@example.com/calendars",
-        headers={"X-OpenClaw-Secret": "test-secret"},
+        headers={"X-OpenClaw-Secret": "test-secret"},  # pragma: allowlist secret
     )
     assert incomplete.json()["selected_ids"] == [str(second.id)]
     assert incomplete.json()["effective_ids"] == [str(second.id)]

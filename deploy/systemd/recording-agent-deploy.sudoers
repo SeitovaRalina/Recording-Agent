@@ -1,0 +1,5 @@
+# Install as /etc/sudoers.d/recording-agent-deploy with mode 0440.
+# The scripts must be root-owned and not writable by deploy.
+Defaults:deploy env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/recording-agent-deploy *
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/recording-agent-rollback

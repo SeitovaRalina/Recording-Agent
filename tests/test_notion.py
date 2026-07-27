@@ -18,6 +18,7 @@ from app.tools.notion import (
     NotionForbiddenError,
     NotionMalformedResponseError,
     NotionQueryError,
+    NotionRelationChoice,
     NotionSchemaError,
     NotionSourceAmbiguityError,
     NotionUpdateError,
@@ -27,6 +28,8 @@ BASE = "https://api.notion.com/v1"
 NAME = "Name"
 DATE = "General Interview Date"
 RECORDING = "General Interview recording"
+SPOTS = "📍 Spots"
+CONTACTS = "TBD"
 
 
 def page(page_id: str = "page-1") -> dict[str, object]:
@@ -36,7 +39,13 @@ def page(page_id: str = "page-1") -> dict[str, object]:
         "properties": {
             NAME: {"title": [{"plain_text": "Ivan Ivanov"}]},
             DATE: {"date": {"start": "2026-07-16"}},
-            "Email": {"email": "ivan@example.com"},
+            CONTACTS: {
+                "type": "formula",
+                "formula": {
+                    "type": "string",
+                    "string": "+7 999 000 00 00\nIvan@Example.com\n@ivan",
+                },
+            },
         },
     }
 
@@ -51,16 +60,191 @@ def schema(
     name_type: str = "title",
     date_type: str = "date",
     recording_type: str = "files",
+    contacts_type: str = "formula",
+    project_type: str | None = None,
     omit: str | None = None,
 ) -> dict[str, object]:
     properties: dict[str, object] = {
         NAME: {"type": name_type},
         DATE: {"type": date_type},
         RECORDING: {"type": recording_type},
+        CONTACTS: {"type": contacts_type},
     }
+    if project_type is not None:
+        properties[SPOTS] = {"type": project_type}
     if omit is not None:
         del properties[omit]
     return {"object": "data_source", "id": source_id, "properties": properties}
+
+
+@pytest.mark.parametrize(
+    ("rendered", "expected"),
+    [
+        (
+            "+7 999 000 00 00\nFirst.Last+tag@Example.COM\n@telegram",
+            ("first.last+tag@example.com",),
+        ),
+        ("bad@@example.com\nname@localhost\n.name@example.com", ()),
+        (None, ()),
+    ],
+)
+def test_extracts_only_valid_normalized_emails_from_contacts_formula(
+    rendered: str | None, expected: tuple[str, ...]
+) -> None:
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[CONTACTS] = {
+        "type": "formula",
+        "formula": {"type": "string", "string": rendered},
+    }
+
+    parsed = NotionClient._parse_page(candidate, NAME, DATE, CONTACTS, SPOTS)  # noqa: SLF001
+
+    assert parsed.emails == expected
+    assert parsed.email == (expected[0] if len(expected) == 1 else None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"type": "formula", "formula": {"type": "number", "number": 1}},
+        {"type": "rich_text", "rich_text": []},
+        {"type": "formula", "formula": {"type": "string", "string": []}},
+    ],
+)
+def test_unknown_contacts_formula_shapes_fail_closed(value: dict[str, object]) -> None:
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[CONTACTS] = value
+
+    with pytest.raises(NotionMalformedResponseError):
+        NotionClient._parse_page(candidate, NAME, DATE, CONTACTS, SPOTS)  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_resolves_project_name_from_spots_relation() -> None:
+    related_page_id = "df3fe300-f311-82b4-98f5-013eb4ca475d"
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[SPOTS] = {"relation": [{"id": related_page_id}]}
+
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [candidate]})
+            )
+            router.get(f"{BASE}/pages/{related_page_id}").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "id": related_page_id,
+                        "url": f"https://notion.so/{related_page_id}",
+                        "properties": {"Name": {"title": [{"plain_text": "Backend Spot"}]}},
+                    },
+                )
+            )
+
+            result = await client.search_pages(
+                "db",
+                "Ivan",
+                date(2026, 7, 16),
+                NAME,
+                DATE,
+                RECORDING,
+                SPOTS,
+                "relation",
+            )
+
+    assert result[0].project_or_spot == "Backend Spot"
+
+
+@pytest.mark.anyio
+async def test_returns_every_bounded_spot_for_explicit_choice() -> None:
+    candidate = page()
+    properties = candidate["properties"]
+    assert isinstance(properties, dict)
+    properties[SPOTS] = {
+        "relation": [
+            {"id": "first-spot"},
+            {"id": "second-spot"},
+        ]
+    }
+
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [candidate]})
+            )
+
+            for spot_id, title in (("first-spot", "First"), ("second-spot", "Second")):
+                router.get(f"{BASE}/pages/{spot_id}").mock(
+                    return_value=httpx.Response(
+                        200,
+                        json={
+                            "id": spot_id,
+                            "url": f"https://notion.so/{spot_id}",
+                            "properties": {"Name": {"title": [{"plain_text": title}]}},
+                        },
+                    )
+                )
+            result = await client.search_pages(
+                "db",
+                "Ivan",
+                date(2026, 7, 16),
+                NAME,
+                DATE,
+                RECORDING,
+                SPOTS,
+                "relation",
+            )
+
+    assert result[0].project_or_spot is None
+    assert result[0].spots == (
+        NotionRelationChoice("first-spot", "First", "https://notion.so/first-spot"),
+        NotionRelationChoice("second-spot", "Second", "https://notion.so/second-spot"),
+    )
+
+
+@pytest.mark.anyio
+async def test_rejects_configured_project_property_type_mismatch() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(200, json=database("source"))
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source", project_type="relation"))
+            )
+
+            with pytest.raises(NotionSchemaError):
+                await client.search_pages(
+                    "db",
+                    "Ivan",
+                    date(2026, 7, 16),
+                    NAME,
+                    DATE,
+                    RECORDING,
+                    SPOTS,
+                    "rich_text",
+                )
 
 
 def register_chain(
@@ -83,6 +267,82 @@ def register_chain(
 
 
 @pytest.mark.anyio
+async def test_preflight_validates_selected_synthetic_row_contacts_formula() -> None:
+    synthetic_page_id = "df3fe300-f311-82b4-98f5-013eb4ca475d"
+    synthetic_page = page(synthetic_page_id)
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        **database("source"),
+                        "title": [{"plain_text": "Candidates"}],
+                    },
+                )
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [synthetic_page]})
+            )
+
+            inspection = await client.preflight_database(
+                "db", synthetic_page_id, NAME, DATE, RECORDING
+            )
+
+    assert inspection.schema.id == "source"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "synthetic_payload",
+    [
+        {"id": "synthetic-page"},
+        {"id": "synthetic-page", "properties": {}},
+        {
+            "id": "synthetic-page",
+            "properties": {
+                CONTACTS: {"type": "formula", "formula": {"type": "number", "number": 1}}
+            },
+        },
+        {
+            "id": "synthetic-page",
+            "properties": {
+                CONTACTS: {"type": "formula", "formula": {"type": "string", "string": []}}
+            },
+        },
+    ],
+)
+async def test_preflight_rejects_invalid_synthetic_contacts_payload(
+    synthetic_payload: dict[str, object],
+) -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(f"{BASE}/databases/db").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        **database("source"),
+                        "title": [{"plain_text": "Candidates"}],
+                    },
+                )
+            )
+            router.get(f"{BASE}/data_sources/source").mock(
+                return_value=httpx.Response(200, json=schema("source"))
+            )
+            router.post(f"{BASE}/data_sources/source/query").mock(
+                return_value=httpx.Response(200, json={"results": [synthetic_payload]})
+            )
+
+            with pytest.raises(NotionMalformedResponseError):
+                await client.preflight_database("db", "synthetic-page", NAME, DATE, RECORDING)
+
+
+@pytest.mark.anyio
 async def test_discovers_validates_and_queries_current_data_source() -> None:
     async with httpx.AsyncClient() as http:
         client = NotionClient(SecretStr("token"), http)
@@ -95,7 +355,7 @@ async def test_discovers_validates_and_queries_current_data_source() -> None:
         assert [item.id for item in result] == ["page-1"]
         assert query.calls.last.request.url.path == "/v1/data_sources/source/query"
         assert b'"title":{"contains":"Ivan"}' in query.calls.last.request.content
-        assert b'"equals":"2026-07-16"' in query.calls.last.request.content
+        assert b"General Interview Date" not in query.calls.last.request.content
         assert b'"page_size":10' in query.calls.last.request.content
         for route in (discovery, source, query):
             assert route.calls.last.request.headers["Notion-Version"] == NOTION_API_VERSION
@@ -159,9 +419,11 @@ async def test_fails_closed_when_schema_selection_is_not_unique(
         schema("source", omit=NAME),
         schema("source", omit=DATE),
         schema("source", omit=RECORDING),
+        schema("source", omit=CONTACTS),
         schema("source", name_type="rich_text"),
         schema("source", date_type="rich_text"),
         schema("source", recording_type="url"),
+        schema("source", contacts_type="rich_text"),
     ],
 )
 async def test_rejects_missing_or_wrong_required_property_types(
@@ -366,24 +628,39 @@ async def test_stale_source_retry_happens_only_once() -> None:
 
 
 @pytest.mark.anyio
-async def test_update_page_file_uses_external_file_and_current_header() -> None:
+async def test_update_page_interview_uses_date_and_external_file_current_header() -> None:
     async with httpx.AsyncClient() as http:
         client = NotionClient(SecretStr("token"), http)
         with respx.mock(assert_all_called=True) as router:
             route = router.patch(f"{BASE}/pages/page").mock(
                 return_value=httpx.Response(200, json={})
             )
-            await client.update_page_file("page", RECORDING, "https://share", "interview.webm")
+            await client.update_page_interview(
+                "page",
+                date_prop=DATE,
+                recording_prop=RECORDING,
+                event_date=date(2026, 7, 16),
+                url="https://share",
+                filename="interview.webm",
+            )
         assert route.calls.last.request.headers["Notion-Version"] == NOTION_API_VERSION
         assert route.calls.last.request.content == (
-            b'{"properties":{"General Interview recording":{"files":['
+            b'{"properties":{"General Interview Date":{"date":{"start":"2026-07-16"}},'
+            b'"General Interview recording":{"files":['
             b'{"name":"interview.webm","external":{"url":"https://share"}}]}}}'
         )
 
         with respx.mock(assert_all_called=True) as router:
             router.patch(f"{BASE}/pages/page").mock(return_value=httpx.Response(500))
             with pytest.raises(NotionUpdateError):
-                await client.update_page_file("page", RECORDING, "https://share", "interview.webm")
+                await client.update_page_interview(
+                    "page",
+                    date_prop=DATE,
+                    recording_prop=RECORDING,
+                    event_date=date(2026, 7, 16),
+                    url="https://share",
+                    filename="interview.webm",
+                )
 
 
 @pytest.mark.anyio
@@ -428,11 +705,13 @@ async def test_transport_failures_are_typed_and_sanitized(
 
             with pytest.raises(error_type) as raised:
                 if operation == "update":
-                    await client.update_page_file(
+                    await client.update_page_interview(
                         "secret-page-id",
-                        RECORDING,
-                        "https://secret-share-url",
-                        "secret-recording-name.webm",
+                        date_prop=DATE,
+                        recording_prop=RECORDING,
+                        event_date=date(2026, 7, 16),
+                        url="https://secret-share-url",
+                        filename="secret-recording-name.webm",
                     )
                 else:
                     await client.search_pages(

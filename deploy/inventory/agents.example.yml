@@ -1,0 +1,50 @@
+schema_version: 1
+gateway:
+  owner: shared-openclaw-infrastructure
+  trust_boundary: one-company-trusted
+  service_user: openclaw
+  state_root: /var/lib/openclaw
+  config_path: /etc/openclaw/openclaw.json
+  wildcard_bindings_allowed: false
+
+agents:
+  - id: recordings-saver
+    owner: recording-agent
+    workspace: /srv/openclaw/workspaces/recordings-saver
+    skills:
+      recording-agent:
+        source: openclaw/skills/recording-agent
+        owner: recording-agent
+    agent_directory: /var/lib/openclaw/agents/recordings-saver/agent
+    auth_profile: /var/lib/openclaw/agents/recordings-saver/agent/auth-profiles.json
+    secret_environment_file: /etc/openclaw/gateway.env
+    session_directory: /var/lib/openclaw/agents/recordings-saver/sessions
+    llm:
+      profile: llm-gateway:default
+      provider: llm-gateway
+      base_url: https://llm.effective.land/v1
+      api_dialect: openai-completions
+      primary_model: gpt-5.4
+      fallback_models:
+        - gpt-5.4-mini
+      timeout_seconds: 120
+      rpm_limit: REQUIRED_FROM_ADMIN
+      tpm_limit: REQUIRED_FROM_ADMIN
+      concurrency_limit: 1
+      total_quota: REQUIRED_FROM_ADMIN
+      billing_owner: REQUIRED_FROM_ADMIN
+      ip_restrictions: REQUIRED_FROM_ADMIN
+      expires_at: REQUIRED_FROM_ADMIN
+      rotation_contact: REQUIRED_FROM_ADMIN
+    mattermost:
+      account_id: recordings-saver
+      bot_user_id: REQUIRED_FROM_SERVER_SECRET_METADATA
+      inbound_consumer: openclaw
+      binding:
+        channel: mattermost
+        account_id: recordings-saver
+        agent_id: recordings-saver
+      recruiter_user_allowlist:
+        - REQUIRED_FROM_SERVER_SECRET_METADATA
+# Other repositories add their real agent/account/binding through the approval-gated
+# shared-infrastructure contract. Existing entries are immutable and may not be omitted.

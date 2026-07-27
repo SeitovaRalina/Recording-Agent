@@ -14,6 +14,9 @@ MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024
 
 
 class StorageBackend(Protocol):
+    @property
+    def durable_for_source_cleanup(self) -> bool: ...
+
     async def ensure_folder(self, path: str) -> None: ...
 
     async def upload(
@@ -22,6 +25,9 @@ class StorageBackend(Protocol):
         filename: str,
         stream: AsyncIterator[bytes],
         size: int | None,
+        *,
+        recording_id: str,
+        content_identity: str,
     ) -> str: ...
 
     async def create_share_link(self, path: str) -> str: ...
@@ -31,7 +37,13 @@ class StreamingUnsupportedError(RuntimeError):
     """Backend asks TransferService to retry through a temporary file."""
 
 
+class StorageCollisionError(RuntimeError):
+    """Object key is already owned by another recording or content identity."""
+
+
 class _S3Client(Protocol):
+    async def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
+
     async def put_object(self, **kwargs: Any) -> object: ...
 
     async def create_multipart_upload(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -60,6 +72,10 @@ class MinIOBackend:
         self._bucket = bucket
         self._client = client
 
+    @property
+    def durable_for_source_cleanup(self) -> bool:
+        return False
+
     async def ensure_folder(self, path: str) -> None:
         del path
 
@@ -69,11 +85,23 @@ class MinIOBackend:
         filename: str,
         stream: AsyncIterator[bytes],
         size: int | None,
+        *,
+        recording_id: str,
+        content_identity: str,
     ) -> str:
-        del size
         key = f"{folder.rstrip('/')}/{filename}".lstrip("/")
+        metadata = {
+            "recording-id": recording_id,
+            "content-identity": content_identity,
+        }
         async with self._client_scope() as client:
-            created = await client.create_multipart_upload(Bucket=self._bucket, Key=key)
+            existing = await self._head_object(client, key)
+            if existing is not None:
+                self._require_same_owner(key, existing, metadata, size)
+                return f"/{key}"
+            created = await client.create_multipart_upload(
+                Bucket=self._bucket, Key=key, Metadata=metadata
+            )
             upload_id = created.get("UploadId")
             if not isinstance(upload_id, str) or not upload_id:
                 raise RuntimeError("S3 multipart upload returned no UploadId")
@@ -103,14 +131,39 @@ class MinIOBackend:
                     await client.abort_multipart_upload(
                         Bucket=self._bucket, Key=key, UploadId=upload_id
                     )
-                    await client.put_object(Bucket=self._bucket, Key=key, Body=b"")
+                    try:
+                        await client.put_object(
+                            Bucket=self._bucket,
+                            Key=key,
+                            Body=b"",
+                            Metadata=metadata,
+                            IfNoneMatch="*",
+                        )
+                    except Exception:
+                        existing = await self._head_object(client, key)
+                        if existing is None:
+                            raise
+                        self._require_same_owner(key, existing, metadata, size)
                     return f"/{key}"
-                await client.complete_multipart_upload(
-                    Bucket=self._bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    MultipartUpload={"Parts": parts},
-                )
+                try:
+                    await client.complete_multipart_upload(
+                        Bucket=self._bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                        IfNoneMatch="*",
+                    )
+                except Exception:
+                    try:
+                        await client.abort_multipart_upload(
+                            Bucket=self._bucket, Key=key, UploadId=upload_id
+                        )
+                    except Exception:
+                        pass
+                    existing = await self._head_object(client, key)
+                    if existing is None:
+                        raise
+                    self._require_same_owner(key, existing, metadata, size)
             except Exception:
                 try:
                     await client.abort_multipart_upload(
@@ -120,6 +173,35 @@ class MinIOBackend:
                     pass
                 raise
         return f"/{key}"
+
+    async def _head_object(self, client: _S3Client, key: str) -> dict[str, Any] | None:
+        try:
+            return await client.head_object(Bucket=self._bucket, Key=key)
+        except Exception as error:
+            response = getattr(error, "response", None)
+            code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+            if str(code) in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+
+    @staticmethod
+    def _require_same_owner(
+        key: str,
+        existing: dict[str, Any],
+        expected_metadata: dict[str, str],
+        expected_size: int | None,
+    ) -> None:
+        metadata = existing.get("Metadata")
+        content_length = existing.get("ContentLength")
+        same_size = (
+            expected_size is None or content_length is None or content_length == expected_size
+        )
+        same_owner = isinstance(metadata, dict) and all(
+            metadata.get(name) == value for name, value in expected_metadata.items()
+        )
+        if same_owner and same_size:
+            return
+        raise StorageCollisionError(f"Storage key already exists with different ownership: {key}")
 
     async def _upload_part(
         self,

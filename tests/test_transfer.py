@@ -15,9 +15,14 @@ from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.storage import StreamingUnsupportedError
 from app.services.transfer import TransferError, TransferService
+from app.tools.synology import SynologyBackend
 
 
 class FakeStorage:
+    @property
+    def durable_for_source_cleanup(self) -> bool:
+        return False
+
     def __init__(
         self, *, fallback: bool = False, fail: bool = False, fail_share: bool = False
     ) -> None:
@@ -32,9 +37,14 @@ class FakeStorage:
         self.folder = path
 
     async def upload(
-        self, folder: str, filename: str, stream: AsyncIterator[bytes], size: int | None
+        self,
+        folder: str,
+        filename: str,
+        stream: AsyncIterator[bytes],
+        size: int | None,
+        **identity: str,
     ) -> str:
-        del size
+        del size, identity
         self.uploads += 1
         if self.fail:
             raise RuntimeError("upload failed")
@@ -47,6 +57,29 @@ class FakeStorage:
         if self.fail_share:
             raise RuntimeError("share failed")
         return f"https://share{path}"
+
+
+class CapturingSynologyBackend(SynologyBackend):
+    def __init__(self) -> None:
+        self.folder = ""
+        self.uploaded = ""
+
+    async def ensure_folder(self, path: str) -> None:
+        self.folder = path
+
+    async def upload(
+        self,
+        folder: str,
+        filename: str,
+        stream: AsyncIterator[bytes],
+        size: int | None,
+        *,
+        recording_id: str,
+        content_identity: str,
+    ) -> str:
+        del size, recording_id, content_identity
+        self.uploaded = b"".join([chunk async for chunk in stream]).decode()
+        return f"{folder}/{filename}"
 
 
 def recording() -> Recording:
@@ -84,9 +117,7 @@ def download_client() -> httpx.AsyncClient:
             )
         return httpx.Response(404, request=request)
 
-    return httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 @pytest.mark.anyio
@@ -104,6 +135,44 @@ async def test_transfer_streams_and_sanitizes_path(candidate: str, session: Asyn
         == f"/base/2026-07-16/{'Ivan' if candidate == 'Ivan' else 'Iv_an________'}"
     )
     assert await service.create_share_link(result.file_path) == f"https://share{result.file_path}"
+
+
+@pytest.mark.anyio
+async def test_synology_transfer_places_persisted_logical_key_under_recruiter_root(
+    session: AsyncSession,
+) -> None:
+    item = recording()
+    item.generated_filename = "2026-07-16_Ivan_Project_general_interview.webm"
+    item.storage_key = (
+        "owner@example.com/2026-07-16/Ivan/2026-07-16_Ivan_Project_general_interview.webm"
+    )
+    disk = AsyncMock()
+    disk._request.return_value = httpx.Response(200, json={"href": "https://download"})
+    storage = CapturingSynologyBackend()
+    async with download_client() as http:
+        result = await TransferService(disk, storage, http).transfer(
+            item, recruiter(), "Ivan", session
+        )
+
+    assert storage.folder == "/base/owner@example.com/2026-07-16/Ivan"
+    assert result.file_path == f"{storage.folder}/{item.generated_filename}"
+
+
+@pytest.mark.anyio
+async def test_synology_transfer_rejects_persisted_key_that_escapes_recruiter_root(
+    session: AsyncSession,
+) -> None:
+    item = recording()
+    item.generated_filename = "video.webm"
+    item.storage_key = "../outside/video.webm"
+    disk = AsyncMock()
+    storage = CapturingSynologyBackend()
+    async with download_client() as http:
+        with pytest.raises(TransferError, match="path traversal"):
+            await TransferService(disk, storage, http).transfer(item, recruiter(), "Ivan", session)
+
+    disk._request.assert_not_awaited()
+    assert storage.folder == ""
 
 
 @pytest.mark.anyio

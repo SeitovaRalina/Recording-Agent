@@ -1,0 +1,15 @@
+table inet recording_agent {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iifname "lo" accept comment "loopback services"
+        ct state invalid drop
+        ct state established,related accept
+
+        ip saddr { __APPROVED_SSH_IPV4_CIDRS__ } tcp dport 22 ct state new accept
+        ip6 saddr { __APPROVED_SSH_IPV6_CIDRS__ } tcp dport 22 ct state new accept
+
+        __APPROVED_MONITORING_RULES__
+    }
+}
+

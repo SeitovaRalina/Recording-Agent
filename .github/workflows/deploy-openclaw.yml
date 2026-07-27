@@ -1,0 +1,142 @@
+name: Deploy Shared OpenClaw Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full reviewed commit SHA containing the shared configuration
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: 217.149.19.21
+  DEPLOY_PORT: "22"
+  STAGE_USER: openclaw-stage
+  DEPLOY_USER: openclaw-deploy
+
+concurrency:
+  group: shared-openclaw-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Validate requested revision
+        id: revision
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          if [[ ! "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Commit must be a full lowercase Git SHA."
+            exit 1
+          fi
+          echo "commit=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out exact reviewed revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.revision.outputs.commit }}
+          persist-credentials: false
+
+      - name: Validate additive multi-agent configuration
+        shell: bash
+        run: |
+          bash deploy/scripts/validate-static.sh
+          jq -e '
+            (.agents.list | length >= 1) and
+            (all(.agents.list[]; (.default // false) == false)) and
+            (all(.bindings[];
+              .agentId != "*" and
+              .match.channel == "mattermost" and
+              .match.accountId != "*" and
+              .agentId == .match.accountId)) and
+            (([.bindings[].agentId] | unique | length) == (.agents.list | length)) and
+            (([.bindings[].match.accountId] | unique | length) == (.agents.list | length))
+          ' deploy/openclaw/openclaw.example.json >/dev/null
+
+      - name: Package secretless shared configuration
+        id: package
+        shell: bash
+        run: |
+          shared_dir="${RUNNER_TEMP}/openclaw-shared"
+          install -d -m 0755 "${shared_dir}"
+          install -m 0644 deploy/openclaw/openclaw.example.json "${shared_dir}/openclaw.json"
+          install -m 0644 deploy/inventory/agents.example.yml "${shared_dir}/agents.yml"
+          config_sha="$(sha256sum "${shared_dir}/openclaw.json" | awk '{print $1}')"
+          inventory_sha="$(sha256sum "${shared_dir}/agents.yml" | awk '{print $1}')"
+          printf 'config_sha=%s\n' "${config_sha}" >> "${GITHUB_OUTPUT}"
+          printf 'inventory_sha=%s\n' "${inventory_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install restricted identities and pinned host key
+        shell: bash
+        env:
+          STAGE_KEY: ${{ secrets.PRODUCTION_STAGE_KEY }}
+          DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
+        run: |
+          if [[ -z "${STAGE_KEY}" || -z "${DEPLOY_KEY}" ]]; then
+            echo "::error::Restricted production staging/deploy keys are required."
+            exit 1
+          fi
+          install -d -m 0700 "${HOME}/.ssh"
+          install -m 0600 /dev/null "${HOME}/.ssh/openclaw-stage"
+          printf '%s\n' "${STAGE_KEY}" > "${HOME}/.ssh/openclaw-stage"
+          install -m 0600 /dev/null "${HOME}/.ssh/openclaw-deploy"
+          printf '%s\n' "${DEPLOY_KEY}" > "${HOME}/.ssh/openclaw-deploy"
+          install -m 0644 deploy/ssh/known_hosts "${HOME}/.ssh/known_hosts"
+
+      - name: Stage shared configuration in chroot
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.revision.outputs.commit }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          if [[ -z "${DEPLOY_HOST}" || -z "${STAGE_USER}" ]]; then
+            echo "::error::Shared staging host/user variables are required."
+            exit 1
+          fi
+          incoming="/shared-incoming/${COMMIT_SHA}"
+          batch="${RUNNER_TEMP}/openclaw-sftp-batch"
+          {
+            printf -- '-mkdir %s\n' "${incoming}"
+            printf 'put %s %s/openclaw.json\n' "${RUNNER_TEMP}/openclaw-shared/openclaw.json" "${incoming}"
+            printf 'put %s %s/agents.yml\n' "${RUNNER_TEMP}/openclaw-shared/agents.yml" "${incoming}"
+          } > "${batch}"
+          sftp \
+            -b "${batch}" \
+            -i "${HOME}/.ssh/openclaw-stage" \
+            -P "${port}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            "${STAGE_USER}@${DEPLOY_HOST}"
+
+      - name: Apply with drift refusal, backup, validation, and route regression
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.revision.outputs.commit }}
+          CONFIG_SHA: ${{ steps.package.outputs.config_sha }}
+          INVENTORY_SHA: ${{ steps.package.outputs.inventory_sha }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          if [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" ]]; then
+            echo "::error::Shared deploy host/user variables are required."
+            exit 1
+          fi
+          ssh \
+            -i "${HOME}/.ssh/openclaw-deploy" \
+            -p "${port}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            sudo -n /usr/local/sbin/openclaw-shared-deploy \
+            "${COMMIT_SHA}" "${CONFIG_SHA}" "${INVENTORY_SHA}"

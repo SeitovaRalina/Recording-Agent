@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings, get_settings
 
-OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"
+OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"  # pragma: allowlist secret
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -25,9 +25,15 @@ class EventAccepted(BaseModel):
 async def verify_openclaw_secret(
     settings: Annotated[Settings, Depends(get_settings)],
     x_openclaw_secret: Annotated[str | None, Header(alias=OPENCLAW_SECRET_HEADER)] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     expected = settings.openclaw_secret.get_secret_value()
-    supplied = x_openclaw_secret or ""
+    bearer = ""
+    if authorization:
+        scheme, _, credential = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            bearer = credential
+    supplied = bearer or x_openclaw_secret or ""
     if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid OpenClaw secret"

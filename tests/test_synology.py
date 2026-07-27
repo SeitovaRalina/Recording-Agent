@@ -6,7 +6,8 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from app.tools.synology import SynologyAPIError, SynologyBackend
+from app.services.storage import StorageCollisionError
+from app.tools.synology import SynologyAPIError, SynologyBackend, SynologyPathError
 
 URL = "https://nas.test/webapi/entry.cgi"
 
@@ -49,12 +50,23 @@ async def test_upload_streams_multipart_and_returns_path() -> None:
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
         with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(return_value=httpx.Response(404, json={"success": False}))
             route = router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
-            path = await backend.upload("/base", "video.webm", chunks(), 10)
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
         request = route.calls.last.request
         assert path == "/base/video.webm"
+        assert len(route.calls) == 2
         assert request.headers["X-SYNO-Token"] == "key"
         assert b'name="path"' in request.content
+        assert b'name="overwrite"' in request.content
+        assert b"false" in request.content
         assert b"video-data" in request.content
 
 
@@ -76,3 +88,181 @@ async def test_create_share_link_and_error_propagation() -> None:
             )
             with pytest.raises(SynologyAPIError):
                 await backend.create_share_link("/base/video.webm")
+
+
+def test_canonical_path_rejects_escape_traversal_and_backslash() -> None:
+    assert SynologyBackend.canonical_under_root("/recruiters/mila", "/recruiters/mila/team") == (
+        "/recruiters/mila/team"
+    )
+    with pytest.raises(SynologyPathError):
+        SynologyBackend.canonical_under_root("/recruiters/mila", "/recruiters/other")
+    with pytest.raises(SynologyPathError):
+        SynologyBackend.canonical_under_root("/recruiters/mila", "/recruiters/mila/../other")
+    with pytest.raises(SynologyPathError):
+        SynologyBackend.canonical_under_root("/recruiters/mila", "/recruiters/mila\\other")
+
+
+@pytest.mark.anyio
+async def test_upload_refuses_existing_destination() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(404),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                        },
+                    ),
+                ]
+            )
+            with pytest.raises(StorageCollisionError, match="overwrite is forbidden"):
+                await backend.upload(
+                    "/base",
+                    "video.webm",
+                    chunks(),
+                    10,
+                    recording_id="recording-2",
+                    content_identity="md5-2",
+                )
+
+
+@pytest.mark.anyio
+async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner() -> None:
+    marker = b'{"content_identity":"md5-1","recording_id":"recording-1","size":10,"v":1}'
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(200, content=marker),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                        },
+                    ),
+                ]
+            )
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
+
+    assert path == "/base/video.webm"
+
+
+@pytest.mark.anyio
+async def test_upload_rejects_existing_destination_owned_by_another_recording() -> None:
+    marker = b'{"content_identity":"md5-1","recording_id":"recording-1","size":10,"v":1}'
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(return_value=httpx.Response(200, content=marker))
+
+            with pytest.raises(StorageCollisionError, match="different ownership"):
+                await backend.upload(
+                    "/base",
+                    "video.webm",
+                    chunks(),
+                    10,
+                    recording_id="recording-2",
+                    content_identity="md5-1",
+                )
+
+
+@pytest.mark.anyio
+async def test_upload_recovers_timeout_after_synology_accepted_exact_owned_file() -> None:
+    marker = b'{"content_identity":"md5-1","recording_id":"recording-1","size":10,"v":1}'
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(200, content=marker),
+                    httpx.Response(404),
+                    httpx.Response(200, content=marker),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                        },
+                    ),
+                ]
+            )
+            router.post(URL).mock(return_value=httpx.Response(504))
+
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
+
+    assert path == "/base/video.webm"
+
+
+@pytest.mark.anyio
+async def test_folder_discovery_is_paginated_bounded_and_omits_symlinks() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "total": 2,
+                                "files": [
+                                    {
+                                        "path": "/root/real",
+                                        "name": "real",
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/root/real",
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    ),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "total": 2,
+                                "files": [
+                                    {
+                                        "path": "/root/link",
+                                        "name": "link",
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/elsewhere",
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    ),
+                ]
+            )
+            folders = await backend.discover_folders(
+                "/root", max_depth=0, max_pages=2, max_results=10, page_size=1
+            )
+
+    assert [folder.path for folder in folders] == ["/root/real"]
+    assert len(route.calls) == 2

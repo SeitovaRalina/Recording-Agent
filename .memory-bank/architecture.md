@@ -1,5 +1,8 @@
 # Architecture
 
+For unfinished Recording Agent work, `swarm-report/recording-agent-mila-completion-plan.md` is the
+implementation authority. The earlier Phase 4 plan remains historical input.
+
 ## Component diagram
 
 ```
@@ -23,7 +26,7 @@
 │    candidate.py    Notion card search + disambiguation   │
 │    transfer.py     streaming Disk → Synology             │
 │    status.py       PostgreSQL state machine ops          │
-│    openclaw.py     push events → OpenClaw Agent          │
+│    pipeline.py     deterministic scan/review execution   │
 └───┬────────┬────────┬────────┬────────┬──────────────────┘
     │        │        │        │        │
   Яндекс  Яндекс  Notion  Synology  Mattermost
@@ -32,7 +35,7 @@
   PostgreSQL                         OpenClaw
   (recording states + metadata)   Recording Agent
          ↑                              │
-         └──── event push (Backend) ────┘
+         └──── narrow loopback intents ─┘
                                         │
                                    tool calls
                                    back to Backend
@@ -40,8 +43,57 @@
 
 **Key principle:**
 - Backend = scheduler + executor. Scans Disk, owns PostgreSQL, runs all integrations.
-- OpenClaw = reasoning agent. Wakes only when Backend pushes an event (new recording / manual review). Forms decision or recruiter message. Calls Backend tools as needed.
-- OpenClaw is always running. Backend does NOT start OpenClaw — it sends events to the already-running process.
+- OpenClaw = recruiter interaction layer. Mila maps free-form Mattermost requests to narrow
+  Backend intents and presents manual-review choices; it never owns scheduling or integration
+  side effects.
+- Deterministic matches complete entirely in Backend without an LLM call. Mila is invoked only
+  for explicit recruiter interaction, bounded status reporting, or ambiguous review dialogue.
+
+## Phase 4 Mila canary boundary
+
+- Mila is the first OpenClaw canary; Sylvanas remains unchanged.
+- The version-controlled workspace skill calls authenticated FastAPI intents over loopback. It
+  contains no integration credentials and exposes no raw transfer, Notion, mark-processed, delete,
+  or purge primitive.
+- PostgreSQL is the durable source of truth for review correlation, expected versions, one-time
+  token consumption, idempotency replay, scheduler ownership, and notification state.
+- Canary storage is isolated MinIO and the selected Notion database is `Test Interviews`.
+  Production Notion databases, Synology, Yandex source mutation, cleanup, and purge are disabled.
+- Mattermost interaction is DM-only to the configured recruiter; no shared-channel fallback is
+  allowed.
+
+## Target conversation amendment (confirmed 2026-07-22; not yet implemented)
+
+- Use Mila's ordinary recruiter DM without mandatory Mattermost threads.
+- After a scheduled scan, send one complete summary and numbered actionable questions for all
+  unresolved recordings.
+- Recruiters may answer all questions or any subset in free form. Mila confirms the interpreted
+  actions, reports processing start, and later reports completion/error.
+- Backend/PostgreSQL owns the durable question queue, partial-answer progress, versions, one-time
+  capabilities, TTL, idempotency, notification deduplication, and unanswered reminders. Mila's
+  chat memory is not workflow state.
+- Unrelated requests to Mila must continue normally and must not consume a pending recording
+  question. Ambiguous answer-to-question mapping requires clarification.
+- Send the consolidated summary at 18:00 in the recruiter's configured local timezone. An
+  unanswered question is repeated once in the next eligible summary and then suppressed from
+  later automatic summaries unless explicitly reopened. Accepted work receives immediate
+  start/result feedback.
+- `General Interview Date` is no longer a candidate-lookup prerequisite. Candidate lookup is by
+  name. Email is an optional supporting signal extracted from the mixed contacts returned by the
+  Notion `TBD` formula; Calendar attendee mismatch never rejects a name match. After a match,
+  Backend writes the matched calendar event date and final storage link to Notion.
+- Project/spot property is configured by both name and expected type. Test and production use
+  the exact Notion API property `📍 Spots/relation` after their own schema preflights. One
+  relation resolves the related page title, zero uses `unspecified`, and multiple relations
+  create a structured recruiter choice. Every bounded Spot title/URL is shown, API order never
+  chooses one, and the explicit selection is persisted before filename/key generation.
+- A non-interview may be routed to a confirmed Synology destination and completed without a
+  Notion candidate update. This is distinct from `ignored`. The recruiter may request a new folder,
+  but Backend creates it only under the configured recruiter storage root after canonical-path and
+  permission validation.
+- Yandex source cleanup is manual-only: preview, explicit confirmation, and Trash move only for
+  Backend-proven successfully processed files. There is no minimum age after successful
+  processing. No scheduled cleanup or Mila-accessible permanent purge.
 
 ## Data flow — happy path
 
@@ -59,61 +111,67 @@ TRIGGER (Backend APScheduler — 1×/day OR /recordings check via Mattermost)
 │   ├─ calendar.find_events(date, owner) → complete all-calendar snapshot for the window
 │   ├─ matching.compatible(recording, events) → exact filename title + local start-time gate
 │   ├─ matching.score(unique eligible event) → confidence, only after collision checks
-│   └─ notion.search_cards(candidate_name, date, recruiter) → cards[]
+│   └─ notion.search_cards(candidate_name, optional_parsed_contacts_email, recruiter) → cards[]
 │
 ├─ Case A: unique eligible compatible event, no outside collision,
 │  confidence >= threshold, AND len(cards) == 1
-│   └─ Backend pushes event to OpenClaw:
-│       {"type": "recording_ready", "recording": ..., "event": ..., "card": ...}
-│       → OpenClaw verifies, calls Backend tool: confirm_and_transfer()
-│       → HAPPY PATH below
+│   └─ Backend executes HAPPY PATH directly; no LLM call
 │
 └─ Case B: ambiguous (low confidence OR multiple cards OR no calendar event)
-    └─ Backend pushes event to OpenClaw:
-        {"type": "manual_review_required", "recording": ..., "candidates": [...]}
-        → OpenClaw composes recruiter message in Mattermost
-        → db.set_status("manual_review_required")
-        → awaits recruiter reply
-        → recruiter replies → Mattermost webhook → Backend → push event to OpenClaw
-        → OpenClaw parses reply (NLU) → calls confirm_and_transfer()
-        → HAPPY PATH below
+    └─ Backend persists a versioned manual review and sends a recruiter-only DM summary
+        → Mila presents numbered bounded questions and accepts partial free-form answers;
+          duplicate Notion titles retain page URLs and distinguishing fields, at minimum 📍 Spots
+        → skill CLI submits one or more narrow actions with review token,
+          expected version, DM binding, and idempotency key
+        → Backend consumes the token once and executes HAPPY PATH or marks ignored
 
-HAPPY PATH (Backend executes on OpenClaw tool call):
+HAPPY PATH (Backend executes from scheduler or a validated review resolution):
     db.set_status("transfer_started")
     transfer.stream(disk_download_url → synology_path)   # chunk-by-chunk
     db.set_status("uploaded_to_synology")
     synology.create_share_link(path) → url
     db.set_status("synology_link_created")
-    notion.update_card(card_id, field="General Interview recording", value=url)
+    notion.update_card(card_id, fields={
+        "General Interview Date": matched_calendar_event_date,
+        "General Interview recording": url,
+    })
     db.set_status("notion_updated")
     disk.mark_processed(file_id)  # PATCH processed=true + processed_at=<UTC ISO 8601>
     db.set_status("source_marked_processed")
-    → Backend notifies OpenClaw → OpenClaw sends recruiter confirmation
+    → Backend persists notification state and sends a completion/error recruiter DM
 
-DAILY RETENTION CRON (soft delete only; separate from the happy path):
-    disk.delete_expired() selects files with processed=true and processed_at >= 7 days old
-    missing/invalid processed_at is repaired to now UTC; source is not deleted in that run
-    DELETE /disk/resources moves each eligible source to Trash
-
-SEPARATE PERMANENT PURGE (never scheduled):
-    operator gives fresh per-run PermanentDeleteApproval(approved_by, approved_at, nonce)
-    identity/unique nonce must be non-empty; timestamp must be aware and <=5 minutes old
-    validate with trusted injected UTC clock; caller cannot provide now
-    consume nonce before any request; approval cannot be reused after success/failure
-    disk.purge_expired_from_trash() enumerates current Trash resources
-    validate origin_path, processed markers, and >=7-day age
-    DELETE /disk/trash/resources uses each actual trash:/... path
-    db.set_status("source_deleted") after both deletion stages succeed
-    db.set_status("completed")
+MANUAL SOURCE CLEANUP (never scheduled):
+    recruiter requests cleanup of successfully processed recordings
+    Backend returns a bounded preview of DB-proven eligible source files
+    recruiter explicitly confirms the preview
+    DELETE /disk/resources moves only those sources to Trash
+    Backend records an idempotent per-file result
+    permanent Trash purge is not exposed to Mila
 ```
 
-The source file remains in its original folder during the seven-day retention window. The
-scanner skips it by reading its custom properties. The cron job cannot permanently delete.
-Permanent deletion is destructive and must never run without the explicit approval required by
-`AGENTS.md`; approval is valid only for one invocation and cannot be stored in configuration.
-If a purge partially fails, a later run requires newly issued approval with a new nonce and
-resumes by enumerating the
-remaining real Trash resources rather than reconstructing paths from their original locations.
+The manual message-triggered scan is a first-class flow and remains available while the scheduler
+is disabled. It uses the same Backend scan, idempotency, and status paths as a scheduled run.
+
+Calendar refresh is a mandatory precondition for both manual and scheduled scans, not a periodic
+best-effort job. Before Disk listing, Backend discovers and parses a complete, non-empty CalDAV
+collection set in memory. Every selected calendar must remain available; when none are selected,
+exactly one available explicit default is required. Only a fully validated set atomically updates
+calendar availability and `last_seen_at`.
+
+A failed HTTP/auth/XML request, empty or incomplete discovery, unavailable selected calendar, or
+invalid default selection preserves the previous calendar snapshot and aborts that recruiter's
+scan before Disk listing or any recording, transfer, review, or notification mutation. The manual
+result contains one sanitized, bounded, retryable `calendar_discovery` scan-level error; scheduled
+failure isolation allows other recruiters to continue. Existing recordings remain unchanged and
+retryable. Same-recruiter scans are serialized in-process in the current single Backend instance;
+multi-instance deployment requires a distributed lock.
+
+The current code still contains the older `processed=true` plus seven-day scheduled cleanup model,
+but that behavior is superseded for the target workflow and remains disabled. The Telemost folder
+is reported to expire automatically after 90 days without consuming normal cloud quota. Exact
+manual-cleanup eligibility begins immediately after Backend-proven success, but preview and
+explicit confirmation remain mandatory. Permanent deletion remains destructive, unscheduled, and
+unavailable to Mila.
 
 ## Interview detection logic
 
@@ -158,7 +216,9 @@ snapshots; manual review stores bounded candidate diagnostics without raw ICS or
 | ATTENDEE email matches Notion card email | LOW = 0.05 | **STUBBED Phase 2** — always 0; resolved Phase 3 |
 
 If total confidence < threshold → status `manual_review_required`, not `ignored`.
-Only explicit recruiter "ignore" command → status `ignored`.
+Only an explicit recruiter decision may end review. `ignored` means no transfer. A separately
+confirmed non-interview route transfers to an allowed Synology destination, returns a link, and
+completes without a Notion candidate update.
 
 ## File transfer
 
@@ -179,20 +239,26 @@ Temp file TTL guard: background task deletes any `/tmp/recording-agent/*` older 
 
 ## Mattermost interaction
 
-Commands (Bot receives in channel or DM):
+Example intents in the ordinary recruiter DM:
 ```
-/recordings check         → trigger manual scan now
-/recordings pending       → list recordings in manual_review_required
-/recordings status        → summary of all statuses
-/recordings retry <id>    → re-process a failed recording
+"check new recordings"                 → trigger manual scan now
+"show today's recording statuses"      → bounded status summary
+"for Ivan choose the second card"      → answer one pending question
+"save the team meeting in folder X"    → route a non-interview after safe destination resolution
+"clean successfully processed files"  → preview a manual cleanup; never delete immediately
 ```
 
 Disambiguation flow:
 ```
-Bot → recruiter: "Found recording X. Multiple cards match: [1] … [2] … Reply with number, Notion URL, or 'ignore'."
-Recruiter → Bot: "2" | "прикрепи к Project A" | "https://notion.so/..." | "ignore"
-Bot parses free text via OpenClaw NLU → resumes processing
+Mila → recruiter: one summary + numbered questions for every unresolved recording
+Recruiter → Mila: answers all questions or a subset in ordinary free-form text
+Mila → recruiter: confirms the interpreted subset and reports processing start
+Backend → PostgreSQL: closes answered questions and leaves unanswered questions pending
+Mila → recruiter: reports completion/error and later repeats only unanswered questions
 ```
+
+Only the next eligible summary repeats an unanswered question. After that one reminder, Backend
+keeps it durable but suppresses it from further automatic summaries until explicit reopening.
 
 ## Deployment
 
@@ -204,6 +270,19 @@ Bot parses free text via OpenClaw NLU → resumes processing
 - **Secrets:** Yandex Lockbox (production) / `.env` file (development)
 - **Scheduler:** APScheduler inside Backend Tools Service (not OpenClaw)
 
+### Mila deployment gates (confirmed 2026-07-22)
+
+- Mila currently has no Docker, Docker Compose, Podman, or Nerdctl. Installing Docker/Compose,
+  starting/enabling its services, and creating the isolated test stack are remote mutations that
+  require an exact manifest and explicit approval.
+- Installing the repository skill into
+  `/root/.openclaw/workspace/skills/recording-agent/` is allowed only after that manifest approval;
+  it initially calls a loopback test Backend.
+- Mila agent invocation, the first real allowlisted Mattermost DM, the one actual scheduled 18:00
+  test, and any production Notion/Yandex/Synology scope each require separate approvals.
+- OpenClaw, its loopback Gateway bind, Sylvanas, and existing Mila skills/connections are not
+  changed. Rollback preserves named volumes; `docker compose down -v` is forbidden.
+
 ## Test environment
 
 Separate credentials + isolated data for every integration:
@@ -211,4 +290,4 @@ Separate credentials + isolated data for every integration:
 - Яндекс.Календарь: test calendar
 - Notion: copied test database (same schema, dummy data)
 - Synology: `/test-recordings/` folder
-- Mattermost: `#recordings-test` channel or separate bot
+- Mattermost: allowlisted test recruiter DM only; no shared-channel fallback

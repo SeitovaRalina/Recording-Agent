@@ -16,6 +16,7 @@ from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.storage import StorageBackend, StreamingUnsupportedError
 from app.tools.disk import DISK_API_BASE, DiskScanner
+from app.tools.synology import SynologyBackend
 
 TEMP_ROOT = Path("/tmp/recording-agent")
 TEMP_TTL = timedelta(hours=4)
@@ -32,6 +33,7 @@ class TransferError(RuntimeError):
 class TransferResult:
     folder_path: str
     file_path: str
+    storage_is_durable: bool = False
 
 
 class TransferService:
@@ -53,13 +55,27 @@ class TransferService:
         session: AsyncSession,
     ) -> TransferResult:
         del session
-        if recording.calendar_dtstart is None:
-            raise TransferError("destination", ValueError("calendar start is missing"))
-        safe_name = re.sub(r'[/\\:*?"<>|]', "_", candidate_name)
-        folder = (
-            f"{recruiter.synology_base_folder.rstrip('/')}/"
-            f"{recording.calendar_dtstart:%Y-%m-%d}/{safe_name}"
-        )
+        if recording.storage_key and recording.generated_filename:
+            folder, _, filename = recording.storage_key.rpartition("/")
+            if not folder or filename != recording.generated_filename:
+                raise TransferError("destination", ValueError("persisted storage key is invalid"))
+            if isinstance(self._storage, SynologyBackend):
+                try:
+                    folder = SynologyBackend.canonical_under_root(
+                        recruiter.synology_base_folder,
+                        f"{recruiter.synology_base_folder.rstrip('/')}/{folder}",
+                    )
+                except ValueError as error:
+                    raise TransferError("destination", error) from error
+        else:
+            if recording.calendar_dtstart is None:
+                raise TransferError("destination", ValueError("calendar start is missing"))
+            safe_name = re.sub(r'[/\\:*?"<>|]', "_", candidate_name)
+            folder = (
+                f"{recruiter.synology_base_folder.rstrip('/')}/"
+                f"{recording.calendar_dtstart:%Y-%m-%d}/{safe_name}"
+            )
+            filename = recording.disk_filename
         try:
             await self._storage.ensure_folder(folder)
         except Exception as error:
@@ -77,15 +93,21 @@ class TransferService:
         except Exception as error:
             raise TransferError("download", error) from error
         try:
-            path = await self._stream_upload(href, folder, recording.disk_filename)
+            path = await self._stream_upload(href, folder, filename, recording)
         except StreamingUnsupportedError:
             try:
-                path = await self._temp_upload(href, folder, recording.disk_filename)
+                path = await self._temp_upload(href, folder, filename, recording)
             except Exception as error:
                 raise TransferError("upload", error) from error
         except Exception as error:
             raise TransferError("upload", error) from error
-        return TransferResult(folder_path=folder, file_path=path)
+        return TransferResult(
+            folder_path=folder,
+            file_path=path,
+            storage_is_durable=(
+                getattr(self._storage, "durable_for_source_cleanup", False) is True
+            ),
+        )
 
     async def create_share_link(self, path: str) -> str:
         try:
@@ -93,16 +115,27 @@ class TransferService:
         except Exception as error:
             raise TransferError("share_link", error) from error
 
-    async def _stream_upload(self, href: str, folder: str, filename: str) -> str:
+    async def _stream_upload(
+        self, href: str, folder: str, filename: str, recording: Recording
+    ) -> str:
         async with self._client.stream("GET", href, follow_redirects=True) as response:
             response.raise_for_status()
             size_value = response.headers.get("Content-Length")
             size = int(size_value) if size_value and int(size_value) > 0 else None
             return await self._storage.upload(
-                folder, filename, response.aiter_bytes(1024 * 1024), size
+                folder,
+                filename,
+                response.aiter_bytes(1024 * 1024),
+                size,
+                recording_id=str(recording.id),
+                content_identity=recording.content_identity
+                or recording.disk_md5
+                or recording.disk_file_id,
             )
 
-    async def _temp_upload(self, href: str, folder: str, filename: str) -> str:
+    async def _temp_upload(
+        self, href: str, folder: str, filename: str, recording: Recording
+    ) -> str:
         temp_dir = TEMP_ROOT / str(uuid.uuid4())
         temp_path = temp_dir / filename
         await anyio.to_thread.run_sync(temp_dir.mkdir, 0o700, True, True)
@@ -113,7 +146,16 @@ class TransferService:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         await target.write(chunk)
             size = (await anyio.to_thread.run_sync(temp_path.stat)).st_size
-            return await self._storage.upload(folder, filename, _file_chunks(temp_path), size)
+            return await self._storage.upload(
+                folder,
+                filename,
+                _file_chunks(temp_path),
+                size,
+                recording_id=str(recording.id),
+                content_identity=recording.content_identity
+                or recording.disk_md5
+                or recording.disk_file_id,
+            )
         finally:
             await anyio.to_thread.run_sync(shutil.rmtree, temp_dir, True)
 

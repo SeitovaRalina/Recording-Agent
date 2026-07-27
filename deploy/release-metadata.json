@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "targetAlembicRevision": "b9b12bbd4cb0",
+  "previousApplicationCompatibleWithTargetSchema": false,
+  "migrationStrategy": "forward-only",
+  "failurePolicy": "stop-writes-forward-fix",
+  "reviewPolicy": "code-owner-and-production-environment-approver",
+  "rationale": "The existing migration chain has not been reviewed as expand-contract compatible with the previous application release."
+}

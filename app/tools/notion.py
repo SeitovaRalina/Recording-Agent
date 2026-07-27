@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -16,7 +17,15 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2026-03-11"
 DEFAULT_RECORDING_PROP = "General Interview recording"
 DEFAULT_CACHE_SIZE = 128
+MAX_SPOT_CHOICES = 10
 _TRACE_BODY_LIMIT = 500
+_EMAIL_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
+    r"([A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)"
+    r"(?![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
+)
 
 
 class NotionAPIError(RuntimeError):
@@ -68,12 +77,22 @@ class NotionUpdateError(NotionAPIError):
 
 
 @dataclass(frozen=True)
+class NotionRelationChoice:
+    id: str
+    title: str
+    url: str
+
+
+@dataclass(frozen=True)
 class NotionPage:
     id: str
     url: str
     title: str
     date_str: str | None
     email: str | None = None
+    project_or_spot: str | None = "unspecified"
+    emails: tuple[str, ...] = ()
+    spots: tuple[NotionRelationChoice, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,15 +105,38 @@ class NotionDataSourceSchema:
     id: str
     property_types: dict[str, str]
 
-    def is_compatible(self, name_prop: str, date_prop: str, recording_prop: str) -> bool:
+    def is_compatible(
+        self,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        contacts_prop: str,
+        project_prop: str = "",
+        project_prop_type: str = "",
+    ) -> bool:
         return (
             self.property_types.get(name_prop) == "title"
             and self.property_types.get(date_prop) == "date"
             and self.property_types.get(recording_prop) == "files"
+            and self.property_types.get(contacts_prop) == "formula"
+            and (
+                not project_prop
+                or (
+                    project_prop_type == "relation"
+                    and self.property_types.get(project_prop) == "relation"
+                )
+            )
         )
 
 
-SourceCacheKey = tuple[str, str, str, str]
+@dataclass(frozen=True)
+class NotionDatabaseInspection:
+    database_id: str
+    title: str
+    schema: NotionDataSourceSchema
+
+
+SourceCacheKey = tuple[str, str, str, str, str, str, str]
 
 
 class NotionClient:
@@ -128,12 +170,24 @@ class NotionClient:
         self,
         database_id: str,
         candidate_name: str,
-        event_date: date,
+        event_date: date | None,
         name_prop: str,
         date_prop: str,
         recording_prop: str = DEFAULT_RECORDING_PROP,
+        project_prop: str = "",
+        project_prop_type: str = "",
+        contacts_prop: str = "TBD",
     ) -> list[NotionPage]:
-        key = (database_id, name_prop, date_prop, recording_prop)
+        del event_date
+        key = (
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            contacts_prop,
+            project_prop,
+            project_prop_type,
+        )
         source_id, was_cached = await self._resolve_source(key)
         self._trace(
             "notion.query.start",
@@ -141,26 +195,41 @@ class NotionClient:
             data_source_id=source_id,
             source_cache_hit=was_cached,
             candidate_name=candidate_name,
-            event_date=event_date,
             name_property=name_prop,
             date_property=date_prop,
             recording_property=recording_prop,
         )
-        response = await self._query_source(
-            source_id, candidate_name, event_date, name_prop, date_prop
-        )
+        response = await self._query_source(source_id, candidate_name, name_prop)
         if response.status_code == 404 and was_cached:
             self._invalidate(key, source_id)
             source_id, _ = await self._resolve_source(key)
-            response = await self._query_source(
-                source_id, candidate_name, event_date, name_prop, date_prop
-            )
+            response = await self._query_source(source_id, candidate_name, name_prop)
         self._raise_query_error(response)
         payload = self._json_object(response, "query")
         results = payload.get("results")
         if not isinstance(results, list):
             raise NotionMalformedResponseError("Notion query response has invalid results")
-        pages = [self._parse_page(item, name_prop, date_prop) for item in results[:10]]
+        pages: list[NotionPage] = []
+        relation_cache: dict[str, NotionRelationChoice] = {}
+        for item in results[:10]:
+            page = self._parse_page(item, name_prop, date_prop, contacts_prop, project_prop)
+            relation_ids = self._project_relation_ids(item, project_prop)
+            relations: list[NotionRelationChoice] = []
+            for relation_id in relation_ids:
+                relation = relation_cache.get(relation_id)
+                if relation is None:
+                    relation = await self._retrieve_related_page(relation_id)
+                    relation_cache[relation_id] = relation
+                relations.append(relation)
+            if len(relations) == 1:
+                page = replace(
+                    page,
+                    project_or_spot=relations[0].title,
+                    spots=tuple(relations),
+                )
+            elif len(relations) > 1:
+                page = replace(page, project_or_spot=None, spots=tuple(relations))
+            pages.append(page)
         self._trace(
             "notion.query.result",
             database_id=database_id,
@@ -170,11 +239,21 @@ class NotionClient:
         )
         return pages
 
-    async def update_page_file(self, page_id: str, prop_name: str, url: str, filename: str) -> None:
+    async def update_page_interview(
+        self,
+        page_id: str,
+        *,
+        date_prop: str,
+        recording_prop: str,
+        event_date: date,
+        url: str,
+        filename: str,
+    ) -> None:
         self._trace(
             "notion.page_update.start",
             page_id=page_id,
-            property=prop_name,
+            date_property=date_prop,
+            recording_property=recording_prop,
             filename=filename,
             external_url=safe_url(url),
         )
@@ -184,14 +263,15 @@ class NotionClient:
                 headers=self._headers,
                 json={
                     "properties": {
-                        prop_name: {
+                        date_prop: {"date": {"start": event_date.isoformat()}},
+                        recording_prop: {
                             "files": [
                                 {
                                     "name": filename,
                                     "external": {"url": url},
                                 }
                             ]
-                        }
+                        },
                     }
                 },
             )
@@ -199,7 +279,8 @@ class NotionClient:
             self._trace(
                 "notion.page_update.failure",
                 page_id=page_id,
-                property=prop_name,
+                date_property=date_prop,
+                recording_property=recording_prop,
                 error_type="transport",
             )
             raise NotionUpdateError("Notion page update transport failed") from None
@@ -208,12 +289,18 @@ class NotionClient:
             self._trace(
                 "notion.page_update.failure",
                 page_id=page_id,
-                property=prop_name,
+                date_property=date_prop,
+                recording_property=recording_prop,
                 status_code=response.status_code,
                 response_body=_response_excerpt(response.text),
             )
             raise NotionUpdateError(f"Notion page update failed with HTTP {response.status_code}")
-        self._trace("notion.page_update.success", page_id=page_id, property=prop_name)
+        self._trace(
+            "notion.page_update.success",
+            page_id=page_id,
+            date_property=date_prop,
+            recording_property=recording_prop,
+        )
 
     async def _resolve_source(self, key: SourceCacheKey) -> tuple[str, bool]:
         cached = self._cache_get(key)
@@ -248,7 +335,110 @@ class NotionClient:
                         del self._inflight[key]
 
     async def _discover_source(self, key: SourceCacheKey) -> str:
-        database_id, name_prop, date_prop, recording_prop = key
+        (
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            contacts_prop,
+            project_prop,
+            project_prop_type,
+        ) = key
+        database = await self._retrieve_database(database_id)
+        selected = await self._select_compatible_schema(
+            database,
+            name_prop,
+            date_prop,
+            recording_prop,
+            contacts_prop,
+            project_prop,
+            project_prop_type,
+        )
+        self._trace_source_selection(database_id, database, selected.id)
+        return selected.id
+
+    async def inspect_database(
+        self,
+        database_id: str,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str = "",
+        project_prop_type: str = "",
+        contacts_prop: str = "TBD",
+    ) -> NotionDatabaseInspection:
+        database = await self._retrieve_database(database_id)
+        selected = await self._select_compatible_schema(
+            database,
+            name_prop,
+            date_prop,
+            recording_prop,
+            contacts_prop,
+            project_prop,
+            project_prop_type,
+        )
+        self._trace_source_selection(database_id, database, selected.id)
+        return NotionDatabaseInspection(
+            database_id=database_id,
+            title=self._database_title(database),
+            schema=selected,
+        )
+
+    async def preflight_database(
+        self,
+        database_id: str,
+        synthetic_page_id: str,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        project_prop: str = "",
+        project_prop_type: str = "",
+        contacts_prop: str = "TBD",
+    ) -> NotionDatabaseInspection:
+        inspection = await self.inspect_database(
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            project_prop,
+            project_prop_type,
+            contacts_prop,
+        )
+        try:
+            response = await self._client.post(
+                f"{NOTION_API_BASE}/data_sources/{inspection.schema.id}/query",
+                headers=self._headers,
+                json={"page_size": 100},
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion synthetic-row query transport failed") from None
+        self._raise_query_error(response)
+        payload = self._json_object(response, "synthetic-row query")
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise NotionMalformedResponseError("Notion synthetic-row query has invalid results")
+        expected = synthetic_page_id.replace("-", "").casefold()
+        selected = next(
+            (
+                item
+                for item in results
+                if isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item["id"].replace("-", "").casefold() == expected
+            ),
+            None,
+        )
+        if selected is None:
+            raise NotionQueryError("Selected synthetic Notion row was not returned by query")
+        properties = selected.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError(
+                "Selected synthetic Notion row has malformed properties"
+            )
+        self._formula_emails(properties.get(contacts_prop))
+        return inspection
+
+    async def _retrieve_database(self, database_id: str) -> dict[str, Any]:
         try:
             response = await self._client.get(
                 f"{NOTION_API_BASE}/databases/{database_id}", headers=self._headers
@@ -264,28 +454,49 @@ class NotionClient:
             raise NotionAPIError(
                 f"Notion database discovery failed with HTTP {response.status_code}"
             )
-        database = self._json_object(response, "database discovery")
+        return self._json_object(response, "database discovery")
+
+    async def _select_compatible_schema(
+        self,
+        database: dict[str, Any],
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        contacts_prop: str,
+        project_prop: str,
+        project_prop_type: str,
+    ) -> NotionDataSourceSchema:
         sources = self._parse_sources(database)
-        compatible: list[str] = []
+        compatible: list[NotionDataSourceSchema] = []
         for source in sources:
             schema = await self._retrieve_schema(source.id)
-            if schema.is_compatible(name_prop, date_prop, recording_prop):
-                compatible.append(schema.id)
+            if schema.is_compatible(
+                name_prop,
+                date_prop,
+                recording_prop,
+                contacts_prop,
+                project_prop,
+                project_prop_type,
+            ):
+                compatible.append(schema)
         if not compatible:
             raise NotionSchemaError("No Notion data source has the required schema")
         if len(compatible) > 1:
             raise NotionSourceAmbiguityError(
                 "Multiple Notion data sources have the required schema"
             )
-        selected = compatible[0]
+        return compatible[0]
+
+    def _trace_source_selection(
+        self, database_id: str, database: dict[str, Any], source_id: str
+    ) -> None:
         self._trace(
             "notion.source_selected",
             database_id=database_id,
-            discovered_source_count=len(sources),
-            compatible_source_count=len(compatible),
-            data_source_id=selected,
+            discovered_source_count=len(self._parse_sources(database)),
+            compatible_source_count=1,
+            data_source_id=source_id,
         )
-        return selected
 
     async def _retrieve_schema(self, source_id: str) -> NotionDataSourceSchema:
         try:
@@ -319,25 +530,49 @@ class NotionClient:
                 property_types[name] = prop_type
         return NotionDataSourceSchema(id=payload_id, property_types=property_types)
 
+    async def _retrieve_related_page(self, page_id: str) -> NotionRelationChoice:
+        try:
+            response = await self._client.get(
+                f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion related page retrieval failed") from None
+        self._raise_common(response)
+        if response.is_error:
+            raise NotionQueryError(
+                f"Notion related page retrieval failed with HTTP {response.status_code}"
+            )
+        payload = self._json_object(response, "related page retrieval")
+        properties = payload.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError("Notion related page properties are malformed")
+        title = next(
+            (
+                self._plain_text(value).strip()
+                for value in properties.values()
+                if isinstance(value, dict) and isinstance(value.get("title"), list)
+            ),
+            "",
+        )
+        if not title:
+            raise NotionMalformedResponseError("Notion related page has no title")
+        page_url = payload.get("url")
+        if not isinstance(page_url, str) or not page_url:
+            raise NotionMalformedResponseError("Notion related page has no URL")
+        return NotionRelationChoice(id=page_id, title=title, url=page_url)
+
     async def _query_source(
         self,
         source_id: str,
         candidate_name: str,
-        event_date: date,
         name_prop: str,
-        date_prop: str,
     ) -> httpx.Response:
         try:
             return await self._client.post(
                 f"{NOTION_API_BASE}/data_sources/{source_id}/query",
                 headers=self._headers,
                 json={
-                    "filter": {
-                        "and": [
-                            {"property": name_prop, "title": {"contains": candidate_name}},
-                            {"property": date_prop, "date": {"equals": event_date.isoformat()}},
-                        ]
-                    },
+                    "filter": {"property": name_prop, "title": {"contains": candidate_name}},
                     "page_size": 10,
                 },
             )
@@ -355,6 +590,18 @@ class NotionClient:
                 raise NotionMalformedResponseError("Notion data-source descriptor is malformed")
             sources.append(NotionDataSource(id=item["id"]))
         return sources
+
+    @staticmethod
+    def _database_title(payload: dict[str, Any]) -> str:
+        entries = payload.get("title")
+        if not isinstance(entries, list):
+            raise NotionMalformedResponseError("Notion database response has invalid title")
+        title = "".join(
+            str(entry.get("plain_text", "")) for entry in entries if isinstance(entry, dict)
+        ).strip()
+        if not title:
+            raise NotionMalformedResponseError("Notion database response has empty title")
+        return title
 
     @classmethod
     def _json_object(cls, response: httpx.Response, operation: str) -> dict[str, Any]:
@@ -404,7 +651,13 @@ class NotionClient:
             trace(self._settings, event, **fields)
 
     @staticmethod
-    def _parse_page(item: Any, name_prop: str, date_prop: str) -> NotionPage:
+    def _parse_page(
+        item: Any,
+        name_prop: str,
+        date_prop: str,
+        contacts_prop: str,
+        project_prop: str = "",
+    ) -> NotionPage:
         if not isinstance(item, dict):
             raise NotionMalformedResponseError("Notion page payload must be an object")
         page_id = item.get("id")
@@ -414,21 +667,74 @@ class NotionClient:
             raise NotionMalformedResponseError("Notion page identity is malformed")
         if not isinstance(properties, dict):
             raise NotionMalformedResponseError("Notion page properties are malformed")
-        email = next(
-            (
-                str(value["email"])
-                for value in properties.values()
-                if isinstance(value, dict) and isinstance(value.get("email"), str)
-            ),
-            None,
-        )
+        emails = NotionClient._formula_emails(properties.get(contacts_prop))
         return NotionPage(
             id=page_id,
             url=page_url,
             title=NotionClient._plain_text(properties.get(name_prop)),
             date_str=NotionClient._date_value(properties.get(date_prop)),
-            email=email,
+            email=emails[0] if len(emails) == 1 else None,
+            emails=emails,
+            project_or_spot=(
+                NotionClient._plain_text(properties.get(project_prop)) if project_prop else None
+            ),
         )
+
+    @staticmethod
+    def _project_relation_ids(item: Any, project_prop: str) -> list[str]:
+        if not project_prop or not isinstance(item, dict):
+            return []
+        properties = item.get("properties")
+        if not isinstance(properties, dict):
+            return []
+        value = properties.get(project_prop)
+        if not isinstance(value, dict) or "relation" not in value:
+            return []
+        relations = value.get("relation")
+        if not isinstance(relations, list):
+            raise NotionMalformedResponseError("Notion project relation is malformed")
+        if value.get("has_more") is True:
+            raise NotionMalformedResponseError("Notion project relation is incomplete")
+        if len(relations) > MAX_SPOT_CHOICES:
+            raise NotionMalformedResponseError("Notion project relation exceeds bounded choices")
+        relation_ids: list[str] = []
+        for relation in relations:
+            if (
+                not isinstance(relation, dict)
+                or not isinstance(relation.get("id"), str)
+                or not relation["id"]
+            ):
+                raise NotionMalformedResponseError("Notion project relation is malformed")
+            relation_ids.append(relation["id"])
+        return relation_ids
+
+    @staticmethod
+    def _formula_emails(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, dict) or value.get("type") != "formula":
+            raise NotionMalformedResponseError("Notion contacts formula is malformed")
+        formula = value.get("formula")
+        if not isinstance(formula, dict) or formula.get("type") != "string":
+            raise NotionMalformedResponseError("Notion contacts formula shape is unsupported")
+        rendered = formula.get("string")
+        if rendered is None:
+            return ()
+        if not isinstance(rendered, str):
+            raise NotionMalformedResponseError("Notion contacts formula string is malformed")
+        emails: list[str] = []
+        for candidate in _EMAIL_CANDIDATE.findall(rendered):
+            local, domain = candidate.rsplit("@", 1)
+            if (
+                len(candidate) > 254
+                or len(local) > 64
+                or local.startswith(".")
+                or local.endswith(".")
+                or ".." in local
+            ):
+                continue
+            normalized = f"{local}@{domain}".casefold()
+            if normalized not in emails:
+                emails.append(normalized)
+        return tuple(emails)
 
     @staticmethod
     def _plain_text(value: Any) -> str:
