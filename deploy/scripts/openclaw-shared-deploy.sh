@@ -125,20 +125,28 @@ fi
 [[ -f $GATEWAY_ENV && ! -L $GATEWAY_ENV &&
   $(stat -c '%a:%U:%G' "$GATEWAY_ENV") == 600:root:root ]] ||
   die "Gateway environment must be root-owned mode 0600"
+gateway_token=$(sed -n -E 's/^OPENCLAW_GATEWAY_TOKEN=([0-9a-f]{64})$/\1/p' "$GATEWAY_ENV")
+[[ $gateway_token =~ ^[0-9a-f]{64}$ ]] ||
+  die "Gateway environment must contain a valid OPENCLAW_GATEWAY_TOKEN"
 run_openclaw() {
   local config_path=$1
   shift
   systemd-run --quiet --wait --pipe --collect \
     --uid=openclaw --gid=openclaw \
-    --property="EnvironmentFile=$GATEWAY_ENV" \
+    --setenv="OPENCLAW_GATEWAY_TOKEN=$gateway_token" \
     /usr/bin/env \
     HOME=/var/lib/openclaw \
     OPENCLAW_STATE_DIR=/var/lib/openclaw \
     OPENCLAW_CONFIG_PATH="$config_path" \
     "$OPENCLAW" "$@"
 }
-run_openclaw "$staged/openclaw.json" config validate --json >/dev/null ||
+candidate_config="$CONFIG.candidate-$commit"
+install -o root -g openclaw -m 0640 "$staged/openclaw.json" "$candidate_config"
+run_openclaw "$candidate_config" config validate --json >/dev/null || {
+  rm -f -- "$candidate_config"
   die "pinned OpenClaw rejected candidate config"
+}
+rm -f -- "$candidate_config"
 
 backup="$ROOT/shared-backups/$(date -u +%Y%m%dT%H%M%SZ)-$commit"
 install -d -o root -g root -m 0700 "$backup"
@@ -170,6 +178,7 @@ restore_previous() {
   fi
   systemctl restart openclaw-gateway.service
   printf 'shared rollout failed; previous config restored\n' >&2
+  exit 1
 }
 trap restore_previous ERR
 
