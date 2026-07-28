@@ -128,12 +128,20 @@ fi
 gateway_token=$(sed -n -E 's/^OPENCLAW_GATEWAY_TOKEN=([0-9a-f]{64})$/\1/p' "$GATEWAY_ENV")
 [[ $gateway_token =~ ^[0-9a-f]{64}$ ]] ||
   die "Gateway environment must contain a valid OPENCLAW_GATEWAY_TOKEN"
+mattermost_url=$(sed -n 's/^MATTERMOST_URL=//p' "$GATEWAY_ENV")
+mattermost_token=$(sed -n 's/^RECORDINGS_SAVER_MATTERMOST_BOT_TOKEN=//p' "$GATEWAY_ENV")
+recruiter_user_id=$(sed -n 's/^RECORDINGS_SAVER_RECRUITER_USER_ID=//p' "$GATEWAY_ENV")
+[[ -n $mattermost_url && -n $mattermost_token && -n $recruiter_user_id ]] ||
+  die "Gateway environment is missing Recordings Saver Mattermost settings"
 run_openclaw() {
   local config_path=$1
   shift
   systemd-run --quiet --wait --pipe --collect \
     --uid=openclaw --gid=openclaw \
     --setenv="OPENCLAW_GATEWAY_TOKEN=$gateway_token" \
+    --setenv="MATTERMOST_URL=$mattermost_url" \
+    --setenv="RECORDINGS_SAVER_MATTERMOST_BOT_TOKEN=$mattermost_token" \
+    --setenv="RECORDINGS_SAVER_RECRUITER_USER_ID=$recruiter_user_id" \
     /usr/bin/env \
     HOME=/var/lib/openclaw \
     OPENCLAW_STATE_DIR=/var/lib/openclaw \
@@ -188,7 +196,15 @@ mv -Tf "$CONFIG.next" "$CONFIG"
 mv -Tf "$INVENTORY.next" "$INVENTORY"
 systemctl restart openclaw-gateway.service
 systemctl is-active --quiet openclaw-gateway.service
-run_openclaw "$CONFIG" gateway status --require-rpc >/dev/null
+gateway_ready=false
+for _ in {1..10}; do
+  if run_openclaw "$CONFIG" gateway status --require-rpc >/dev/null 2>&1; then
+    gateway_ready=true
+    break
+  fi
+  sleep 1
+done
+[[ $gateway_ready == true ]] || die "Gateway RPC did not become ready"
 run_openclaw "$CONFIG" channels status --probe >/dev/null
 validate_routes "$CONFIG"
 
