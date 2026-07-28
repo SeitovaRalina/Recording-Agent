@@ -259,6 +259,9 @@ class StorageFactory:
                 settings.synology_base_url,
                 settings.synology_api_key,
                 http_client or httpx.AsyncClient(),
+                username=settings.synology_user,
+                password=settings.synology_pass,
+                device_id=settings.synology_device_id,
             )
         return MinIOBackend(
             settings.minio_endpoint,

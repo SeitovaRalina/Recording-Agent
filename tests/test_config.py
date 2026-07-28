@@ -49,6 +49,26 @@ def test_phase_two_settings_parse_json_maps() -> None:
     assert isinstance(settings.yandex_caldav_passwords["a@example.com"], SecretStr)
 
 
+def test_synology_interview_roots_parse_from_json_and_csv() -> None:
+    json_settings = Settings(
+        SYNOLOGY_INTERVIEW_ROOTS='["/home/Recruiting-E/2. Interviews external"]'
+    )
+    csv_settings = Settings(
+        SYNOLOGY_INTERVIEW_ROOTS=(
+            "/home/Recruiting-NE/2. Interviews,"
+            "/home/Recruiting-E/3. Interviews internal/"
+        )
+    )
+
+    assert json_settings.synology_interview_roots == (
+        "/home/Recruiting-E/2. Interviews external",
+    )
+    assert csv_settings.synology_interview_roots == (
+        "/home/Recruiting-NE/2. Interviews",
+        "/home/Recruiting-E/3. Interviews internal",
+    )
+
+
 def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("SCAN_IGNORE_BEFORE_TODAY", "false")
     monkeypatch.setenv("SCAN_LOCAL_TIMEZONE", "UTC")

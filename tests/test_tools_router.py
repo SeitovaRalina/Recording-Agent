@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
 from app.db.engine import get_session
@@ -16,8 +16,10 @@ from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.notification_outbox import NotificationOutbox
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.db.models.storage_destination import StorageDestination
 from app.main import app
 from app.routers.tools import (
+    DestinationItem,
     QuestionItem,
     ScanRequest,
     _question_recruiter,
@@ -25,11 +27,18 @@ from app.routers.tools import (
     _scan_response,
 )
 from app.scheduler.cron import ScanError, ScanSummary
+from app.services.destinations import DestinationService
 from app.services.question_queue import QuestionQueueService
 from app.services.reviews import (
     InteractionBindingConflict,
     ReviewRejectedError,
     ReviewService,
+)
+
+TEST_INTERVIEW_ROOTS = (
+    "/home/Recruiting-NE/2. Interviews",
+    "/home/Recruiting-E/2. Interviews external",
+    "/home/Recruiting-E/3. Interviews internal",
 )
 
 
@@ -43,6 +52,10 @@ async def test_tools_reject_missing_auth(async_client: AsyncClient) -> None:
 
 def test_question_item_exposes_capability_required_by_answer_contract() -> None:
     assert "capability" in QuestionItem.model_fields
+
+
+def test_destination_item_exposes_path_label_for_llm_disambiguation() -> None:
+    assert "path_label" in DestinationItem.model_fields
 
 
 def test_scan_response_reports_final_per_recording_outcomes() -> None:
@@ -398,6 +411,203 @@ async def test_offline_answer_api_commits_reconciles_replays_and_reports_status(
     assert await session.scalar(select(NotificationOutbox.id)) is None
     mattermost.validate_direct_channel.assert_not_awaited()
     mattermost.send_dm.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_route_interview_persists_destination_and_resumes_transfer(
+    async_client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="/home/Recruiting-E",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="trusted-dm",
+    )
+    recording = Recording(
+        disk_file_id="route-interview",
+        disk_path="disk:/route-interview.webm",
+        disk_filename="route-interview.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        manual_review_reason="storage_destination_required",
+        candidate_name="Candidate",
+        notion_page_id="notion-page",
+        generated_filename="Candidate - Backend.webm",
+        version=5,
+    )
+    destination = StorageDestination(
+        recruiter_id=recruiter.id,
+        canonical_path="/home/Recruiting-E/2. Interviews external/Backend",
+        display_name="Backend",
+        writable=True,
+        symlink_safe=True,
+        validated_at=datetime.now(UTC),
+    )
+    session.add_all([recruiter, recording])
+    await session.flush()
+    destination.recruiter_id = recruiter.id
+    session.add(destination)
+    await session.commit()
+    recording_id = recording.id
+    destination_id = destination.id
+    session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def finish_pipeline(*_args: object, **_kwargs: object) -> bool:
+        async with session_factory() as resume_session:
+            loaded = await resume_session.get(Recording, recording_id)
+            assert loaded is not None
+            loaded.status = RecordingStatus.COMPLETED
+            loaded.synology_share_url = "https://nas.test/share/opaque"
+            loaded.version += 1
+            await resume_session.commit()
+        return True
+
+    app.dependency_overrides[get_session] = override_session
+    app.state.destination_service = DestinationService(
+        AsyncMock(),
+        get_settings().model_copy(
+            update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}
+        ),
+    )
+    app.state.session_factory = session_factory
+    for name in (
+        "disk_scanner",
+        "candidate_service",
+        "transfer_service",
+        "status_service",
+        "notion_client",
+    ):
+        setattr(app.state, name, MagicMock())
+    resume = AsyncMock(side_effect=finish_pipeline)
+    monkeypatch.setattr("app.routers.tools._resume_transfer_recording", resume)
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording_id}/route-interview",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "destination_id": str(destination_id),
+            "expected_version": 5,
+            "idempotency_key": "route-interview-0001",
+        },
+    )
+    replay = await async_client.post(
+        f"/tools/recordings/{recording_id}/route-interview",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "destination_id": str(destination_id),
+            "expected_version": 5,
+            "idempotency_key": "route-interview-0001",
+        },
+    )
+    await session.refresh(recording)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == RecordingStatus.COMPLETED.value
+    assert response.json()["safe_link"] == "https://nas.test/share/opaque"
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert recording.storage_destination_id == destination_id
+    assert recording.storage_key is None
+    assert resume.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_route_interview_does_not_complete_intent_when_resume_is_busy(
+    async_client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="/home/Recruiting-E",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="trusted-dm",
+    )
+    recording = Recording(
+        disk_file_id="route-interview-busy",
+        disk_path="disk:/route-interview-busy.webm",
+        disk_filename="route-interview-busy.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        manual_review_reason="storage_destination_required",
+        candidate_name="Candidate",
+        notion_page_id="notion-page",
+        generated_filename="Candidate - Backend.webm",
+        version=5,
+    )
+    destination = StorageDestination(
+        recruiter_id=recruiter.id,
+        canonical_path="/home/Recruiting-E/2. Interviews external/Backend",
+        display_name="Backend",
+        writable=True,
+        symlink_safe=True,
+        validated_at=datetime.now(UTC),
+    )
+    session.add_all([recruiter, recording])
+    await session.flush()
+    destination.recruiter_id = recruiter.id
+    session.add(destination)
+    await session.commit()
+    recording_id = recording.id
+    destination_id = destination.id
+    session_factory = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    app.state.destination_service = DestinationService(
+        AsyncMock(),
+        get_settings().model_copy(
+            update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}
+        ),
+    )
+    app.state.session_factory = session_factory
+    for name in (
+        "disk_scanner",
+        "candidate_service",
+        "transfer_service",
+        "status_service",
+        "notion_client",
+    ):
+        setattr(app.state, name, MagicMock())
+    resume = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.routers.tools._resume_transfer_recording", resume)
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording_id}/route-interview",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "destination_id": str(destination_id),
+            "expected_version": 5,
+            "idempotency_key": "route-interview-busy",
+        },
+    )
+    intent = await session.scalar(
+        select(IntentReplay).where(
+            IntentReplay.operation == f"route-interview:{recording_id}"
+        )
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["status"] == RecordingStatus.TRANSFER_STARTED.value
+    assert intent is not None
+    assert intent.state == "pending"
+    assert intent.response is None
+    assert resume.await_count == 1
 
 
 @pytest.mark.anyio

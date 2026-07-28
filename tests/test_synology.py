@@ -90,6 +90,41 @@ async def test_create_share_link_and_error_propagation() -> None:
                 await backend.create_share_link("/base/video.webm")
 
 
+@pytest.mark.anyio
+async def test_sid_login_is_used_when_api_key_is_unavailable() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend(
+            "https://nas.test",
+            SecretStr(""),
+            http,
+            username="operator",
+            password=SecretStr("password"),
+            device_id=SecretStr("device-1"),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            auth = router.get(URL).mock(
+                return_value=httpx.Response(
+                    200, json={"success": True, "data": {"sid": "sid-1"}}
+                )
+            )
+            share = router.post(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"success": True, "data": {"links": [{"url": "https://share"}]}},
+                )
+            )
+
+            assert await backend.create_share_link("/base/video.webm") == "https://share"
+
+    auth_query = parse_qs(str(auth.calls.last.request.url.query, encoding="utf-8"))
+    share_query = parse_qs(str(share.calls.last.request.url.query, encoding="utf-8"))
+    assert auth_query["api"] == ["SYNO.API.Auth"]
+    assert auth_query["account"] == ["operator"]
+    assert auth_query["device_id"] == ["device-1"]
+    assert "X-SYNO-Token" not in share.calls.last.request.headers
+    assert share_query["_sid"] == ["sid-1"]
+
+
 def test_canonical_path_rejects_escape_traversal_and_backslash() -> None:
     assert SynologyBackend.canonical_under_root("/recruiters/mila", "/recruiters/mila/team") == (
         "/recruiters/mila/team"

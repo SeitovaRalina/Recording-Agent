@@ -667,7 +667,7 @@ async def _run_transfer_recording(
             "notion_spot_id": selected_spot.id if selected_spot is not None else None,
             "notion_spot_url": selected_spot.url if selected_spot is not None else None,
             "generated_filename": identity.filename,
-            "storage_key": identity.key,
+            "storage_key": None if settings.storage_provider == "synology" else identity.key,
             "content_identity": recording.disk_md5 or recording.disk_file_id,
         }
         if already_matched:
@@ -682,6 +682,20 @@ async def _run_transfer_recording(
                 **candidate_updates,
             )
         await session.commit()
+        if settings.storage_provider == "synology" and recording.storage_destination_id is None:
+            await status.advance(
+                session,
+                recording,
+                RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                manual_review_reason="storage_destination_required",
+                manual_review_candidates=[],
+                error_step="destination",
+                error_message=(
+                    "Interview destination must be selected from allowed Synology inventory"
+                ),
+            )
+            await session.commit()
+            return
         await status.advance(session, recording, RecordingStatus.TRANSFER_STARTED)
         await session.commit()
         trace(
@@ -852,9 +866,10 @@ async def _resume_committed_transfer_steps(
 ) -> None:
     required = {
         "generated_filename": recording.generated_filename,
-        "storage_key": recording.storage_key,
         "content_identity": recording.content_identity,
     }
+    if not recording.storage_key and not recording.storage_destination_id:
+        required["storage_destination_id_or_storage_key"] = None
     if recording.route_type == "interview":
         required |= {
             "candidate_name": recording.candidate_name,

@@ -13,6 +13,8 @@ from pydantic import SecretStr
 
 from app.services.storage import StorageCollisionError
 
+QueryValue = str | int
+
 
 class SynologyAPIError(RuntimeError):
     def __init__(self, status_code: int, payload: object) -> None:
@@ -42,10 +44,23 @@ class SynologyPreflight:
 
 
 class SynologyBackend:
-    def __init__(self, base_url: str, api_key: SecretStr, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        base_url: str = "",
+        api_key: SecretStr | None = None,
+        client: httpx.AsyncClient | None = None,
+        *,
+        username: str = "",
+        password: SecretStr | None = None,
+        device_id: SecretStr | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._client = client
+        self._api_key = api_key or SecretStr("")
+        self._client = client or httpx.AsyncClient()
+        self._username = username
+        self._password = password or SecretStr("")
+        self._device_id = device_id or SecretStr("")
+        self._sid: str | None = None
 
     @property
     def durable_for_source_cleanup(self) -> bool:
@@ -53,19 +68,82 @@ class SynologyBackend:
 
     @property
     def _headers(self) -> dict[str, str]:
+        if not self._api_key.get_secret_value():
+            return {}
         return {"X-SYNO-Token": self._api_key.get_secret_value()}
+
+    async def _auth_params(self) -> dict[str, str]:
+        if self._api_key.get_secret_value():
+            return {}
+        return {"_sid": await self._login_sid()}
+
+    async def _get(
+        self,
+        path: str,
+        *,
+        params: dict[str, QueryValue],
+    ) -> httpx.Response:
+        return await self._client.get(
+            f"{self._base_url}{path}",
+            params={**params, **await self._auth_params()},
+            headers=self._headers,
+        )
+
+    async def _post(
+        self,
+        path: str,
+        *,
+        params: dict[str, QueryValue],
+        data: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+        content: AsyncIterator[bytes] | None = None,
+    ) -> httpx.Response:
+        return await self._client.post(
+            f"{self._base_url}{path}",
+            params={**params, **await self._auth_params()},
+            data=data,
+            headers={**self._headers, **(headers or {})},
+            content=content,
+        )
+
+    async def _login_sid(self) -> str:
+        if self._sid:
+            return self._sid
+        username = self._username.strip()
+        password = self._password.get_secret_value()
+        if not username or not password:
+            raise SynologyAPIError(0, {"error": "Synology SID login credentials are missing"})
+        params: dict[str, QueryValue] = {
+            "api": "SYNO.API.Auth",
+            "method": "login",
+            "version": "6",
+            "account": username,
+            "passwd": password,
+            "session": "FileStation",
+            "format": "sid",
+        }
+        device_id = self._device_id.get_secret_value()
+        if device_id:
+            params["device_id"] = device_id
+        response = await self._client.get(f"{self._base_url}/webapi/entry.cgi", params=params)
+        payload = self._validate(response)
+        data = payload.get("data")
+        sid = data.get("sid") if isinstance(data, dict) else None
+        if not isinstance(sid, str) or not sid:
+            raise SynologyAPIError(response.status_code, {"error": "Synology SID login failed"})
+        self._sid = sid
+        return sid
 
     async def preflight(self, root: str) -> SynologyPreflight:
         canonical_root = self.canonical_under_root(root, root)
-        info = await self._client.get(
-            f"{self._base_url}/webapi/query.cgi",
+        info = await self._get(
+            "/webapi/query.cgi",
             params={
                 "api": "SYNO.API.Info",
                 "method": "query",
                 "version": "1",
                 "query": "SYNO.FileStation.Info,SYNO.FileStation.List,SYNO.FileStation.Sharing",
             },
-            headers=self._headers,
         )
         info_payload = self._validate(info)
         apis = info_payload.get("data")
@@ -101,8 +179,8 @@ class SynologyBackend:
             parent, depth = queue.pop(0)
             offset = 0
             while pages < max_pages and len(results) < max_results:
-                response = await self._client.get(
-                    f"{self._base_url}/webapi/entry.cgi",
+                response = await self._get(
+                    "/webapi/entry.cgi",
                     params={
                         "api": "SYNO.FileStation.List",
                         "method": "list",
@@ -113,7 +191,6 @@ class SynologyBackend:
                         "limit": page_size,
                         "additional": '["perm","real_path"]',
                     },
-                    headers=self._headers,
                 )
                 payload = self._validate(response)
                 data = payload.get("data")
@@ -163,11 +240,10 @@ class SynologyBackend:
         if parent_info.symlink or not parent_info.writable:
             raise PermissionError("Destination parent is not a writable real folder")
         target = self.canonical_under_root(canonical_root, f"{canonical_parent}/{name}")
-        response = await self._client.post(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._post(
+            "/webapi/entry.cgi",
             params={"api": "SYNO.FileStation.CreateFolder", "method": "create", "version": "2"},
             data={"folder_path": canonical_parent, "name": name, "force_parent": "false"},
-            headers=self._headers,
         )
         self._validate(response)
         created = await self._get_info(target)
@@ -176,17 +252,16 @@ class SynologyBackend:
         return created
 
     async def ensure_folder(self, path: str) -> None:
-        info = await self._client.get(
-            f"{self._base_url}/webapi/entry.cgi",
+        info = await self._get(
+            "/webapi/entry.cgi",
             params={"api": "SYNO.FileStation.Info", "method": "get", "version": "2"},
-            headers=self._headers,
         )
         self._validate(info)
         components = [component for component in path.split("/") if component]
         parent = "/"
         for component in components:
-            response = await self._client.post(
-                f"{self._base_url}/webapi/entry.cgi",
+            response = await self._post(
+                "/webapi/entry.cgi",
                 params={
                     "api": "SYNO.FileStation.CreateFolder",
                     "method": "create",
@@ -197,7 +272,6 @@ class SynologyBackend:
                     "name": component,
                     "force_parent": "true",
                 },
-                headers=self._headers,
             )
             self._validate(response, allowed_error_codes={409, 1101})
             parent = f"{parent.rstrip('/')}/{component}"
@@ -264,11 +338,10 @@ class SynologyBackend:
 
     async def _upload_file(self, folder: str, filename: str, stream: AsyncIterator[bytes]) -> None:
         boundary = f"recording-agent-{uuid.uuid4().hex}"
-        response = await self._client.post(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._post(
+            "/webapi/entry.cgi",
             params={"api": "SYNO.FileStation.Upload", "method": "upload", "version": "2"},
             headers={
-                **self._headers,
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
             },
             content=self._multipart(boundary, folder, filename, stream),
@@ -276,8 +349,8 @@ class SynologyBackend:
         self._validate(response)
 
     async def _file_size(self, path: str) -> int | None:
-        response = await self._client.get(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._get(
+            "/webapi/entry.cgi",
             params={
                 "api": "SYNO.FileStation.List",
                 "method": "getinfo",
@@ -285,7 +358,6 @@ class SynologyBackend:
                 "path": json.dumps([path]),
                 "additional": '["size"]',
             },
-            headers=self._headers,
         )
         try:
             payload = response.json()
@@ -309,8 +381,8 @@ class SynologyBackend:
 
     async def _read_owner_marker(self, folder: str, filename: str) -> dict[str, object] | None:
         marker_path = f"{folder.rstrip('/')}/{self._owner_marker_name(filename)}"
-        response = await self._client.get(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._get(
+            "/webapi/entry.cgi",
             params={
                 "api": "SYNO.FileStation.Download",
                 "method": "download",
@@ -318,7 +390,6 @@ class SynologyBackend:
                 "path": marker_path,
                 "mode": "open",
             },
-            headers=self._headers,
         )
         if response.status_code == 404:
             return None
@@ -363,8 +434,8 @@ class SynologyBackend:
         )
 
     async def _get_info(self, path: str) -> SynologyFolder:
-        response = await self._client.get(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._get(
+            "/webapi/entry.cgi",
             params={
                 "api": "SYNO.FileStation.List",
                 "method": "getinfo",
@@ -372,7 +443,6 @@ class SynologyBackend:
                 "path": json.dumps([path]),
                 "additional": '["perm","real_path"]',
             },
-            headers=self._headers,
         )
         payload = self._validate(response)
         data = payload.get("data")
@@ -419,15 +489,14 @@ class SynologyBackend:
         return isinstance(perm, dict) and perm.get("write") is True
 
     async def create_share_link(self, path: str) -> str:
-        response = await self._client.post(
-            f"{self._base_url}/webapi/entry.cgi",
+        response = await self._post(
+            "/webapi/entry.cgi",
             params={
                 "api": "SYNO.FileStation.Sharing",
                 "method": "create",
                 "version": "3",
             },
             data={"path": json.dumps([path]), "date_expired": "-1", "date_available": "0"},
-            headers=self._headers,
         )
         payload = self._validate(response)
         try:

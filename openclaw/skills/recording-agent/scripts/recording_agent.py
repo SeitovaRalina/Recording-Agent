@@ -244,6 +244,16 @@ def _parser() -> argparse.ArgumentParser:
     non_interview.add_argument("--expected-version", required=True, type=int)
     non_interview.add_argument("--idempotency-key", required=True)
 
+    route_interview = subparsers.add_parser(
+        "route-interview", help="route one interview recording to a safe Synology destination"
+    )
+    _add_recruiter_user_id_argument(route_interview)
+    _add_dm_channel_argument(route_interview)
+    route_interview.add_argument("--recording-id", required=True, type=uuid.UUID)
+    route_interview.add_argument("--destination-id", required=True, type=uuid.UUID)
+    route_interview.add_argument("--expected-version", required=True, type=int)
+    route_interview.add_argument("--idempotency-key", required=True)
+
     cleanup_preview = subparsers.add_parser(
         "cleanup-preview", help="preview eligible completed source recordings"
     )
@@ -391,6 +401,18 @@ def _execute(args: argparse.Namespace) -> Any:
         return _request(
             "POST",
             f"/tools/recordings/{args.recording_id}/route-non-interview",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "destination_id": str(args.destination_id),
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "route-interview":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/route-interview",
             body={
                 "recruiter_user_id": args.recruiter_user_id,
                 "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
@@ -610,7 +632,8 @@ def _destinations_message(result: dict[str, Any]) -> str:
         return "No writable storage destinations are available."
     lines = [f"Writable storage destinations: {len(items)}."]
     for number, item in enumerate(items, start=1):
-        lines.append(f"{number}. {str(item.get('display_name') or 'folder')[:200]}")
+        label = str(item.get("path_label") or item.get("display_name") or "folder")
+        lines.append(f"{number}. {label[:240]}")
     return "\n".join(lines)
 
 
@@ -656,6 +679,11 @@ def _message_for(command: str, result: Any) -> str:
     if command == "non-interview":
         return (
             f"Working-meeting recording processed; status: {_status_label(result.get('status'))}; "
+            f"link: {result.get('safe_link') or 'unavailable'}."
+        )
+    if command == "route-interview":
+        return (
+            f"Interview recording processed; status: {_status_label(result.get('status'))}; "
             f"link: {result.get('safe_link') or 'unavailable'}."
         )
     if command == "cleanup-preview":

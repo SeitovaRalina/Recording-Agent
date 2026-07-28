@@ -16,6 +16,11 @@ mutation or when interpreting a Backend error.
 - `questions`: fetch the current Backend-owned numbered question set in this exact recruiter DM.
 - `answer`: only after a reply clearly addresses an active Recording Agent question set.
 - `destinations` / `create-destination`: list or create only Backend-approved Synology folders.
+- `route-interview`: choose one Backend-returned destination for an interview recording. Use the
+  LLM only against the bounded `destinations` result and the current recording context. If exactly
+  one folder fits the meeting title, candidate context, and Notion Spot text, route with its opaque
+  id. If several folders fit, ask the recruiter which destination to use. If none fits, ask the
+  recruiter for a new folder name, then call `create-destination` under one returned root.
 - `non-interview`: the recruiter explicitly classifies a recording as a working meeting and has
   selected one returned destination.
 - `cleanup-preview`: the recruiter asks to clean successfully processed recordings.
@@ -34,7 +39,13 @@ counts verbatim from the deterministic CLI message.
 
 Do not treat unrelated messages, acknowledgements, quoted or edited old messages, bare numbers
 without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
-questions stay pending. Never infer a candidate, Spot, destination, or cleanup confirmation.
+questions stay pending. Never infer a candidate, Spot, or cleanup confirmation.
+
+Interview destination selection is the only allowed LLM classification step. The Backend does not
+map Spots or meeting names to folders. Always call `destinations` first, compare only returned
+folder labels, and submit only the returned destination id. Never submit a raw path. Ambiguous roots
+such as duplicated `Flutter` folders across internal and external projects require a recruiter
+question unless the recruiter has already given the internal/external choice.
 
 For duplicate Notion cards, preserve each card URL and all returned differentiators, including
 `📍 Spots`. Equal titles remain separate. Multiple Spots require an explicit returned choice.

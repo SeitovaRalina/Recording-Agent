@@ -23,6 +23,8 @@ recording_agent.py questions [trusted metadata] [--question-set-id UUID] [--limi
 recording_agent.py answer [trusted metadata] --actions-json JSON
 recording_agent.py destinations [trusted metadata]
 recording_agent.py create-destination [trusted metadata] --parent-destination-id UUID --name NAME
+recording_agent.py route-interview [trusted metadata] --recording-id UUID --destination-id UUID
+                                  --expected-version N --idempotency-key KEY
 recording_agent.py non-interview [trusted metadata] --recording-id UUID --destination-id UUID
                                  --expected-version N --idempotency-key KEY
 recording_agent.py cleanup-preview [trusted metadata] [--limit 1..100]
@@ -44,13 +46,17 @@ requires choice 1..10; `ignore` forbids choice. Free text is never sent to Backe
 | `answer` | `POST /tools/questions/answer` |
 | `destinations` | `GET /tools/storage/destinations` |
 | `create-destination` | `POST /tools/storage/destinations` |
+| `route-interview` | `POST /tools/recordings/{id}/route-interview` |
 | `non-interview` | `POST /tools/recordings/{id}/route-non-interview` |
 | `cleanup-preview` | `POST /tools/cleanup/previews` |
 | `cleanup-confirm` | `POST /tools/cleanup/previews/{id}/confirm` |
 
-Destination IDs are opaque. Do not construct or submit a path. Cleanup preview is non-mutating;
-confirmation must reuse its exact preview ID, hash, capability, recruiter, DM, and one stable
-idempotency key. MinIO test links are not eligible durable archival proof.
+Destination IDs are opaque. `destinations` may show a safe full folder label so the LLM can
+disambiguate duplicate display names; do not construct or submit a path. `route-interview` is valid
+only after the Backend has matched the recording to a candidate and returned the current recording
+version. Cleanup preview is non-mutating; confirmation must reuse its exact preview ID, hash,
+capability, recruiter, DM, and one stable idempotency key. MinIO test links are not eligible durable
+archival proof.
 
 Treat 401/403 as authorization failure, 404 as inaccessible context, 409 as stale/consumed/
 conflicting state, and 410 as expired capability. Do not retry a mutation under a new key unless

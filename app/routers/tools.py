@@ -15,6 +15,7 @@ from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.db.models.storage_destination import StorageDestination
 from app.routers.events import verify_openclaw_secret
 from app.scheduler.cron import ScanSummary, _resume_transfer_recording, scan_recruiter
 from app.services.canary import enforce_recruiter_scope
@@ -204,6 +205,7 @@ class QuestionBatchResponse(BaseModel):
 class DestinationItem(BaseModel):
     id: uuid.UUID
     display_name: str
+    path_label: str
     writable: bool
 
 
@@ -232,6 +234,24 @@ class NonInterviewRouteRequest(BaseModel):
 
 
 class NonInterviewRouteResponse(BaseModel):
+    recording_id: uuid.UUID
+    status: RecordingStatus
+    version: int
+    safe_link: str
+    replayed: bool = False
+
+
+class InterviewRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    destination_id: uuid.UUID
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class InterviewRouteResponse(BaseModel):
     recording_id: uuid.UUID
     status: RecordingStatus
     version: int
@@ -295,10 +315,7 @@ async def list_storage_destinations(
         rows = await service.discover(session, recruiter)
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    items = [
-        DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
-        for row in rows
-    ]
+    items = [_destination_item(row) for row in rows]
     return DestinationListResponse(items=items, count=len(items))
 
 
@@ -318,7 +335,103 @@ async def create_storage_destination(
         )
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    return DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
+    return _destination_item(row)
+
+
+@router.post(
+    "/recordings/{recording_id}/route-interview",
+    response_model=InterviewRouteResponse,
+)
+async def route_interview(
+    recording_id: uuid.UUID,
+    body: InterviewRouteRequest,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
+) -> InterviewRouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    payload = body.model_dump(mode="json") | {"recording_id": str(recording_id)}
+    try:
+        claim = await claim_intent(
+            session,
+            actor=body.recruiter_user_id,
+            operation=f"route-interview:{recording_id}",
+            idempotency_key=body.idempotency_key,
+            fingerprint=request_fingerprint(payload),
+            ttl_seconds=settings.intent_claim_ttl_seconds,
+        )
+    except IntentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if claim.completed_response is not None:
+        return InterviewRouteResponse.model_validate(
+            claim.completed_response | {"replayed": True}
+        )
+    try:
+        recording = await session.scalar(
+            select(Recording).where(Recording.id == recording_id).with_for_update()
+        )
+        if recording is None or recording.disk_owner_email != recruiter.email:
+            raise DestinationRejectedError("Recording not found")
+        if recording.version != body.expected_version:
+            raise DestinationRejectedError("Recording version is stale")
+        if recording.route_type != "interview":
+            raise DestinationRejectedError("Recording is not an interview")
+        if recording.status not in {
+            RecordingStatus.CANDIDATE_MATCHED,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        }:
+            raise DestinationRejectedError("Recording is not awaiting interview destination")
+        if (
+            not recording.generated_filename
+            or not recording.candidate_name
+            or not recording.notion_page_id
+        ):
+            raise DestinationRejectedError("Recording candidate state is incomplete")
+        destination = await _destination_service(request).resolve(
+            session, recruiter, body.destination_id
+        )
+        recording.storage_destination_id = destination.id
+        recording.storage_key = None
+        recording.content_identity = (
+            recording.content_identity or recording.disk_md5 or recording.disk_file_id
+        )
+        recording.transition_to(RecordingStatus.TRANSFER_STARTED)
+        recording.version += 1
+        await session.commit()
+    except (DestinationRejectedError, PermissionError, ValueError) as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    resumed = await _resume_transfer_recording(
+        recording_id,
+        recruiter,
+        request.app.state.session_factory,
+        request.app.state.disk_scanner,
+        request.app.state.candidate_service,
+        request.app.state.transfer_service,
+        request.app.state.status_service,
+        request.app.state.notion_client,
+        settings,
+    )
+    async with request.app.state.session_factory() as fresh_session:
+        refreshed = await fresh_session.get(Recording, recording_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        response = InterviewRouteResponse(
+            recording_id=refreshed.id,
+            status=refreshed.status,
+            version=refreshed.version,
+            safe_link=refreshed.synology_share_url or "",
+        )
+    if not resumed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=response.model_dump(mode="json")
+            | {"message": "Transfer resume is already in progress or not resumable"},
+        )
+    await complete_intent(session, claim, response.model_dump(mode="json"))
+    return response
 
 
 @router.post(
@@ -896,6 +1009,15 @@ def _destination_service(request: Request) -> DestinationService:
     if service is None:
         raise HTTPException(status_code=409, detail="Synology destinations are disabled")
     return cast(DestinationService, service)
+
+
+def _destination_item(row: StorageDestination) -> DestinationItem:
+    return DestinationItem(
+        id=row.id,
+        display_name=row.display_name,
+        path_label=row.canonical_path,
+        writable=row.writable,
+    )
 
 
 def _non_interview_service(request: Request) -> NonInterviewService:

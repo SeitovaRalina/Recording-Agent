@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notion = NotionClient(settings.notion_token, http_client, settings=settings)
     storage = StorageFactory.create(settings, http_client)
     candidate_service = CandidateService(notion, settings)
-    transfer_service = TransferService(disk, storage, http_client)
+    transfer_service = TransferService(disk, storage, http_client, settings)
     status_service = StatusService()
     mattermost = MattermostClient(
         settings.mattermost_url,
