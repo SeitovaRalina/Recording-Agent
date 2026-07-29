@@ -5,13 +5,21 @@ die() { printf 'smoke: %s\n' "$*" >&2; exit 1; }
 mode=${1:---local}
 [[ $mode == --local || $mode == --external ]] || die "expected --local or --external"
 readonly OPENCLAW_CONFIG=/etc/openclaw/openclaw.json
+readonly RELEASE_MANIFEST=/opt/recording-agent/current/release-manifest.json
 readonly MIN_AVAILABLE_KIB=393216
 [[ -r $OPENCLAW_CONFIG ]] || die "OpenClaw config is unavailable"
+if [[ -z ${RECORDING_AGENT_IMAGE:-} ]]; then
+  [[ -r $RELEASE_MANIFEST ]] || die "current release manifest is unavailable"
+  RECORDING_AGENT_IMAGE=$(jq -r '.image' "$RELEASE_MANIFEST")
+fi
+[[ $RECORDING_AGENT_IMAGE =~ ^ghcr\.io/seitovaralina/recording-agent@sha256:[0-9a-f]{64}$ ]] ||
+  die "current release image is unavailable"
+export RECORDING_AGENT_IMAGE
 jq -e '
   (all(.agents.list[]; (.default // false) == false)) and
-  [.bindings[] |
+  ([.bindings[] |
     select(.agentId == "*" or .match.channel == "*" or .match.accountId == "*")
-  ] | length == 0
+  ] | length == 0)
 ' "$OPENCLAW_CONFIG" >/dev/null || die "wildcard OpenClaw binding detected"
 diff -u \
   <(jq -r '.channels.mattermost.accounts | keys[]' "$OPENCLAW_CONFIG" | sort) \
