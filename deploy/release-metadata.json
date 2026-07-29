@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "targetAlembicRevision": "b9b12bbd4cb0",
+  "targetAlembicRevision": "20260729_1100",
   "previousApplicationCompatibleWithTargetSchema": false,
   "migrationStrategy": "forward-only",
   "failurePolicy": "stop-writes-forward-fix",
