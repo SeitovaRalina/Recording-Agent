@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     pipeline_trace_enabled: bool = False
     test_mode_enabled: bool = False
     scheduler_enabled: bool = False
+    autonomous_routing_enabled: bool = False
     yandex_source_mutation_enabled: bool = False
     cleanup_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     cleanup_preview_max_items: int = Field(default=50, ge=1, le=100)
@@ -75,6 +76,11 @@ class Settings(BaseSettings):
     synology_api_key: SecretStr = SecretStr("")
     synology_user: str = ""
     synology_pass: SecretStr = SecretStr("")
+    synology_device_id: SecretStr = SecretStr("")
+    synology_interview_roots: tuple[str, ...] = Field(
+        default_factory=tuple,
+        validation_alias=AliasChoices("synology_interview_roots", "SYNOLOGY_INTERVIEW_ROOTS"),
+    )
     mattermost_url: str = ""
     mattermost_bot_token: SecretStr = SecretStr("")
     mattermost_channel_id: str = ""
@@ -112,6 +118,19 @@ class Settings(BaseSettings):
                 raise ValueError("Yandex source mutation is forbidden in test mode")
             if not self.minio_test_prefix.strip(" /"):
                 raise ValueError("Test mode requires a non-empty MinIO prefix")
+        if self.storage_provider == "synology":
+            if not self.synology_base_url.strip():
+                raise ValueError("Synology storage requires SYNOLOGY_BASE_URL")
+            has_api_key = bool(self.synology_api_key.get_secret_value())
+            has_sid_login = bool(
+                self.synology_user.strip() and self.synology_pass.get_secret_value()
+            )
+            if not has_api_key and not has_sid_login:
+                raise ValueError(
+                    "Synology storage requires SYNOLOGY_API_KEY or SYNOLOGY_USER/SYNOLOGY_PASS"
+                )
+            if not self.synology_interview_roots:
+                raise ValueError("Synology storage requires SYNOLOGY_INTERVIEW_ROOTS")
         return self
 
     @field_validator("yandex_refresh_tokens", "yandex_caldav_passwords", mode="before")
@@ -120,6 +139,29 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return json.loads(value)
         return value
+
+    @field_validator("synology_interview_roots", mode="before")
+    @classmethod
+    def parse_synology_interview_roots(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return ()
+            if stripped.startswith("["):
+                return tuple(json.loads(stripped))
+            return tuple(item.strip() for item in stripped.split(",") if item.strip())
+        return value
+
+    @field_validator("synology_interview_roots")
+    @classmethod
+    def validate_synology_interview_roots(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for root in value:
+            stripped = root.rstrip("/")
+            if not stripped.startswith("/"):
+                raise ValueError("Synology interview roots must be absolute Synology paths")
+            normalized.append(stripped)
+        return tuple(dict.fromkeys(normalized))
 
     @field_validator(
         "test_recruiter_allowlist",

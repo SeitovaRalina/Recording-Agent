@@ -10,13 +10,16 @@ from pathlib import Path
 
 import anyio
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
+from app.db.models.storage_destination import StorageDestination
 from app.services.storage import StorageBackend, StreamingUnsupportedError
 from app.tools.disk import DISK_API_BASE, DiskScanner
-from app.tools.synology import SynologyBackend
+from app.tools.synology import SynologyAPIError, SynologyBackend
 
 TEMP_ROOT = Path("/tmp/recording-agent")
 TEMP_TTL = timedelta(hours=4)
@@ -42,10 +45,14 @@ class TransferService:
         disk: DiskScanner,
         storage: StorageBackend,
         client: httpx.AsyncClient,
+        settings: Settings | None = None,
     ) -> None:
         self._disk = disk
         self._storage = storage
         self._client = client
+        self._synology_interview_roots = (
+            settings.synology_interview_roots if settings is not None else ()
+        )
 
     async def transfer(
         self,
@@ -54,8 +61,30 @@ class TransferService:
         candidate_name: str,
         session: AsyncSession,
     ) -> TransferResult:
-        del session
-        if recording.storage_key and recording.generated_filename:
+        if recording.storage_destination_id and isinstance(self._storage, SynologyBackend):
+            if not recording.generated_filename:
+                raise TransferError("destination", ValueError("generated filename is missing"))
+            destination = await session.scalar(
+                select(StorageDestination).where(
+                    StorageDestination.id == recording.storage_destination_id,
+                    StorageDestination.recruiter_id == recruiter.id,
+                    StorageDestination.writable.is_(True),
+                    StorageDestination.symlink_safe.is_(True),
+                )
+            )
+            if destination is None:
+                raise TransferError("destination", ValueError("storage destination is unavailable"))
+            try:
+                folder, root = _canonical_allowed_destination(
+                    destination.canonical_path, self._synology_interview_roots
+                )
+                await self._storage.validate_existing_directory_under_root(root, folder)
+            except (SynologyAPIError, ValueError) as error:
+                raise TransferError("destination", error) from error
+            except PermissionError as error:
+                raise TransferError("destination", error) from error
+            filename = recording.generated_filename
+        elif recording.storage_key and recording.generated_filename:
             folder, _, filename = recording.storage_key.rpartition("/")
             if not folder or filename != recording.generated_filename:
                 raise TransferError("destination", ValueError("persisted storage key is invalid"))
@@ -76,10 +105,11 @@ class TransferService:
                 f"{recording.calendar_dtstart:%Y-%m-%d}/{safe_name}"
             )
             filename = recording.disk_filename
-        try:
-            await self._storage.ensure_folder(folder)
-        except Exception as error:
-            raise TransferError("ensure_folder", error) from error
+        if not (recording.storage_destination_id and isinstance(self._storage, SynologyBackend)):
+            try:
+                await self._storage.ensure_folder(folder)
+            except Exception as error:
+                raise TransferError("ensure_folder", error) from error
         try:
             download = await self._disk._request(  # noqa: SLF001
                 "GET",
@@ -111,6 +141,8 @@ class TransferService:
 
     async def create_share_link(self, path: str) -> str:
         try:
+            if isinstance(self._storage, SynologyBackend):
+                return await self._storage.create_share_link(path)
             return await self._storage.create_share_link(path)
         except Exception as error:
             raise TransferError("share_link", error) from error
@@ -164,6 +196,15 @@ async def _file_chunks(path: Path) -> AsyncIterator[bytes]:
     async with await anyio.open_file(path, "rb") as source:
         while chunk := await source.read(1024 * 1024):
             yield chunk
+
+
+def _canonical_allowed_destination(path: str, roots: tuple[str, ...]) -> tuple[str, str]:
+    for root in roots:
+        try:
+            return SynologyBackend.canonical_under_root(root, path), root
+        except ValueError:
+            continue
+    raise ValueError("storage destination is outside allowed interview roots")
 
 
 async def cleanup_stale_temp_files(root: Path = TEMP_ROOT, now: datetime | None = None) -> int:

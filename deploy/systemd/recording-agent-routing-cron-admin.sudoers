@@ -1,0 +1,4 @@
+# Install as /etc/sudoers.d/recording-agent-routing-cron-admin with mode 0440.
+# Cron lifecycle remains root-owned; no CI or agent identity may mutate it.
+Defaults:openclaw env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+openclaw ALL=(root) NOPASSWD: /usr/local/sbin/recording-agent-routing-cron-admin status

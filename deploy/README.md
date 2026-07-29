@@ -178,6 +178,44 @@ memory metrics. Failure enters the same schema-aware recovery decision as a fail
 Enable exactly one scheduler only after its PostgreSQL ownership lock and the Memory Bank's
 integration-specific approval gates pass.
 
+## Autonomous routing command-cron
+
+The daily or manual Backend scan is the business trigger. After deterministic matching and bounded
+Synology discovery, it creates one durable routing job. It never starts OpenClaw or calls an LLM.
+Gateway Cron runs a root-owned dispatcher every two minutes only to notice a ready job. The dispatcher
+uses a host-level `flock`, calls the authenticated loopback dispatch endpoint, and exits with
+`NO_REPLY` on `null`; therefore an empty queue creates no model request.
+
+For a leased job the dispatcher starts `recordings-saver` with a unique session key and a message
+containing only `job_id` and a one-time nonce. The skill activates the lease, receives bounded
+candidate/date context plus `{id,label}` choices, resolves exactly one returned ID or defers, then
+returns `NO_REPLY`. It has no chat delivery route. Backend remains the sole owner of transfer,
+Notion, Synology, recruiter notification, retries, and destination validation.
+
+The dispatcher invokes `openclaw agent` through the already active loopback Gateway. Its child uses
+an empty allowlist environment containing only the Gateway WebSocket URL/token, Backend loopback URL,
+and OpenClaw state/config paths. It does not receive `RECORDINGS_SAVER_LLM_API_KEY`, Mattermost
+credentials, or the Backend/OpenClaw dispatch secret. The root-only `preflight` admin command proves
+Gateway RPC access and `recordings-saver` registration without creating a model turn:
+
+```bash
+sudo /usr/local/sbin/recording-agent-routing-cron-admin preflight
+```
+
+Install only after the routing-job Backend release and Gateway preflight are approved:
+
+```bash
+sudo APPROVE_ROUTING_CRON_INSTALL=yes ./deploy/scripts/install-routing-cron.sh
+sudo /usr/local/sbin/recording-agent-routing-cron-admin status
+sudo /usr/local/sbin/recording-agent-routing-cron-admin run
+```
+
+The installer is idempotent for files and replaces only its named Gateway Cron job. It runs the
+OpenClaw CLI in a transient `openclaw` systemd unit with the root-owned Gateway `EnvironmentFile`;
+it validates permissions but never reads, prints, stages, or stores secret values. Inspect lag and
+failures through `cron show`/`cron runs`; remove the job with the root-only admin command before a
+rollback. Do not use heartbeat or a recruiter DM session for this work.
+
 ## Backup and rollback
 
 The old Backend is stopped before backup and remains quiesced through migration and candidate

@@ -137,8 +137,13 @@ run_openclaw() {
     OPENCLAW_CONFIG_PATH="$config_path" \
     "$OPENCLAW" "$@"
 }
-run_openclaw "$staged/openclaw.json" config validate --json >/dev/null ||
+candidate_config="$CONFIG.candidate-$commit"
+install -o root -g openclaw -m 0640 "$staged/openclaw.json" "$candidate_config"
+run_openclaw "$candidate_config" config validate --json >/dev/null || {
+  rm -f -- "$candidate_config"
   die "pinned OpenClaw rejected candidate config"
+}
+rm -f -- "$candidate_config"
 
 backup="$ROOT/shared-backups/$(date -u +%Y%m%dT%H%M%SZ)-$commit"
 install -d -o root -g root -m 0700 "$backup"
@@ -170,6 +175,7 @@ restore_previous() {
   fi
   systemctl restart openclaw-gateway.service
   printf 'shared rollout failed; previous config restored\n' >&2
+  exit 1
 }
 trap restore_previous ERR
 
@@ -179,7 +185,15 @@ mv -Tf "$CONFIG.next" "$CONFIG"
 mv -Tf "$INVENTORY.next" "$INVENTORY"
 systemctl restart openclaw-gateway.service
 systemctl is-active --quiet openclaw-gateway.service
-run_openclaw "$CONFIG" gateway status --require-rpc >/dev/null
+gateway_ready=false
+for _ in {1..10}; do
+  if run_openclaw "$CONFIG" gateway status --require-rpc >/dev/null 2>&1; then
+    gateway_ready=true
+    break
+  fi
+  sleep 1
+done
+[[ $gateway_ready == true ]] || die "Gateway RPC did not become ready"
 run_openclaw "$CONFIG" channels status --probe >/dev/null
 validate_routes "$CONFIG"
 

@@ -137,6 +137,7 @@ def _request(
     query: dict[str, Any] | None = None,
     body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    authenticate: bool = True,
 ) -> Any:
     base = urlsplit(_backend_url())
     query_string = urlencode(
@@ -144,16 +145,18 @@ def _request(
     )
     url = urlunsplit((base.scheme, base.netloc, f"{base.path.rstrip('/')}{path}", query_string, ""))
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+    request_headers = {
+        "Accept": "application/json",
+        **({"Content-Type": "application/json"} if data is not None else {}),
+        **(headers or {}),
+    }
+    if authenticate:
+        request_headers["Authorization"] = f"Bearer {_secret()}"
     request = Request(
         url,
         data=data,
         method=method,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {_secret()}",
-            **({"Content-Type": "application/json"} if data is not None else {}),
-            **(headers or {}),
-        },
+        headers=request_headers,
     )
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -244,6 +247,41 @@ def _parser() -> argparse.ArgumentParser:
     non_interview.add_argument("--expected-version", required=True, type=int)
     non_interview.add_argument("--idempotency-key", required=True)
 
+    route_interview = subparsers.add_parser(
+        "route-interview", help="route one interview recording to a safe Synology destination"
+    )
+    _add_recruiter_user_id_argument(route_interview)
+    _add_dm_channel_argument(route_interview)
+    route_interview.add_argument("--recording-id", required=True, type=uuid.UUID)
+    route_interview.add_argument("--destination-id", required=True, type=uuid.UUID)
+    route_interview.add_argument("--expected-version", required=True, type=int)
+    route_interview.add_argument("--idempotency-key", required=True)
+
+    reroute = subparsers.add_parser("reroute-recording", help="move one completed recording")
+    _add_recruiter_user_id_argument(reroute)
+    _add_dm_channel_argument(reroute)
+    reroute.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reroute.add_argument("--destination-id", required=True, type=uuid.UUID)
+    reroute.add_argument("--expected-version", required=True, type=int)
+    reroute.add_argument("--idempotency-key", required=True)
+
+    reassignment_resolve = subparsers.add_parser("notion-reassignment-resolve")
+    _add_recruiter_user_id_argument(reassignment_resolve)
+    _add_dm_channel_argument(reassignment_resolve)
+    reassignment_resolve.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reassignment_resolve.add_argument("--hint", required=True)
+    reassignment_propose = subparsers.add_parser("notion-reassignment-propose")
+    _add_recruiter_user_id_argument(reassignment_propose)
+    _add_dm_channel_argument(reassignment_propose)
+    reassignment_propose.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reassignment_propose.add_argument("--target-page-id", required=True)
+    reassignment_confirm = subparsers.add_parser("notion-reassignment-confirm")
+    _add_recruiter_user_id_argument(reassignment_confirm)
+    _add_dm_channel_argument(reassignment_confirm)
+    reassignment_confirm.add_argument("--proposal-id", required=True, type=uuid.UUID)
+    reassignment_confirm.add_argument("--capability", required=True)
+    reassignment_confirm.add_argument("--idempotency-key", required=True)
+
     cleanup_preview = subparsers.add_parser(
         "cleanup-preview", help="preview eligible completed source recordings"
     )
@@ -262,6 +300,19 @@ def _parser() -> argparse.ArgumentParser:
     cleanup_confirm.add_argument("--capability", required=True)
     cleanup_confirm.add_argument("--snapshot-hash", required=True)
     cleanup_confirm.add_argument("--idempotency-key", required=True)
+
+    for name in ("routing-activate", "routing-resolve", "routing-defer"):
+        routing = subparsers.add_parser(name, help=f"{name} one autonomous routing job")
+        routing.add_argument("--job-id", required=True, type=uuid.UUID)
+        routing.add_argument("--dispatch-nonce", required=True)
+        if name == "routing-resolve":
+            routing.add_argument("--snapshot-hash", required=True)
+            routing.add_argument("--destination-id", required=True, type=uuid.UUID)
+        if name == "routing-defer":
+            routing.add_argument("--snapshot-hash", required=True)
+            routing.add_argument(
+                "--reason", required=True, choices=("ambiguous", "no_match", "model_error")
+            )
     return parser
 
 
@@ -311,6 +362,45 @@ def _question_actions(raw: str) -> list[dict[str, Any]]:
 
 
 def _execute(args: argparse.Namespace) -> Any:
+    if args.command == "routing-activate":
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/activate",
+            body={"worker_id": "recordings-saver", "dispatch_nonce": args.dispatch_nonce},
+            authenticate=False,
+        )
+    if args.command == "routing-resolve":
+        if len(args.snapshot_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in args.snapshot_hash
+        ):
+            raise ClientError("Snapshot hash must be a lowercase SHA-256 hex value")
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/resolve",
+            body={
+                "worker_id": "recordings-saver",
+                "dispatch_nonce": args.dispatch_nonce,
+                "snapshot_hash": args.snapshot_hash,
+                "destination_id": str(args.destination_id),
+            },
+            authenticate=False,
+        )
+    if args.command == "routing-defer":
+        if len(args.snapshot_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in args.snapshot_hash
+        ):
+            raise ClientError("Snapshot hash must be a lowercase SHA-256 hex value")
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/defer",
+            body={
+                "worker_id": "recordings-saver",
+                "dispatch_nonce": args.dispatch_nonce,
+                "snapshot_hash": args.snapshot_hash,
+                "reason": args.reason,
+            },
+            authenticate=False,
+        )
     if args.command == "scan":
         return _request(
             "POST",
@@ -396,6 +486,61 @@ def _execute(args: argparse.Namespace) -> Any:
                 "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
                 "destination_id": str(args.destination_id),
                 "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "route-interview":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/route-interview",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "destination_id": str(args.destination_id),
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "reroute-recording":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/reroute",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "destination_id": str(args.destination_id),
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "notion-reassignment-resolve":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/notion-reassignment/resolve",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "hint": args.hint,
+            },
+        )
+    if args.command == "notion-reassignment-propose":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/notion-reassignment/propose",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "target_page_id": args.target_page_id,
+            },
+        )
+    if args.command == "notion-reassignment-confirm":
+        return _request(
+            "POST",
+            f"/tools/notion-reassignment/{args.proposal_id}/confirm",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "capability": args.capability,
                 "idempotency_key": args.idempotency_key,
             },
         )
@@ -610,7 +755,8 @@ def _destinations_message(result: dict[str, Any]) -> str:
         return "No writable storage destinations are available."
     lines = [f"Writable storage destinations: {len(items)}."]
     for number, item in enumerate(items, start=1):
-        lines.append(f"{number}. {str(item.get('display_name') or 'folder')[:200]}")
+        label = str(item.get("path_label") or item.get("display_name") or "folder")
+        lines.append(f"{number}. {label[:240]}")
     return "\n".join(lines)
 
 
@@ -658,6 +804,19 @@ def _message_for(command: str, result: Any) -> str:
             f"Working-meeting recording processed; status: {_status_label(result.get('status'))}; "
             f"link: {result.get('safe_link') or 'unavailable'}."
         )
+    if command == "route-interview":
+        return (
+            f"Interview recording processed; status: {_status_label(result.get('status'))}; "
+            f"link: {result.get('safe_link') or 'unavailable'}."
+        )
+    if command == "reroute-recording":
+        return f"Recording moved; link: {result.get('safe_link') or 'unavailable'}."
+    if command == "notion-reassignment-resolve":
+        return _destinations_message({"items": result.get("items", [])})
+    if command == "notion-reassignment-propose":
+        return "Confirm the displayed Notion reassignment before it changes either card."
+    if command == "notion-reassignment-confirm":
+        return "Notion recording link reassigned."
     if command == "cleanup-preview":
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":

@@ -164,7 +164,15 @@ async def test_minio_rejects_existing_key_owned_by_another_recording() -> None:
 
 def test_storage_factory_selects_provider() -> None:
     minio = StorageFactory.create(Settings(storage_provider="minio"))
-    synology = StorageFactory.create(Settings(storage_provider="synology"))
+    synology = StorageFactory.create(
+        Settings(
+            storage_provider="synology",
+            synology_base_url="https://nas.test",
+            synology_user="operator",
+            synology_pass=SecretStr("password"),
+            synology_interview_roots=("/home/Recruiting-E/2. Interviews external",),
+        )
+    )
     assert isinstance(minio, MinIOBackend)
     assert minio.durable_for_source_cleanup is False
     assert isinstance(synology, SynologyBackend)

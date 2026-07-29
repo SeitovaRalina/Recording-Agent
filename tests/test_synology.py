@@ -74,7 +74,7 @@ async def test_upload_streams_multipart_and_returns_path() -> None:
 async def test_create_share_link_and_error_propagation() -> None:
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
-        with respx.mock:
+        with respx.mock as router:
             respx.post(URL).mock(
                 return_value=httpx.Response(
                     200,
@@ -82,12 +82,160 @@ async def test_create_share_link_and_error_propagation() -> None:
                 )
             )
             assert await backend.create_share_link("/base/video.webm") == "https://share"
+            body = parse_qs((await router.calls.last.request.aread()).decode())
+            assert body["date_expired"] == ["-1"]
+            assert body["date_available"] == ["0"]
+            assert "password" not in body
         with respx.mock:
             respx.post(URL).mock(
                 return_value=httpx.Response(200, json={"success": False, "error": {"code": 999}})
             )
             with pytest.raises(SynologyAPIError):
                 await backend.create_share_link("/base/video.webm")
+
+
+@pytest.mark.anyio
+async def test_find_public_share_link_recovers_exact_path_only() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "links": [
+                                {"path": "/base/other.webm", "url": "https://wrong"},
+                                {"path": "/base/video.webm", "url": "https://right"},
+                            ]
+                        },
+                    },
+                )
+            )
+            assert await backend.find_public_share_link("/base/video.webm") == "https://right"
+    assert route.calls.last.request.url.params["method"] == "list"
+
+
+@pytest.mark.anyio
+async def test_find_public_share_link_paginates_to_exact_path() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        first = [{"path": f"/base/{index}", "url": "https://other"} for index in range(100)]
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(200, json={"success": True, "data": {"links": first}}),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {"links": [{"path": "/base/video.webm", "url": "https://right"}]},
+                        },
+                    ),
+                ]
+            )
+            assert await backend.find_public_share_link("/base/video.webm") == "https://right"
+    assert [call.request.url.params["offset"] for call in route.calls] == ["0", "100"]
+
+
+@pytest.mark.anyio
+async def test_sid_login_is_used_when_api_key_is_unavailable() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend(
+            "https://nas.test",
+            SecretStr(""),
+            http,
+            username="operator",
+            password=SecretStr("password"),
+            device_id=SecretStr("device-1"),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            auth = router.get(URL).mock(
+                return_value=httpx.Response(200, json={"success": True, "data": {"sid": "sid-1"}})
+            )
+            share = router.post(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"success": True, "data": {"links": [{"url": "https://share"}]}},
+                )
+            )
+
+            assert await backend.create_share_link("/base/video.webm") == "https://share"
+
+    auth_query = parse_qs(str(auth.calls.last.request.url.query, encoding="utf-8"))
+    share_query = parse_qs(str(share.calls.last.request.url.query, encoding="utf-8"))
+    assert auth_query["api"] == ["SYNO.API.Auth"]
+    assert auth_query["account"] == ["operator"]
+    assert auth_query["device_id"] == ["device-1"]
+    assert "X-SYNO-Token" not in share.calls.last.request.headers
+    assert share_query["_sid"] == ["sid-1"]
+
+
+@pytest.mark.anyio
+async def test_live_destination_validation_rejects_symlink() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get("https://nas.test/webapi/query.cgi").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "SYNO.FileStation.Info": {},
+                            "SYNO.FileStation.List": {},
+                            "SYNO.FileStation.Sharing": {},
+                        },
+                    },
+                )
+            )
+            route = router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "files": [
+                                    {
+                                        "path": "/root",
+                                        "name": "root",
+                                        "isdir": True,
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/root",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "files": [
+                                    {
+                                        "path": "/root/team",
+                                        "name": "team",
+                                        "isdir": True,
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/elsewhere",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                ]
+            )
+            with pytest.raises(PermissionError, match="writable real"):
+                await backend.validate_existing_directory_under_root("/root", "/root/team")
+
+    assert len(route.calls) == 2
 
 
 def test_canonical_path_rejects_escape_traversal_and_backslash() -> None:

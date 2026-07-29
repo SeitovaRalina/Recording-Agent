@@ -1,5 +1,7 @@
 import hashlib
+import uuid
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -497,3 +499,129 @@ async def test_offline_resolve_preserves_choice_version_and_idempotent_replay(
     assert replay.accepted[0].replayed is True
     assert question.recording.notion_page_id == "notion-page"
     assert await session.scalar(select(NotificationOutbox.id)) is None
+
+
+@pytest.mark.anyio
+async def test_autonomous_destination_answer_validates_live_destination_once_and_replays(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(
+        openclaw_secret="secret",  # pragma: allowlist secret
+        test_mode_enabled=True,
+        mattermost_delivery_enabled=False,
+        test_recruiter_allowlist={"r@example.com"},
+        test_notion_database_allowlist={"db"},
+        test_mattermost_user_allowlist={"recruiter"},
+        minio_test_prefix="root",
+    )
+    ignored_destination_id = uuid.uuid4()
+    destination_id = uuid.uuid4()
+    destinations = AsyncMock()
+    destinations.resolve.return_value = SimpleNamespace(id=destination_id)
+    service = QuestionQueueService(
+        ReviewService(mattermost, settings, destinations), mattermost, settings
+    )
+    question = _question("autonomous-destination", "valid-token")
+    question.question_type = "autonomous_routing_ambiguous"
+    question.question_context = {
+        "choices": [
+            {"destination_id": str(ignored_destination_id), "name": "Android"},
+            {"destination_id": str(destination_id), "name": "Backend"},
+        ]
+    }
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="recruiter",
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+    answer = QuestionAnswer(
+        question_id=question.id,
+        question_set_id=question.question_set_id,
+        action="resolve",
+        token="valid-token",
+        expected_version=3,
+        idempotency_key="autonomous-destination-1",
+        choice=2,
+    )
+
+    first = await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(answer,),
+    )
+    replay = await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(answer,),
+    )
+
+    assert first.accepted[0].status == RecordingStatus.TRANSFER_STARTED
+    assert first.accepted[0].version == 4
+    assert replay.accepted[0].replayed is True
+    assert question.recording.storage_destination_id == destination_id
+    assert question.parsed_action == "select_synology_destination"
+    destinations.resolve.assert_awaited_once_with(session, recruiter, destination_id)
+
+
+@pytest.mark.anyio
+async def test_routing_defer_notification_renders_bounded_labels_and_dedupes(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")  # pragma: allowlist secret
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("routing-notification", "valid-token")
+    android_id = uuid.uuid4()
+    backend_id = uuid.uuid4()
+    question.question_type = "autonomous_routing_ambiguous"
+    question.question_context = {
+        "choices": [
+            {"destination_id": str(android_id), "name": "Android\n Mobile"},
+            {"destination_id": str(backend_id), "name": "Backend"},
+        ]
+    }
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+    job_id = uuid.uuid4()
+
+    first = await service.queue_routing_defer_notification(
+        session, job_id=job_id, recording=question.recording, review=question
+    )
+    replay = await service.queue_routing_defer_notification(
+        session, job_id=job_id, recording=question.recording, review=question
+    )
+
+    assert first.id == replay.id
+    assert first.payload == {
+        "message": (
+            "Recording routing-notification.webm needs a Synology destination:\n"
+            "1. Android Mobile\n"
+            "2. Backend\n"
+            "Reply with one number."
+        ),
+        "entity_id": str(question.id),
+    }
+    assert str(android_id) not in first.payload["message"]
+    assert str(backend_id) not in first.payload["message"]
+    assert await session.scalar(
+        select(NotificationOutbox).where(
+            NotificationOutbox.dedupe_key == f"routing-defer:{job_id}:3"
+        )
+    ) == first

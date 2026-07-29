@@ -99,6 +99,33 @@ grep -F -- '--property="EnvironmentFile=$GATEWAY_ENV"' \
   "$ROOT/deploy/scripts/openclaw-shared-deploy.sh" >/dev/null
 ! grep -F 'runuser -u openclaw' \
   "$ROOT/deploy/scripts/openclaw-shared-deploy.sh" >/dev/null
+grep -F 'POST /internal/routing-jobs/dispatch' \
+  "$ROOT/openclaw/skills/recording-agent/references/contract.md" >/dev/null
+grep -F 'routing-activate' "$ROOT/openclaw/skills/recording-agent/SKILL.md" >/dev/null
+grep -F 'AUTONOMOUS_ROUTING_V1' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F -- '--agent recordings-saver --session-key' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F -- 'env -i' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F -- 'OPENCLAW_GATEWAY_URL="$GATEWAY_URL"' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F -- 'OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN"' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+! grep -F -- '--local' "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+! grep -F -- 'RECORDINGS_SAVER_LLM_API_KEY' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F "printf 'NO_REPLY" \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F -- '--command-argv' \
+  "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
+grep -F -- '--no-deliver' \
+  "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
+grep -F 'APPROVE_ROUTING_CRON_INSTALL=yes' \
+  "$ROOT/deploy/scripts/install-routing-cron.sh" >/dev/null
+grep -F 'cron create' "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
+grep -F 'gateway_client_preflight' \
+  "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
 
 quiesced_line=$(grep -n '^quiesced=true$' "$ROOT/deploy/scripts/deploy.sh" | cut -d: -f1)
 backup_line=$(grep -n 'pg_dump' "$ROOT/deploy/scripts/deploy.sh" | tail -1 | cut -d: -f1)
