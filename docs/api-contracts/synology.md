@@ -358,7 +358,22 @@ async def upload_file_stream(
 | `method` | string | `create` |
 | `path` | string | Путь к файлу |
 | `password` | string | Пароль (опционально) |
-| `date_expired` | string | Дата истечения ⚠️ формат не верифицирован, предположительно `"YYYY-MM-DD"` |
+| `date_expired` | string | `-1` for the approved public permanent link policy |
+
+## Public permanent link policy
+
+The Backend creates a File Station Sharing v3 link with `date_expired=-1` and
+`date_available=0`. It never sends a password or expiry field. URLs are public by explicit
+accepted risk. There is no dedicated human incident owner; `inerview_recordis_saver` is the
+technical account. Revoke a leaked link in File Station **Tools -> Shared Links**; revocation
+removes access, not the stored recording.
+
+## Safe reroute
+
+Reroute uses `SYNO.FileStation.CopyMove` v3 `start` with a one-element `path` array,
+`dest_folder_path`, `remove_src=true`, and `overwrite=false`. The Backend polls the background
+task and proves both destination size/owner marker and source absence before changing its active
+artifact or Notion link.
 | `expire_times` | int | Лимит обращений (0 = безлимит) |
 
 **Ответ:**

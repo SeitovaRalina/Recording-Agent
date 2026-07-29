@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash 'D:\\.vscode\\Agentication\\projects\\Recording Agent\\.codex\\hooks\\test-gate.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+# Install as /etc/sudoers.d/openclaw-shared-deploy with mode 0440.
+Defaults:openclaw-deploy env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+openclaw-deploy ALL=(root) NOPASSWD: /usr/local/sbin/openclaw-shared-deploy *

@@ -1,277 +1,148 @@
 ---
 type: reference
-status: draft
-last_updated: 2026-07-13
+status: target
+last_updated: 2026-07-22
 sources:
-  - TOR.md (раздел 11)
   - .memory-bank/architecture.md
   - .memory-bank/decisions.md
+  - swarm-report/recording-agent-mila-completion-plan.md
 ---
 
 # Data Model — Recording Agent
 
-> PostgreSQL — источник истины по состоянию обработки записей. Храним статусы, связи, идентификаторы, метаданные. Видеофайлы — никогда.
+PostgreSQL is the authoritative workflow-state store. It keeps recording metadata, matching
+provenance, questions, capabilities, delivery claims, and side-effect results. It never stores
+video bytes or plaintext integration credentials.
 
-## Таблицы
+The approved completion plan is authoritative for unfinished schema work. Existing tables and
+columns remain historical migration input; Checkpoint 1 must evolve them with an explicit Alembic
+mapping rather than create a competing review subsystem.
 
-### recordings
+## Core entities
 
-Основная таблица. Одна строка = одна запись Телемоста найденная агентом.
+### `recordings`
 
-```sql
-CREATE TABLE recordings (
-    -- Identity
-    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+One row represents one Yandex Disk source object. `disk_file_id` is unique and is the primary
+idempotency identity. The row contains:
 
-    -- Яндекс.Диск
-    disk_file_id            TEXT NOT NULL,          -- уникальный id файла на Диске (из path или etag)
-    disk_path               TEXT NOT NULL,          -- "disk:/Телемост/meeting-2026-07-13.webm"
-    disk_filename           TEXT NOT NULL,          -- "meeting-2026-07-13.webm"
-    disk_owner_email        TEXT NOT NULL,          -- email рекрутера = организатора Диска
-    disk_created_at         TIMESTAMPTZ,            -- из поля created в Disk API
-    disk_modified_at        TIMESTAMPTZ,            -- из поля modified
-    disk_size_bytes         BIGINT,
-    disk_mime_type          TEXT,                   -- "video/webm", "video/mp4"
-    disk_md5                TEXT,
+- immutable source identity and bounded metadata;
+- parsed calendar event data and immutable calendar collection provenance;
+- candidate name and optional attendee email evidence;
+- selected Notion page ID and URL;
+- selected Spot identity and title, when the card has multiple `📍 Spots` relations;
+- generated filename, canonical storage key, durable final link, and route type;
+- status, optimistic `version`, retry/error metadata, and timestamps.
 
-    -- Яндекс.Календарь
-    calendar_event_uid      TEXT,                   -- UID из VEVENT
-    calendar_event_summary  TEXT,                   -- SUMMARY (название события)
-    calendar_dtstart        TIMESTAMPTZ,            -- DTSTART нормализованный в UTC
-    calendar_dtend          TIMESTAMPTZ,            -- DTEND
-    calendar_organizer      TEXT,                   -- ORGANIZER mailto:
-    calendar_telemost_url   TEXT,                   -- LOCATION / URL / X-TELEMOST-CONFERENCE-URL
-    calendar_raw_ics        TEXT,                   -- полный VEVENT текст (для отладки)
+The data-source ID discovered from Notion is never configured or persisted. Raw ICS, authorization
+headers, tokens, passwords, and unrestricted external payloads are not persisted.
 
-    -- Кандидат (извлечён из SUMMARY события)
-    candidate_name          TEXT,                   -- "Иван Иванов" (из SUMMARY)
-    candidate_email         TEXT,                   -- если был в ATTENDEE (не гарантировано)
+Candidate lookup uses the normalized candidate name. `General Interview Date` is an output, not a
+lookup filter. Email extracted from the `TBD` formula is optional supporting evidence. A missing or
+mismatched attendee email cannot reject an otherwise valid name match.
 
-    -- Notion
-    notion_database_id      TEXT,                   -- id базы рекрутера
-    notion_page_id          TEXT,                   -- id карточки (после матчинга)
-    notion_page_url         TEXT,                   -- https://notion.so/...
+Storage identity is deterministic:
 
-    -- Synology
-    synology_folder_path    TEXT,                   -- /volume1/interviews/Anton/2026-07-13/
-    synology_file_path      TEXT,                   -- /volume1/interviews/.../filename.webm
-    synology_share_url      TEXT,                   -- публичная ссылка из Sharing.Create
-
-    -- Статус (state machine)
-    status                  TEXT NOT NULL DEFAULT 'found'
-                            CHECK (status IN (
-                                'found',
-                                'calendar_event_found',
-                                'candidate_matched',
-                                'manual_review_required',
-                                'transfer_started',
-                                'uploaded_to_synology',
-                                'synology_link_created',
-                                'notion_updated',
-                                'source_marked_processed',
-                                'source_deleted',
-                                'completed',
-                                'ignored',
-                                'failed'
-                            )),
-
-    -- Ошибка
-    error_message           TEXT,
-    error_step              TEXT,                   -- на каком шаге упало
-
-    -- Mattermost (для manual_review_required)
-    mattermost_channel_id   TEXT,                   -- id DM-канала с рекрутером
-    mattermost_post_id      TEXT,                   -- id сообщения с вопросом
-
-    -- Временные метки
-    found_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_attempted_at       TIMESTAMPTZ,
-    completed_at            TIMESTAMPTZ,
-    deleted_from_disk_at    TIMESTAMPTZ,
-
-    -- Retention
-    disk_deletable_after    TIMESTAMPTZ,            -- когда можно удалять с Диска (если задана политика)
-    source_processed        BOOLEAN NOT NULL DEFAULT false, -- помечен ли файл на Диске
-
-    -- Uniqueness: не обрабатывать один и тот же файл дважды
-    UNIQUE (disk_file_id)
-);
+```text
+YYYY-MM-DD_<candidate_name>_<project_or_spot>_<interview_type>.<ext>
+<recruiter>/<YYYY-MM-DD>/<candidate>/<generated_filename>
 ```
 
-### processing_attempts
+Zero Spot relations use `unspecified`; one relation resolves directly; multiple relations require
+an explicit recruiter selection that is persisted before filename/key generation. Relation API
+order is never authoritative.
 
-История попыток — append-only. Не обновлять, только вставлять.
+### `processing_attempts`
 
-```sql
-CREATE TABLE processing_attempts (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    recording_id    UUID NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
-    attempted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status_before   TEXT NOT NULL,
-    status_after    TEXT NOT NULL,
-    step            TEXT NOT NULL,              -- 'calendar_lookup', 'notion_search', 'transfer', etc.
-    success         BOOLEAN NOT NULL,
-    error_message   TEXT,
-    duration_ms     INTEGER,
-    metadata        JSONB                       -- доп. данные конкретного шага
-);
+Append-only audit rows record step, before/after state, success, safe error, duration, and bounded
+metadata. They must not contain secrets or raw third-party payloads.
 
-CREATE INDEX idx_processing_attempts_recording_id ON processing_attempts(recording_id);
-CREATE INDEX idx_processing_attempts_attempted_at ON processing_attempts(attempted_at);
-```
+### `recruiter_config`
 
-### recruiter_config
+Operator-owned recruiter configuration contains stable recruiter identity, allowlisted Mattermost
+user and exact DM channel, configured IANA timezone, Notion database ID, storage root, calendar
+selection version, enablement flags, and scheduler activation state.
 
-Конфигурация на рекрутера. Заполняется оператором при onboarding.
+The schedule is fixed at 18:00 in the recruiter's configured local timezone. The scheduler is
+disabled by default and remains disabled through manual canary. Manual message-triggered scan and
+status intents remain available while the scheduler is disabled.
 
-```sql
-CREATE TABLE recruiter_config (
-    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email                   TEXT NOT NULL UNIQUE,   -- disk_owner_email рекрутера
-    display_name            TEXT,
-    notion_database_id      TEXT NOT NULL,          -- id базы в Notion
-    synology_base_folder    TEXT NOT NULL,          -- /volume1/interviews/Anton
-    mattermost_user_id      TEXT,                   -- id пользователя в Mattermost
-    mattermost_dm_channel   TEXT,                   -- кэш id DM-канала с ботом
-    active                  BOOLEAN NOT NULL DEFAULT true,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+### Calendar inventory and provenance
 
--- Пример:
--- INSERT INTO recruiter_config (email, display_name, notion_database_id, synology_base_folder, mattermost_user_id)
--- VALUES ('anton@company.com', 'Антон', 'abc123-...', '/volume1/interviews/Anton', 'mm-user-id-xxx');
-```
+`recruiter_calendar` is the authoritative inventory of recruiter-owned CalDAV VEVENT collections.
+It uses a stable opaque ID, recruiter ID, canonical same-origin HTTPS URL, display-name snapshot,
+default/selected/available flags, and last-seen timestamp. The database enforces uniqueness on
+`(recruiter_id, canonical_url)` and at most one default per recruiter.
 
-### manual_reviews
+Confirmed recordings store `matched_calendar_id` plus immutable URL and display-name snapshots.
+Manual-review outcomes retain bounded diagnostics but clear confirmed event/provenance fields.
 
-Открытые запросы на ручное уточнение. Закрывается после ответа рекрутера.
+## Durable question queue
 
-```sql
-CREATE TABLE manual_reviews (
-    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    recording_id            UUID NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at             TIMESTAMPTZ,
+The existing `manual_reviews` concept is evolved into the single Backend-owned question workflow.
+Each question or question-set row must persist:
 
-    -- Что спросили
-    question_type           TEXT NOT NULL,          -- 'notion_card_ambiguous', 'calendar_not_found', 'ignore_confirm'
-    question_context        JSONB NOT NULL,         -- кандидаты, варианты карточек, etc.
+- recruiter ID and exact verified direct-message channel;
+- recording/review ID and expected recording version;
+- stable question-set identity and bounded numbered choices;
+- lifecycle: `pending`, `answered`, `processing`, `completed`, `failed`, or `suppressed`;
+- one-time capability hash and expiry; plaintext capability values are never stored;
+- stable request fingerprint, idempotency result, and answer/action tuple;
+- delivery claim/lease, attempt count, and stale-claim recovery fields;
+- initial presentation date, reminder count, and suppression timestamp;
+- safe terminal result and timestamps.
 
-    -- Ответ рекрутера
-    raw_reply               TEXT,                   -- свободный текст от рекрутера
-    parsed_action           TEXT,                   -- 'select_card', 'ignore', 'use_url'
-    resolved_notion_page_id TEXT,                   -- id карточки после резолюции
+Threads are not part of the target binding. Trusted recruiter and DM metadata comes from verified
+Mattermost/OpenClaw context or Backend lookup, never from free-form text.
 
-    -- Mattermost thread
-    mattermost_post_id      TEXT,                   -- исходное сообщение бота
-    mattermost_reply_id     TEXT,                   -- ответ рекрутера
+An unanswered question is included in its initial eligible summary, repeated once in the next
+eligible 18:00 summary, and then remains durable but becomes `suppressed` for later automatic
+summaries. Explicit reopening creates an audited new presentation opportunity. Answered,
+completed, failed, and suppressed questions never repeat automatically.
 
-    status                  TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending', 'resolved', 'expired'))
-);
+Partial replies are applied per exact question/action tuple. Accepted unambiguous items advance;
+omitted or ambiguous items remain untouched. Acknowledgements, unrelated messages, edited or
+quoted old messages, and bare numbers without an active question-set reference consume nothing.
 
-CREATE INDEX idx_manual_reviews_recording_id ON manual_reviews(recording_id);
-CREATE INDEX idx_manual_reviews_status ON manual_reviews(status) WHERE status = 'pending';
-```
+## Notification outbox and digest delivery
 
-## Индексы
+A durable outbox stores summaries, processing-start feedback, completion messages, and sanitized
+actionable errors. Each row contains a deterministic delivery key, recruiter/DM binding, payload
+kind, bounded payload, claim/lease fields, attempt state, and terminal delivery result. Unique
+delivery keys prevent duplicate DMs across retries and restarts.
 
-```sql
--- Поиск новых необработанных записей
-CREATE INDEX idx_recordings_status ON recordings(status);
+A daily digest record uses a unique recruiter plus local-date key. This enforces one eligible
+18:00 summary per recruiter-local date across restarts, DST transitions, misfires, and multiple
+Backend instances.
 
--- Поиск по рекрутеру
-CREATE INDEX idx_recordings_disk_owner ON recordings(disk_owner_email);
+## Storage destinations and cleanup previews
 
--- Поиск незавершённых (для retry)
-CREATE INDEX idx_recordings_status_found_at ON recordings(status, found_at)
-    WHERE status NOT IN ('completed', 'ignored', 'failed');
+Synology destinations use opaque Backend-owned IDs. A destination record contains recruiter,
+canonical path under the configured root, bounded display metadata, permissions/preflight state,
+and expiry where appropriate. Mila never supplies an executable raw path.
 
--- Поиск по файлу Диска (для идемпотентности)
-CREATE INDEX idx_recordings_disk_file_id ON recordings(disk_file_id);
-```
+A cleanup preview is an immutable bounded snapshot bound to recruiter, exact DM, source file IDs
+and versions, content hash, one-time capability hash, and expiry. Confirmation revalidates every
+item against Backend-proven completion and a durable production storage link, then records an
+idempotent per-file Trash-move result.
 
-## Alembic — соглашение по именованию миграций
+There is no minimum cleanup age, scheduled Yandex cleanup, or permanent-purge entity/API. Test
+MinIO links do not make a source eligible for production cleanup.
 
-```
-# Формат:
-{YYYYMMDD}_{HHMM}_{short_description}.py
+## Required integrity constraints
 
-# Примеры:
-20260713_1000_create_recordings_table.py
-20260713_1100_create_processing_attempts_table.py
-20260713_1200_create_recruiter_config_table.py
-20260713_1300_create_manual_reviews_table.py
-20260714_0900_add_disk_md5_to_recordings.py
-```
+- unique `recordings.disk_file_id`;
+- unique digest `(recruiter_id, local_date)`;
+- unique outbox deterministic delivery key;
+- one-time capability consumption with replay-equivalent result for an identical fingerprint;
+- conflicting replay, stale version, wrong recruiter/DM, and expired capability fail closed;
+- one storage key may belong to only one recording; same-recording retry reuses it, another
+  recording produces manual review;
+- canonical storage and folder paths must remain under the configured recruiter root;
+- secrets are supplied only through protected Backend service configuration.
 
-## Примеры запросов
+## Migration requirements
 
-### Найти все записи требующие ручной проверки
-
-```sql
-SELECT r.id, r.disk_filename, r.disk_owner_email,
-       r.candidate_name, r.found_at,
-       mr.question_type, mr.mattermost_post_id
-FROM recordings r
-JOIN manual_reviews mr ON mr.recording_id = r.id
-WHERE r.status = 'manual_review_required'
-  AND mr.status = 'pending'
-ORDER BY r.found_at;
-```
-
-### Найти записи застрявшие в transfer (retry кандидаты)
-
-```sql
-SELECT id, disk_filename, disk_owner_email, status,
-       last_attempted_at, error_message
-FROM recordings
-WHERE status IN ('transfer_started', 'uploaded_to_synology')
-  AND last_attempted_at < now() - interval '2 hours'
-ORDER BY last_attempted_at;
-```
-
-### Статистика по рекрутеру
-
-```sql
-SELECT disk_owner_email,
-       count(*) FILTER (WHERE status = 'completed') AS completed,
-       count(*) FILTER (WHERE status = 'failed') AS failed,
-       count(*) FILTER (WHERE status = 'manual_review_required') AS pending_review,
-       count(*) AS total
-FROM recordings
-GROUP BY disk_owner_email
-ORDER BY disk_owner_email;
-```
-
-### Записи готовые к удалению с Диска
-
-```sql
-SELECT id, disk_path, disk_filename, completed_at
-FROM recordings
-WHERE status = 'completed'
-  AND source_processed = true
-  AND deleted_from_disk_at IS NULL
-  AND (disk_deletable_after IS NULL OR disk_deletable_after <= now())
-ORDER BY completed_at;
-```
-
-### Идемпотентность: проверить что файл ещё не обрабатывался
-
-```sql
-SELECT id, status FROM recordings
-WHERE disk_file_id = $1
-LIMIT 1;
--- Если строка есть → пропустить (уже в pipeline)
--- Если нет → INSERT + начать обработку
-```
-
-## Связи с другими компонентами
-
-- [[api-contracts/yandex-disk]] → disk_file_id, disk_path, disk_created_at
-- [[api-contracts/yandex-caldav]] → calendar_event_uid, calendar_telemost_url
-- [[api-contracts/notion]] → notion_database_id, notion_page_id
-- [[api-contracts/synology]] → synology_folder_path, synology_share_url
-- [[api-contracts/mattermost]] → mattermost_channel_id, mattermost_post_id
-- [[status-machine]] → status поле + переходы
+Checkpoint 1 generates the actual Alembic revision after inspecting current ORM models and heads.
+It must define and test the mapping from legacy `pending`, `resolved`, and `expired` review rows to
+the target lifecycle, including upgrade, downgrade, `current`, and `alembic check` on isolated
+data. Applied shared migrations are never deleted.

@@ -34,6 +34,96 @@ sources:
 Authorization: Basic base64(login@yandex.ru:app_password)
 ```
 
+## Authoritative discovery and selection contract
+
+This section supersedes the legacy single-calendar examples below.
+
+Discovery follows `current-user-principal` and `calendar-home-set`, then accepts only successful
+`propstat` entries whose resource type is a calendar and whose supported component set contains
+`VEVENT`. Relative collection hrefs are canonicalized against the validated calendar home.
+Every requested or redirected URL must remain HTTPS and same-origin with the configured CalDAV
+endpoint. Redirects to another origin, arbitrary client-provided URLs, and failed property sets are
+rejected before recruiter Basic credentials are sent.
+
+Every manual and scheduled recruiter scan performs discovery exactly once before Disk listing.
+Backend stages the complete parsed collection set in memory and requires it to be non-empty before
+opening the persistence update. It validates the staged canonical URLs against stored selection:
+every selected calendar must still be available; when selection is empty, there must be exactly
+one available explicit default. Response order, display name, and URL shape never repair or
+replace an invalid selection.
+
+Only a fully validated refresh is persisted. One database transaction upserts the staged
+collections, updates availability and `last_seen_at`, and marks missing unselected collections
+unavailable without deleting them or changing selection/default state. HTTP/auth/XML failures,
+empty or incomplete discovery, and selection/default validation failures roll back the entire
+refresh and preserve the previous snapshot.
+
+Each recruiter has exactly one explicit default and zero or more selected available calendars.
+When selection is non-empty it is the effective match-eligible set; otherwise the default alone is
+effective. A validated legacy `recruiter_config.caldav_calendar_url` is a temporary compatibility
+fallback. Neither response order, display name, nor URL shape may infer a default.
+
+The internal configuration surface provides these scoped operations:
+
+- `GET` returns discovered calendars, the explicit default, selected opaque IDs, effective IDs,
+  availability, and the current selection version.
+- Selection `PUT` atomically replaces selected opaque IDs. `[]` clears selection and restores
+  default-only behavior. The caller supplies the current version/ETag; stale versions return a
+  conflict, and unknown, unavailable, or cross-recruiter IDs are rejected without partial changes.
+- The explicit-default operation accepts one available discovered opaque ID and never an URL.
+
+These operations are localhost/internal-only. They use constant-time OpenClaw-secret verification,
+scope every read and mutation to the requested recruiter, and audit actor, timestamp, version, and
+before/after IDs. Passwords, authorization headers, and service secrets never appear in responses
+or audit logs.
+
+## Refresh-before-scan failure contract
+
+Calendar refresh is a mandatory scan precondition. If it fails, that recruiter scan aborts before
+Disk listing, matching of existing `found` rows, transfer resume, review creation, or any other
+recording mutation. Existing rows and the previous calendar snapshot remain unchanged and
+retryable.
+
+A manual scan returns exactly one sanitized, bounded scan-level error with stage
+`calendar_discovery`, a stable error code, and an explicit retryability flag. It never exposes a
+raw exception, requested URL, credential, authorization material, or CalDAV payload. A scheduled
+failure for one recruiter is isolated and does not stop scans for other recruiters.
+
+Scans for the same recruiter are serialized by an in-process lock in the current single Backend
+instance. This is not a distributed lock; any future multi-instance deployment must add
+cross-process serialization before preserving this contract.
+
+## Complete event snapshot and match eligibility
+
+A scan resolves all discovered available collections and the effective subset in one immutable
+database snapshot, then issues a calendar-query REPORT to every available collection for the
+recording window. Each VEVENT is tagged with opaque calendar ID, canonical URL, display-name
+snapshot, UID, and `RECURRENCE-ID`. Only effective-calendar events are eligible; other calendars
+provide collision/source evidence. Any stale discovery state, redirect violation, or collection
+query failure makes the set incomplete and forbids a partial automatic match.
+
+The official filename parser accepts only anchored
+`YYYY-MM-DD_HHMMSS_<meeting title>.webm` and
+`YYYY-MM-DD_HHMMSS_<meeting title>_audio_only.webm` forms. The timestamp uses
+`RECORDING_FILENAME_TIMEZONE` (default: `Europe/Moscow`), independently from the recruiter's
+`SCAN_LOCAL_TIMEZONE`. Title normalization is Unicode NFKC, casefold, and trimmed/collapsed
+Unicode whitespace only. Exact normalized title/SUMMARY equality and compatible start time are
+mandatory before confidence scoring. Substring, token, punctuation-dropping, transliteration,
+edit-distance, fuzzy, and LLM comparisons are forbidden.
+
+Exactly one compatible effective occurrence, no compatible occurrence outside the effective set,
+and the confidence threshold are required for confirmation. Deduplication is limited to
+`(calendar_id, UID, RECURRENCE-ID)`. Otherwise the result is a typed manual-review reason with
+bounded candidate summaries and no confirmed provenance or raw ICS. An incomplete collection set
+leaves the recording resumable rather than creating a manual conclusion from partial evidence.
+
+## Operational remediation
+
+The calendar-rematch utility defaults to dry-run and lists non-terminal confirmed matches whose
+stored title is incompatible with the filename. Explicit `--apply` requeues only listed rows,
+clears confirmed event/provenance fields, and emits operator audit output. Terminal rows and Disk,
+Notion, Synology, retention, and transfer state are never changed automatically.
+
 ---
 
 ## Известные проблемы Яндекс.Календаря (подтверждено из GitHub)
@@ -48,7 +138,11 @@ Authorization: Basic base64(login@yandex.ru:app_password)
 
 ---
 
-## Операция: найти доступные календари (PROPFIND)
+## Legacy calendar-listing example (superseded)
+
+The following example is retained as historical protocol context only. Production discovery must
+use the authoritative principal/home, same-origin, VEVENT-capable contract above and must not
+construct or select a calendar from response order.
 
 **Request:**
 ```
@@ -364,7 +458,11 @@ def parse_vevent(ical_text: str) -> dict:
 
 ---
 
-## Как извлечь имя кандидата
+## Legacy candidate-name extraction (superseded for event correlation)
+
+The historical heuristic below may inform later Notion candidate work, but it must not be used to
+correlate a recording with a VEVENT. Calendar correlation uses the exact normalized filename title
+and full `SUMMARY` equality defined in the authoritative contract above; it never removes words.
 
 Имя кандидата гарантировано есть в `SUMMARY` (из TOR.md раздел 5).
 
