@@ -10,6 +10,8 @@ die() { printf 'install-routing-cron: %s\n' "$*" >&2; exit 1; }
   die "set APPROVE_ROUTING_CRON_INSTALL=yes after reviewing the cron contract"
 [[ -f /etc/openclaw/openclaw.json && -f /etc/openclaw/gateway.env ]] ||
   die "Gateway configuration and environment must exist before installing routing cron"
+[[ -f /etc/recording-agent/backend.env ]] ||
+  die "Backend environment must exist before installing routing cron"
 
 install -o root -g root -m 0755 \
   "$REPO_ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" \
@@ -22,6 +24,19 @@ install -o root -g root -m 0440 \
   /etc/sudoers.d/recording-agent-routing-cron-admin
 visudo -cf /etc/sudoers.d/recording-agent-routing-cron-admin >/dev/null ||
   die "invalid routing cron sudoers policy"
+install -d -o openclaw -g openclaw -m 0700 /var/lib/openclaw/run
+openclaw_secret=$(sed -n 's/^OPENCLAW_SECRET=//p' /etc/recording-agent/backend.env | tr -d '\r')
+gateway_token=$(sed -n -E 's/^OPENCLAW_GATEWAY_TOKEN=([0-9a-f]{64})\r?$/\1/p' \
+  /etc/openclaw/gateway.env)
+[[ -n $openclaw_secret ]] || die "OPENCLAW_SECRET is missing from backend env"
+[[ $gateway_token =~ ^[0-9a-f]{64}$ ]] ||
+  die "OPENCLAW_GATEWAY_TOKEN is missing from gateway env"
+{
+  printf 'OPENCLAW_SECRET=%s\n' "$openclaw_secret"
+  printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "$gateway_token"
+} >/etc/openclaw/recording-agent-routing.env
+chown root:openclaw /etc/openclaw/recording-agent-routing.env
+chmod 0640 /etc/openclaw/recording-agent-routing.env
 /usr/local/sbin/recording-agent-routing-cron-admin preflight
 /usr/local/sbin/recording-agent-routing-cron-admin install
 /usr/local/sbin/recording-agent-routing-cron-admin status >/dev/null

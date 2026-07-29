@@ -112,6 +112,12 @@ grep -F -- 'OPENCLAW_GATEWAY_URL="$GATEWAY_URL"' \
   "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
 grep -F -- 'OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN"' \
   "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F '/etc/openclaw/recording-agent-routing.env' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F '640:root:openclaw' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
+grep -F '/var/lib/openclaw/run/recording-agent-routing-dispatch.lock' \
+  "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
 ! grep -F -- '--local' "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
 ! grep -F -- 'RECORDINGS_SAVER_LLM_API_KEY' \
   "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
@@ -119,9 +125,15 @@ grep -F "printf 'NO_REPLY" \
   "$ROOT/deploy/scripts/recording-agent-routing-dispatch.sh" >/dev/null
 grep -F -- '--command-argv' \
   "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
+! grep -F -- '["/usr/bin/sudo","-n"' \
+  "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
 grep -F -- '--no-deliver' \
   "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
 grep -F 'APPROVE_ROUTING_CRON_INSTALL=yes' \
+  "$ROOT/deploy/scripts/install-routing-cron.sh" >/dev/null
+grep -F '/etc/openclaw/recording-agent-routing.env' \
+  "$ROOT/deploy/scripts/install-routing-cron.sh" >/dev/null
+grep -F 'install -d -o openclaw -g openclaw -m 0700 /var/lib/openclaw/run' \
   "$ROOT/deploy/scripts/install-routing-cron.sh" >/dev/null
 grep -F 'cron create' "$ROOT/deploy/scripts/recording-agent-routing-cron-admin.sh" >/dev/null
 grep -F 'gateway_client_preflight' \
