@@ -44,7 +44,10 @@ def test_legacy_backfill_url_validation_and_id_are_deterministic() -> None:
 
     assert canonical(" HTTPS://CALDAV.YANDEX.RU//calendars/recruiter/ ") == safe_url
     assert canonical("http://caldav.yandex.ru/calendar/") is None
-    assert canonical("https://user:secret@caldav.yandex.ru/calendar/") is None
+    url_with_basic_auth = (
+        "https://user:secret@caldav.yandex.ru/calendar/"  # pragma: allowlist secret
+    )
+    assert canonical(url_with_basic_auth) is None
     assert canonical("https://caldav.yandex.ru/calendar/#fragment") is None
     assert make_id(recruiter_id, safe_url) == make_id(recruiter_id, safe_url)
     assert make_id(uuid.uuid4(), safe_url) != make_id(recruiter_id, safe_url)

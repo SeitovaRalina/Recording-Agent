@@ -64,7 +64,7 @@ Authorization: OAuth <access_token>
       "created": "2026-07-13T15:30:00+03:00",
       "modified": "2026-07-13T15:31:00+03:00",
       "path": "disk:/Телемост/recording.mp4",
-      "md5": "4334dc6379c8f95ddf11b8508cfea271",
+      "md5": "<file-md5>",
       "type": "file",
       "mime_type": "video/mp4",
       "size": 524288000
@@ -109,14 +109,14 @@ async def list_video_files(token: str, offset: int = 0, limit: int = 20) -> dict
 **Пример ответа:**
 ```json
 {
-  "public_key": "HQsmHLoeyBlJf8Eu1jlmzuU+ZaLkjPkgcvmoktUCIo8=",
+  "public_key": "<public-key>",
   "public_url": "https://yadi.sk/d/AaaBbb1122Ccc",
   "name": "recording.mp4",
   "path": "disk:/Телемост/recording.mp4",
   "type": "file",
   "created": "2026-07-13T15:30:00+04:00",
   "modified": "2026-07-13T15:31:00+04:00",
-  "md5": "4334dc6379c8f95ddf11b8508cfea271",
+  "md5": "<file-md5>",
   "mime_type": "video/mp4",
   "size": 524288000,
   "preview": "<thumbnail_url>",

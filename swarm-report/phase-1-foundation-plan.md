@@ -118,7 +118,7 @@ Services:
 
 ```
 # Database
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/recording_agent
+DATABASE_URL=postgresql+asyncpg://<user>:<password>@localhost:5432/recording_agent
 
 # Yandex OAuth (per-recruiter tokens seeded via tools/setup/yandex_oauth.py — Phase 2)
 YANDEX_CLIENT_ID=
@@ -147,7 +147,7 @@ STORAGE_PROVIDER=minio      # minio | synology
 
 # OpenClaw
 OPENCLAW_EVENTS_URL=http://localhost:8001/events
-OPENCLAW_SECRET=            # shared secret for X-OpenClaw-Secret header
+OPENCLAW_SECRET=            # local shared test value for X-OpenClaw-Secret
 
 # Pipeline
 CONFIDENCE_THRESHOLD=0.7
@@ -209,13 +209,13 @@ Raises `ValueError(f"Invalid transition {current} → {new_status}")` on invalid
 
 `app/routers/events.py`:
 ```python
-OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"
+OPENCLAW_SECRET_HEADER = "X-OpenClaw-Secret"  # pragma: allowlist secret
 
 async def verify_openclaw_secret(
     x_openclaw_secret: str | None = Header(default=None),
     settings: Settings = Depends(get_settings),
 ) -> None:
-    expected = settings.openclaw_secret.get_secret_value()
+    expected = settings.openclaw_secret.get_secret_value()  # pragma: allowlist secret
     if not expected or x_openclaw_secret != expected:
         raise HTTPException(status_code=401, detail="Invalid OpenClaw secret")
 ```

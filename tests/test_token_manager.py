@@ -32,7 +32,7 @@ async def test_get_access_token_uses_fresh_cache(session: AsyncSession) -> None:
 async def test_refresh_posts_form_and_updates_database(session: AsyncSession) -> None:
     settings = Settings(
         YANDEX_CLIENT_ID="client",
-        YANDEX_CLIENT_SECRET="secret",
+        YANDEX_CLIENT_SECRET="secret",  # pragma: allowlist secret
         YANDEX_REFRESH_TOKENS='{"recruiter@example.com":"refresh"}',
     )
     async with httpx.AsyncClient() as client:
@@ -51,7 +51,10 @@ async def test_refresh_posts_form_and_updates_database(session: AsyncSession) ->
 async def test_refresh_replaces_server_rejected_but_unexpired_token(
     session: AsyncSession,
 ) -> None:
-    settings = Settings(YANDEX_CLIENT_ID="client", YANDEX_CLIENT_SECRET="secret")
+    settings = Settings(
+        YANDEX_CLIENT_ID="client",
+        YANDEX_CLIENT_SECRET="secret",  # pragma: allowlist secret
+    )
     manager = YandexTokenManager(session, settings)
     await manager.upsert_token(
         "recruiter@example.com",
@@ -102,7 +105,7 @@ async def test_concurrent_first_refresh_posts_once() -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     settings = Settings(
         YANDEX_CLIENT_ID="client",
-        YANDEX_CLIENT_SECRET="secret",
+        YANDEX_CLIENT_SECRET="secret",  # pragma: allowlist secret
         YANDEX_REFRESH_TOKENS='{"recruiter@example.com":"refresh"}',
     )
     async with httpx.AsyncClient() as client:
