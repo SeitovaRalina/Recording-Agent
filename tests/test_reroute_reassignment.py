@@ -18,8 +18,8 @@ def test_reroute_rejects_source_target_without_shared_allowed_root() -> None:
 
 
 def test_reassignment_url_page_id_is_canonicalized() -> None:
-    raw = "41cfe300f31183929e6301ffe4bf20fa"
-    assert _canonical_notion_page_id(raw) == "41cfe300-f311-8392-9e63-01ffe4bf20fa"
+    raw = "00000000000000000000000000000001"
+    assert _canonical_notion_page_id(raw) == "00000000-0000-0000-0000-000000000001"
     assert _canonical_notion_page_id("not-a-page") is None
 
 
