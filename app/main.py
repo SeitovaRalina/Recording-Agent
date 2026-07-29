@@ -10,6 +10,7 @@ from app.db.engine import create_engine, create_session_factory
 from app.routers.calendars import router as calendars_router
 from app.routers.events import router as events_router
 from app.routers.health import router as health_router
+from app.routers.routing_jobs import dispatcher_router, worker_router
 from app.routers.tools import router as tools_router
 from app.scheduler.cron import register_jobs
 from app.services.candidate import CandidateService
@@ -19,6 +20,7 @@ from app.services.matching import InterviewMatcher
 from app.services.non_interview import NonInterviewService
 from app.services.question_queue import QuestionQueueService
 from app.services.reviews import ReviewService
+from app.services.routing_jobs import RoutingJobService
 from app.services.status import StatusService
 from app.services.storage import StorageFactory
 from app.services.transfer import TransferService
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = engine
     session_factory = create_session_factory(engine)
     app.state.session_factory = session_factory
+    app.state.settings = settings
     app.state.scheduler = scheduler
     token_manager = YandexTokenManager(session_factory, settings)
     http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10))
@@ -58,12 +61,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.mattermost_bot_user_id,
         http_client,
     )
-    review_service = ReviewService(mattermost, settings)
-    question_queue_service = QuestionQueueService(review_service, mattermost, settings)
-    cleanup_service = CleanupService(disk, settings)
     destination_service = (
         DestinationService(storage, settings) if isinstance(storage, SynologyBackend) else None
     )
+    review_service = ReviewService(mattermost, settings, destination_service)
+    question_queue_service = QuestionQueueService(review_service, mattermost, settings)
+    cleanup_service = CleanupService(disk, settings)
     non_interview_service = (
         NonInterviewService(session_factory, destination_service, transfer_service)
         if destination_service is not None
@@ -79,6 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.cleanup_service = cleanup_service
     app.state.destination_service = destination_service
     app.state.non_interview_service = non_interview_service
+    app.state.routing_job_service = RoutingJobService()
     register_jobs(
         scheduler,
         session_factory,
@@ -91,6 +95,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         notion,
         review_service,
         question_queue_service,
+        destination_service,
+        app.state.routing_job_service,
     )
     scheduler.start()
     try:
@@ -106,3 +112,5 @@ app.include_router(health_router)
 app.include_router(events_router)
 app.include_router(calendars_router)
 app.include_router(tools_router)
+app.include_router(dispatcher_router)
+app.include_router(worker_router)

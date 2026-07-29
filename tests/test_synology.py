@@ -74,7 +74,7 @@ async def test_upload_streams_multipart_and_returns_path() -> None:
 async def test_create_share_link_and_error_propagation() -> None:
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
-        with respx.mock:
+        with respx.mock as router:
             respx.post(URL).mock(
                 return_value=httpx.Response(
                     200,
@@ -82,6 +82,10 @@ async def test_create_share_link_and_error_propagation() -> None:
                 )
             )
             assert await backend.create_share_link("/base/video.webm") == "https://share"
+            body = parse_qs((await router.calls.last.request.aread()).decode())
+            assert body["date_expired"] == ["-1"]
+            assert body["date_available"] == ["0"]
+            assert "password" not in body
         with respx.mock:
             respx.post(URL).mock(
                 return_value=httpx.Response(200, json={"success": False, "error": {"code": 999}})
@@ -103,9 +107,7 @@ async def test_sid_login_is_used_when_api_key_is_unavailable() -> None:
         )
         with respx.mock(assert_all_called=True) as router:
             auth = router.get(URL).mock(
-                return_value=httpx.Response(
-                    200, json={"success": True, "data": {"sid": "sid-1"}}
-                )
+                return_value=httpx.Response(200, json={"success": True, "data": {"sid": "sid-1"}})
             )
             share = router.post(URL).mock(
                 return_value=httpx.Response(
@@ -123,6 +125,72 @@ async def test_sid_login_is_used_when_api_key_is_unavailable() -> None:
     assert auth_query["device_id"] == ["device-1"]
     assert "X-SYNO-Token" not in share.calls.last.request.headers
     assert share_query["_sid"] == ["sid-1"]
+
+
+@pytest.mark.anyio
+async def test_live_destination_validation_rejects_symlink() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get("https://nas.test/webapi/query.cgi").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "SYNO.FileStation.Info": {},
+                            "SYNO.FileStation.List": {},
+                            "SYNO.FileStation.Sharing": {},
+                        },
+                    },
+                )
+            )
+            route = router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "files": [
+                                    {
+                                        "path": "/root",
+                                        "name": "root",
+                                        "isdir": True,
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/root",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {
+                                "files": [
+                                    {
+                                        "path": "/root/team",
+                                        "name": "team",
+                                        "isdir": True,
+                                        "additional": {
+                                            "perm": {"write": True},
+                                            "real_path": "/elsewhere",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                ]
+            )
+            with pytest.raises(PermissionError, match="writable real"):
+                await backend.validate_existing_directory_under_root("/root", "/root/team")
+
+    assert len(route.calls) == 2
 
 
 def test_canonical_path_rejects_escape_traversal_and_backslash() -> None:

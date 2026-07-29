@@ -14,7 +14,7 @@ from app.config import Settings
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.notification_outbox import NotificationOutbox, OutboxStatus
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
-from app.db.models.recording import RecordingStatus
+from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import enforce_recruiter_scope
 from app.services.reviews import (
@@ -288,6 +288,52 @@ class QuestionQueueService:
         session.add(item)
         await session.flush()
         return item
+
+    async def queue_routing_defer_notification(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: uuid.UUID,
+        recording: Recording,
+        review: ManualReview,
+    ) -> NotificationOutbox:
+        """Queue one actionable ordinary-DM question for an autonomous routing defer."""
+        if not review.recruiter_user_id or not review.mattermost_channel_id:
+            raise ReviewRejectedError("Routing question has no exact Mattermost DM binding")
+        choices = review.question_context.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ReviewRejectedError("Routing question has no destination choices")
+        labels: list[str] = []
+        for choice in choices[:10]:
+            if not isinstance(choice, dict):
+                raise ReviewRejectedError("Routing question choice is malformed")
+            raw_id = choice.get("destination_id")
+            raw_name = choice.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str) or not raw_name.strip():
+                raise ReviewRejectedError("Routing question choice is malformed")
+            try:
+                uuid.UUID(raw_id)
+            except ValueError as error:
+                raise ReviewRejectedError(
+                    "Routing question destination identity is invalid"
+                ) from error
+            labels.append(" ".join(raw_name.split())[:160])
+        message = "\n".join(
+            [
+                f"Recording {recording.disk_filename[:160]} needs a Synology destination:",
+                *(f"{number}. {label}" for number, label in enumerate(labels, start=1)),
+                "Reply with one number.",
+            ]
+        )
+        return await self.queue_notification(
+            session,
+            dedupe_key=f"routing-defer:{job_id}:{recording.version}",
+            kind="routing_deferred",
+            recruiter_user_id=review.recruiter_user_id,
+            dm_channel_id=review.mattermost_channel_id,
+            message=message,
+            entity_id=review.id,
+        )
 
     async def mark_terminal(
         self,

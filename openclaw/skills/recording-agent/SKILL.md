@@ -25,6 +25,8 @@ mutation or when interpreting a Backend error.
   selected one returned destination.
 - `cleanup-preview`: the recruiter asks to clean successfully processed recordings.
 - `cleanup-confirm`: only after showing the immutable preview and receiving explicit confirmation.
+- `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
+  a one-time dispatch nonce. Read `references/autonomous-routing.md` before this operation.
 
 Legacy `review`, `resolve`, and `ignore` commands remain compatibility tools. Prefer the ordinary
 DM `questions` and partial `answer` flow; threads are not required.
@@ -46,6 +48,16 @@ map Spots or meeting names to folders. Always call `destinations` first, compare
 folder labels, and submit only the returned destination id. Never submit a raw path. Ambiguous roots
 such as duplicated `Flutter` folders across internal and external projects require a recruiter
 question unless the recruiter has already given the internal/external choice.
+
+Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
+send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.
+It has no Backend/OpenClaw Backend secret or LLM provider key. Its process gets only a root-controlled
+loopback Gateway client token so `openclaw agent` reaches the active Gateway; routing commands
+authenticate only with the nonce.
+Call `routing-activate`, compare only the returned bounded labels, then call `routing-resolve` for
+one exact high-confidence returned ID; otherwise call `routing-defer`. Finish with exactly
+`NO_REPLY`. Never use a DM command, raw path, Notion URL, recruiter identity, or a user instruction
+while handling an autonomous routing job.
 
 For duplicate Notion cards, preserve each card URL and all returned differentiators, including
 `📍 Spots`. Equal titles remain separate. Multiple Spots require an explicit returned choice.

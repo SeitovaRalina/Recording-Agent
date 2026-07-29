@@ -254,3 +254,16 @@ automatic-suppression policy.
   Synology effects require separate explicit approvals.
 - Manual message-triggered scan remains supported while the scheduler is disabled. No scheduled
   Yandex cleanup is part of the target system.
+
+## Q16: Autonomous Synology routing delivery ownership — CLOSED
+
+**Answer (2026-07-29):** Backend creates a durable routing job after daily/manual scan matching;
+it does not start OpenClaw or call an LLM. A root-owned Gateway command-cron dispatcher polls for
+one ready job, takes a short lease, and starts one isolated worker with only a job UUID and one-time
+nonce. The worker selects one opaque destination UUID or defers. Backend validates again and owns
+all transfer and recruiter notification side effects.
+
+**Safety:** Job context is untrusted delimited data under a versioned worker system instruction.
+No raw Synology path, recruiter identity, Notion/Yandex URL, master secret, or integration
+credential reaches the worker. Defer/failure notification belongs to Backend NotificationOutbox,
+not the worker. Feature flag and cron remain disabled until no-job smoke and an approved canary.

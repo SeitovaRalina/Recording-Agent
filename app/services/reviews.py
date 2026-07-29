@@ -20,7 +20,16 @@ from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import enforce_recruiter_scope
+from app.services.destinations import DestinationRejectedError, DestinationService
 from app.tools.mattermost import MattermostClient
+
+AUTONOMOUS_ROUTING_QUESTION_TYPES = frozenset(
+    {
+        "autonomous_routing_ambiguous",
+        "autonomous_routing_no_match",
+        "autonomous_routing_model_error",
+    }
+)
 
 
 class ReviewRejectedError(ValueError):
@@ -56,9 +65,15 @@ class ReviewMutation:
 
 
 class ReviewService:
-    def __init__(self, mattermost: MattermostClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        mattermost: MattermostClient,
+        settings: Settings,
+        destination_service: DestinationService | None = None,
+    ) -> None:
         self._mattermost = mattermost
         self._settings = settings
+        self._destinations = destination_service
 
     def capability_token(self, review: ManualReview) -> str:
         if not review.delivery_nonce:
@@ -469,6 +484,31 @@ class ReviewService:
                 recording.manual_review_reason = None
                 recording.transition_to(RecordingStatus.CALENDAR_EVENT_FOUND)
                 review.parsed_action = "select_calendar_event"
+            elif review.question_type in AUTONOMOUS_ROUTING_QUESTION_TYPES:
+                destination_id = self._selected_destination_id(selected)
+                if self._destinations is None:
+                    raise ReviewRejectedError("Synology destination routing is unavailable")
+                recruiter = await session.scalar(
+                    select(RecruiterConfig).where(
+                        RecruiterConfig.email == recording.disk_owner_email
+                    )
+                )
+                if recruiter is None:
+                    raise ReviewRejectedError("Recording recruiter configuration is unavailable")
+                try:
+                    destination = await self._destinations.resolve(
+                        session, recruiter, destination_id
+                    )
+                except (DestinationRejectedError, PermissionError, ValueError) as error:
+                    raise ReviewRejectedError(str(error)) from error
+                recording.storage_destination_id = destination.id
+                recording.storage_key = None
+                recording.content_identity = (
+                    recording.content_identity or recording.disk_md5 or recording.disk_file_id
+                )
+                recording.transition_to(RecordingStatus.TRANSFER_STARTED)
+                review.parsed_action = "select_synology_destination"
+                review.result = {"selected_destination_id": str(destination.id)}
             else:
                 raise ReviewRejectedError("Selected review option cannot resume the pipeline")
         recording.version += 1
@@ -490,6 +530,16 @@ class ReviewService:
         )
         await session.flush()
         return result
+
+    @staticmethod
+    def _selected_destination_id(selected: dict[str, Any]) -> uuid.UUID:
+        raw_destination_id = selected.get("destination_id")
+        if not isinstance(raw_destination_id, str):
+            raise ReviewRejectedError("Selected review option has no destination identity")
+        try:
+            return uuid.UUID(raw_destination_id)
+        except ValueError as error:
+            raise ReviewRejectedError("Selected destination identity is invalid") from error
 
     @staticmethod
     def _selected_spot_identity(

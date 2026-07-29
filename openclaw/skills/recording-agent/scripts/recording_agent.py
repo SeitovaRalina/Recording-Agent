@@ -137,6 +137,7 @@ def _request(
     query: dict[str, Any] | None = None,
     body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    authenticate: bool = True,
 ) -> Any:
     base = urlsplit(_backend_url())
     query_string = urlencode(
@@ -144,16 +145,18 @@ def _request(
     )
     url = urlunsplit((base.scheme, base.netloc, f"{base.path.rstrip('/')}{path}", query_string, ""))
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+    request_headers = {
+        "Accept": "application/json",
+        **({"Content-Type": "application/json"} if data is not None else {}),
+        **(headers or {}),
+    }
+    if authenticate:
+        request_headers["Authorization"] = f"Bearer {_secret()}"
     request = Request(
         url,
         data=data,
         method=method,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {_secret()}",
-            **({"Content-Type": "application/json"} if data is not None else {}),
-            **(headers or {}),
-        },
+        headers=request_headers,
     )
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -272,6 +275,19 @@ def _parser() -> argparse.ArgumentParser:
     cleanup_confirm.add_argument("--capability", required=True)
     cleanup_confirm.add_argument("--snapshot-hash", required=True)
     cleanup_confirm.add_argument("--idempotency-key", required=True)
+
+    for name in ("routing-activate", "routing-resolve", "routing-defer"):
+        routing = subparsers.add_parser(name, help=f"{name} one autonomous routing job")
+        routing.add_argument("--job-id", required=True, type=uuid.UUID)
+        routing.add_argument("--dispatch-nonce", required=True)
+        if name == "routing-resolve":
+            routing.add_argument("--snapshot-hash", required=True)
+            routing.add_argument("--destination-id", required=True, type=uuid.UUID)
+        if name == "routing-defer":
+            routing.add_argument("--snapshot-hash", required=True)
+            routing.add_argument(
+                "--reason", required=True, choices=("ambiguous", "no_match", "model_error")
+            )
     return parser
 
 
@@ -321,6 +337,45 @@ def _question_actions(raw: str) -> list[dict[str, Any]]:
 
 
 def _execute(args: argparse.Namespace) -> Any:
+    if args.command == "routing-activate":
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/activate",
+            body={"worker_id": "recordings-saver", "dispatch_nonce": args.dispatch_nonce},
+            authenticate=False,
+        )
+    if args.command == "routing-resolve":
+        if len(args.snapshot_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in args.snapshot_hash
+        ):
+            raise ClientError("Snapshot hash must be a lowercase SHA-256 hex value")
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/resolve",
+            body={
+                "worker_id": "recordings-saver",
+                "dispatch_nonce": args.dispatch_nonce,
+                "snapshot_hash": args.snapshot_hash,
+                "destination_id": str(args.destination_id),
+            },
+            authenticate=False,
+        )
+    if args.command == "routing-defer":
+        if len(args.snapshot_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in args.snapshot_hash
+        ):
+            raise ClientError("Snapshot hash must be a lowercase SHA-256 hex value")
+        return _request(
+            "POST",
+            f"/internal/routing-jobs/{args.job_id}/defer",
+            body={
+                "worker_id": "recordings-saver",
+                "dispatch_nonce": args.dispatch_nonce,
+                "snapshot_hash": args.snapshot_hash,
+                "reason": args.reason,
+            },
+            authenticate=False,
+        )
     if args.command == "scan":
         return _request(
             "POST",

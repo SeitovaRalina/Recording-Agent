@@ -26,6 +26,7 @@ from app.services.canary import (
     require_notion_preflight,
 )
 from app.services.candidate import CandidateService
+from app.services.destinations import DestinationService
 from app.services.filename import FilenameError, build_storage_identity
 from app.services.matching import (
     InterviewMatcher,
@@ -36,6 +37,7 @@ from app.services.matching import (
 from app.services.pipeline_trace import safe_url, trace
 from app.services.question_queue import QuestionQueueService
 from app.services.reviews import InteractionBinding, InteractionBindingConflict, ReviewService
+from app.services.routing_jobs import RoutingJobRejectedError, RoutingJobService
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
@@ -107,6 +109,8 @@ async def scan_recruiter(
     review_service: ReviewService | None = None,
     question_queue_service: QuestionQueueService | None = None,
     interaction_binding: InteractionBinding | None = None,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> ScanSummary:
     loop = asyncio.get_running_loop()
     locks = _SCAN_LOCKS.setdefault(loop, {})
@@ -127,6 +131,8 @@ async def scan_recruiter(
             review_service,
             question_queue_service,
             interaction_binding,
+            destination_service,
+            routing_job_service,
         )
 
 
@@ -145,6 +151,8 @@ async def _scan_recruiter_unlocked(
     review_service: ReviewService | None = None,
     question_queue_service: QuestionQueueService | None = None,
     interaction_binding: InteractionBinding | None = None,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> ScanSummary:
     active_settings = settings or get_settings()
     _enforce_recruiter_scope(active_settings, recruiter)
@@ -267,6 +275,8 @@ async def _scan_recruiter_unlocked(
                     cast(StatusService, status_service),
                     cast(NotionClient, notion),
                     active_settings,
+                    destination_service,
+                    routing_job_service,
                 )
                 if owned and recording_id not in summary.recording_ids:
                     summary.recording_ids.append(recording_id)
@@ -355,6 +365,8 @@ async def _resume_transfer_recording(
     status: StatusService,
     notion: NotionClient,
     settings: Settings,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> bool:
     lease_token = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -389,6 +401,8 @@ async def _resume_transfer_recording(
             status,
             notion,
             settings,
+            destination_service,
+            routing_job_service,
         )
     finally:
         async with session_factory() as session:
@@ -465,6 +479,8 @@ async def _run_transfer_recording(
     status: StatusService,
     notion: NotionClient,
     settings: Settings,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> None:
     async with session_factory() as session:
         recording = await session.scalar(
@@ -682,6 +698,33 @@ async def _run_transfer_recording(
                 **candidate_updates,
             )
         await session.commit()
+        if (
+            settings.autonomous_routing_enabled
+            and settings.storage_provider == "synology"
+            and recording.storage_destination_id is None
+            and destination_service is not None
+            and routing_job_service is not None
+        ):
+            try:
+                destinations = await destination_service.discover(session, recruiter)
+                await routing_job_service.create_or_reuse(
+                    session, recording, recruiter, destinations
+                )
+                await session.commit()
+                return
+            except (RoutingJobRejectedError, ValueError) as error:
+                await session.rollback()
+                await status.advance(
+                    session,
+                    recording,
+                    RecordingStatus.MANUAL_REVIEW_REQUIRED,
+                    manual_review_reason="storage_destination_required",
+                    manual_review_candidates=[],
+                    error_step="destination",
+                    error_message=str(error),
+                )
+                await session.commit()
+                return
         if settings.storage_provider == "synology" and recording.storage_destination_id is None:
             await status.advance(
                 session,
@@ -1427,6 +1470,8 @@ def register_jobs(
     notion: NotionClient | None = None,
     review_service: ReviewService | None = None,
     question_queue_service: QuestionQueueService | None = None,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> None:
     settings = get_settings()
     scheduler.add_job(
@@ -1470,6 +1515,8 @@ def register_jobs(
             notion,
             review_service,
             question_queue_service,
+            destination_service,
+            routing_job_service,
         ],
         max_instances=1,
         coalesce=True,
@@ -1497,6 +1544,8 @@ async def run_due_recruiter_summaries(
     review_service: ReviewService | None,
     question_queue_service: QuestionQueueService,
     now: datetime | None = None,
+    destination_service: DestinationService | None = None,
+    routing_job_service: RoutingJobService | None = None,
 ) -> None:
     current = _utc(now or datetime.now(UTC))
     for recruiter in await _active_recruiters(session_factory):
@@ -1531,6 +1580,8 @@ async def run_due_recruiter_summaries(
                 notion=notion,
                 review_service=review_service,
                 question_queue_service=question_queue_service,
+                destination_service=destination_service,
+                routing_job_service=routing_job_service,
             )
             if summary.aborted:
                 logger.warning(

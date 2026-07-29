@@ -177,3 +177,28 @@ state and idempotency boundaries.
 skill installation, agent invocation, real Mattermost DM, scheduled proof, and production effects
 follow the separate approval checkpoints in the plan.
 **Date:** 2026-07-22
+
+## ADR-021: Autonomous Synology routing is a leased Gateway worker, not Backend orchestration
+**Decision:** Backend remains the sole owner of scans, matching, routing jobs, PostgreSQL state,
+destination validation, transfers, Notion writes, and recruiter notifications. After a successful
+daily or manual scan it persists a routing job; it never starts OpenClaw, calls an LLM, or waits for
+one. A root-owned Gateway command-cron dispatcher polls only for ready jobs, obtains one short
+lease, and starts an isolated `recordings-saver` worker turn only when a job exists.
+**Worker boundary:** The isolated worker receives only a routing-job UUID and one-time dispatch
+nonce. Backend returns a bounded immutable snapshot and opaque destination UUIDs. The worker may
+resolve one snapshot UUID or defer. It never receives a raw Synology path, recruiter identity,
+Notion/Yandex URL, persistent Backend secret, or integration credential. Backend independently
+checks lease, nonce, worker identity, snapshot/version, ownership, live destination state, and
+transfer collision before side effects.
+**Prompt-injection boundary:** Job context, recording metadata, Notion-derived labels, and folder
+labels are untrusted data, delimited from the versioned worker instruction. They cannot request
+tools, change policy, or override the strict UUID-or-defer response schema. There is no recruiter
+user prompt in the autonomous turn. A defer/failure is sent only by Backend NotificationOutbox.
+**Rollout:** `AUTONOMOUS_ROUTING_ENABLED` is off by default. Enable only after a no-job dispatcher
+smoke test, then one isolated canary recruiter/root with external effects independently approved.
+Rollback disables the flag and cron job; active leases expire safely and no job is auto-uploaded.
+**Operations:** Platform owner owns the root dispatcher, systemd timer, Gateway environment and
+logs; Backend owner owns job APIs, migrations, flag, reconciliation and notification policy.
+**Why:** This preserves Backend side-effect ownership while providing reliable, restart-safe,
+low-frequency worker delivery without a generic event-push assumption or polling LLM calls.
+**Date:** 2026-07-29

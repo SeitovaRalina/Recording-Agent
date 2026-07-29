@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     pipeline_trace_enabled: bool = False
     test_mode_enabled: bool = False
     scheduler_enabled: bool = False
+    autonomous_routing_enabled: bool = False
     yandex_source_mutation_enabled: bool = False
     cleanup_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     cleanup_preview_max_items: int = Field(default=50, ge=1, le=100)
@@ -78,9 +79,7 @@ class Settings(BaseSettings):
     synology_device_id: SecretStr = SecretStr("")
     synology_interview_roots: tuple[str, ...] = Field(
         default_factory=tuple,
-        validation_alias=AliasChoices(
-            "synology_interview_roots", "SYNOLOGY_INTERVIEW_ROOTS"
-        ),
+        validation_alias=AliasChoices("synology_interview_roots", "SYNOLOGY_INTERVIEW_ROOTS"),
     )
     mattermost_url: str = ""
     mattermost_bot_token: SecretStr = SecretStr("")

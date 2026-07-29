@@ -6,7 +6,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -399,6 +399,25 @@ async def route_interview(
         )
         recording.transition_to(RecordingStatus.TRANSFER_STARTED)
         recording.version += 1
+        await session.execute(
+            update(ManualReview)
+            .where(
+                ManualReview.recording_id == recording.id,
+                ManualReview.status == ManualReviewStatus.PENDING,
+                ManualReview.question_type.in_(
+                    [
+                        "autonomous_routing_ambiguous",
+                        "autonomous_routing_no_match",
+                        "autonomous_routing_model_error",
+                    ]
+                ),
+            )
+            .values(
+                status=ManualReviewStatus.COMPLETED,
+                completed_at=datetime.now(UTC),
+                result={"resumed_by": "route_interview"},
+            )
+        )
         await session.commit()
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         await session.rollback()
@@ -588,6 +607,8 @@ async def trigger_scan(
             review_service=request.app.state.review_service,
             question_queue_service=request.app.state.question_queue_service,
             interaction_binding=interaction_binding,
+            destination_service=request.app.state.destination_service,
+            routing_job_service=request.app.state.routing_job_service,
         )
     except InteractionBindingConflict as error:
         await _release_scan_intent(session, claim)
@@ -792,6 +813,8 @@ async def answer_questions(
             body.mattermost_dm_channel_id,
         )
         for mutation in result.accepted:
+            if mutation.replayed:
+                continue
             recording = await session.get(Recording, mutation.recording_id)
             if recording is None or recording.status not in {
                 RecordingStatus.CALENDAR_EVENT_FOUND,

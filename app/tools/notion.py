@@ -93,6 +93,7 @@ class NotionPage:
     project_or_spot: str | None = "unspecified"
     emails: tuple[str, ...] = ()
     spots: tuple[NotionRelationChoice, ...] = ()
+    recording_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,11 +200,13 @@ class NotionClient:
             date_property=date_prop,
             recording_property=recording_prop,
         )
-        response = await self._query_source(source_id, candidate_name, name_prop)
+        response = await self._query_source(source_id, candidate_name, name_prop, recording_prop)
         if response.status_code == 404 and was_cached:
             self._invalidate(key, source_id)
             source_id, _ = await self._resolve_source(key)
-            response = await self._query_source(source_id, candidate_name, name_prop)
+            response = await self._query_source(
+                source_id, candidate_name, name_prop, recording_prop
+            )
         self._raise_query_error(response)
         payload = self._json_object(response, "query")
         results = payload.get("results")
@@ -212,7 +215,11 @@ class NotionClient:
         pages: list[NotionPage] = []
         relation_cache: dict[str, NotionRelationChoice] = {}
         for item in results[:10]:
-            page = self._parse_page(item, name_prop, date_prop, contacts_prop, project_prop)
+            page = self._parse_page(
+                item, name_prop, date_prop, contacts_prop, project_prop, recording_prop
+            )
+            if page.recording_present:
+                continue
             relation_ids = self._project_relation_ids(item, project_prop)
             relations: list[NotionRelationChoice] = []
             for relation_id in relation_ids:
@@ -566,13 +573,19 @@ class NotionClient:
         source_id: str,
         candidate_name: str,
         name_prop: str,
+        recording_prop: str,
     ) -> httpx.Response:
         try:
             return await self._client.post(
                 f"{NOTION_API_BASE}/data_sources/{source_id}/query",
                 headers=self._headers,
                 json={
-                    "filter": {"property": name_prop, "title": {"contains": candidate_name}},
+                    "filter": {
+                        "and": [
+                            {"property": name_prop, "title": {"contains": candidate_name}},
+                            {"property": recording_prop, "files": {"is_empty": True}},
+                        ]
+                    },
                     "page_size": 10,
                 },
             )
@@ -657,6 +670,7 @@ class NotionClient:
         date_prop: str,
         contacts_prop: str,
         project_prop: str = "",
+        recording_prop: str = DEFAULT_RECORDING_PROP,
     ) -> NotionPage:
         if not isinstance(item, dict):
             raise NotionMalformedResponseError("Notion page payload must be an object")
@@ -678,6 +692,7 @@ class NotionClient:
             project_or_spot=(
                 NotionClient._plain_text(properties.get(project_prop)) if project_prop else None
             ),
+            recording_present=NotionClient._files_present(properties.get(recording_prop)),
         )
 
     @staticmethod
@@ -753,6 +768,15 @@ class NotionClient:
             return None
         start = value["date"].get("start")
         return str(start) if start is not None else None
+
+    @staticmethod
+    def _files_present(value: Any) -> bool:
+        if not isinstance(value, dict) or value.get("type") != "files":
+            raise NotionMalformedResponseError("Notion recording field is malformed")
+        files = value.get("files")
+        if not isinstance(files, list):
+            raise NotionMalformedResponseError("Notion recording files field is malformed")
+        return bool(files)
 
 
 def _response_excerpt(value: str) -> str:

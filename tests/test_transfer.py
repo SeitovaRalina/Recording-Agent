@@ -69,12 +69,22 @@ class FakeStorage:
 
 
 class CapturingSynologyBackend(SynologyBackend):
-    def __init__(self) -> None:
+    def __init__(self, *, reject_live_validation: bool = False) -> None:
         self.folder = ""
         self.uploaded = ""
+        self.ensure_calls = 0
+        self.reject_live_validation = reject_live_validation
 
     async def ensure_folder(self, path: str) -> None:
+        self.ensure_calls += 1
         self.folder = path
+
+    async def validate_existing_directory_under_root(self, root: str, path: str) -> object:
+        del root
+        if self.reject_live_validation:
+            raise PermissionError("selected folder is no longer writable")
+        self.folder = path
+        return object()
 
     async def upload(
         self,
@@ -193,6 +203,7 @@ async def test_synology_transfer_uses_persisted_destination_id(session: AsyncSes
         ).transfer(item, owner, "Ivan", session)
 
     assert storage.folder == "/home/Recruiting-E/2. Interviews external/Backend"
+    assert storage.ensure_calls == 0
     assert result.file_path == f"{storage.folder}/{item.generated_filename}"
 
 
@@ -223,6 +234,37 @@ async def test_synology_transfer_rejects_destination_id_outside_allowed_roots(
                 disk, storage, http, Settings(synology_interview_roots=TEST_INTERVIEW_ROOTS)
             ).transfer(item, owner, "Ivan", session)
 
+    disk._request.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_synology_transfer_stops_before_download_when_live_destination_check_fails(
+    session: AsyncSession,
+) -> None:
+    owner = recruiter()
+    owner.id = uuid.uuid4()
+    item = recording()
+    item.generated_filename = "video.webm"
+    destination = StorageDestination(
+        recruiter_id=owner.id,
+        canonical_path="/home/Recruiting-E/2. Interviews external/Backend",
+        display_name="Backend",
+        writable=True,
+        symlink_safe=True,
+        validated_at=datetime.now(UTC),
+    )
+    session.add_all([owner, destination])
+    await session.flush()
+    item.storage_destination_id = destination.id
+    disk = AsyncMock()
+    storage = CapturingSynologyBackend(reject_live_validation=True)
+    async with download_client() as http:
+        with pytest.raises(TransferError, match="no longer writable"):
+            await TransferService(
+                disk, storage, http, Settings(synology_interview_roots=TEST_INTERVIEW_ROOTS)
+            ).transfer(item, owner, "Ivan", session)
+
+    assert storage.ensure_calls == 0
     disk._request.assert_not_awaited()
 
 

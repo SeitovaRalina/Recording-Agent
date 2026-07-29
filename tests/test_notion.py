@@ -39,6 +39,7 @@ def page(page_id: str = "page-1") -> dict[str, object]:
         "properties": {
             NAME: {"title": [{"plain_text": "Ivan Ivanov"}]},
             DATE: {"date": {"start": "2026-07-16"}},
+            RECORDING: {"type": "files", "files": []},
             CONTACTS: {
                 "type": "formula",
                 "formula": {
@@ -355,11 +356,30 @@ async def test_discovers_validates_and_queries_current_data_source() -> None:
         assert [item.id for item in result] == ["page-1"]
         assert query.calls.last.request.url.path == "/v1/data_sources/source/query"
         assert b'"title":{"contains":"Ivan"}' in query.calls.last.request.content
+        assert b'"files":{"is_empty":true}' in query.calls.last.request.content
         assert b"General Interview Date" not in query.calls.last.request.content
         assert b'"page_size":10' in query.calls.last.request.content
         for route in (discovery, source, query):
             assert route.calls.last.request.headers["Notion-Version"] == NOTION_API_VERSION
             assert route.calls.last.request.headers["Authorization"] == "Bearer token"
+
+
+@pytest.mark.anyio
+async def test_search_excludes_cards_that_already_have_an_interview_recording() -> None:
+    occupied = page("occupied")
+    properties = occupied["properties"]
+    assert isinstance(properties, dict)
+    properties[RECORDING] = {
+        "type": "files",
+        "files": [{"name": "existing.webm", "external": {"url": "https://example.test/file"}}],
+    }
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            register_chain(router, results=[occupied])
+            result = await client.search_pages("db", "Ivan", None, NAME, DATE, RECORDING)
+
+    assert result == []
 
 
 @pytest.mark.anyio

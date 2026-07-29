@@ -248,6 +248,8 @@ async def test_offline_scan_binding_race_returns_409_and_releases_intent(
         "notion_client",
         "review_service",
         "question_queue_service",
+        "destination_service",
+        "routing_job_service",
     ):
         setattr(app.state, name, MagicMock())
     scan = AsyncMock(
@@ -411,6 +413,116 @@ async def test_offline_answer_api_commits_reconciles_replays_and_reports_status(
     assert await session.scalar(select(NotificationOutbox.id)) is None
     mattermost.validate_direct_channel.assert_not_awaited()
     mattermost.send_dm.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_autonomous_destination_answer_validates_then_resumes_once(
+    async_client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "autonomous-destination-token"
+    destination_id = uuid4()
+    recording = Recording(
+        disk_file_id="autonomous-destination-api",
+        disk_path="disk:/autonomous-destination-api.webm",
+        disk_filename="autonomous-destination-api.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        version=3,
+    )
+    question = ManualReview(
+        recording=recording,
+        question_type="autonomous_routing_ambiguous",
+        question_context={
+            "choices": [{"destination_id": str(destination_id), "name": "Android"}]
+        },
+        recruiter_user_id="trusted-user",
+        mattermost_channel_id="trusted-dm",
+        delivery_nonce="nonce",
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        recording_version=3,
+    )
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    monkeypatch.setenv("TEST_MODE_ENABLED", "true")
+    monkeypatch.setenv("MATTERMOST_DELIVERY_ENABLED", "false")
+    monkeypatch.setenv("TEST_RECRUITER_ALLOWLIST", '["r@example.com"]')
+    monkeypatch.setenv("TEST_NOTION_DATABASE_ALLOWLIST", '["db"]')
+    monkeypatch.setenv("TEST_MATTERMOST_USER_ALLOWLIST", '["trusted-user"]')
+    monkeypatch.setenv("MINIO_TEST_PREFIX", "root")
+    monkeypatch.setenv("OPENCLAW_SECRET", "test-secret")
+    get_settings.cache_clear()
+    settings = get_settings()
+    mattermost = AsyncMock()
+    destinations = AsyncMock()
+    destinations.resolve.return_value = MagicMock(id=destination_id)
+    app.dependency_overrides[get_session] = override_session
+    app.state.question_queue_service = QuestionQueueService(
+        ReviewService(mattermost, settings, destinations), mattermost, settings
+    )
+    for name in (
+        "session_factory",
+        "disk_scanner",
+        "candidate_service",
+        "transfer_service",
+        "status_service",
+        "notion_client",
+    ):
+        setattr(app.state, name, MagicMock())
+
+    async def finish_pipeline(*_args: object, **_kwargs: object) -> bool:
+        loaded = await session.get(Recording, recording_id)
+        assert loaded is not None
+        loaded.status = RecordingStatus.COMPLETED
+        await session.commit()
+        return True
+
+    resume = AsyncMock(side_effect=finish_pipeline)
+    monkeypatch.setattr("app.routers.tools._resume_transfer_recording", resume)
+    payload = {
+        "recruiter_user_id": "trusted-user",
+        "mattermost_dm_channel_id": "trusted-dm",
+        "actions": [
+            {
+                "question_id": str(question.id),
+                "question_set_id": str(question.question_set_id),
+                "action": "resolve",
+                "capability": token,
+                "expected_version": 3,
+                "idempotency_key": "autonomous-destination-answer-1",
+                "choice": 1,
+            }
+        ],
+    }
+
+    first = await async_client.post(
+        "/tools/questions/answer", headers={"Authorization": "Bearer test-secret"}, json=payload
+    )
+    replay = await async_client.post(
+        "/tools/questions/answer", headers={"Authorization": "Bearer test-secret"}, json=payload
+    )
+
+    await session.refresh(recording)
+    assert first.status_code == 200
+    assert first.json()["accepted"][0]["status"] == RecordingStatus.TRANSFER_STARTED
+    assert replay.json()["accepted"][0]["replayed"] is True
+    assert recording.storage_destination_id == destination_id
+    assert recording.status == RecordingStatus.COMPLETED
+    destinations.resolve.assert_awaited_once_with(session, recruiter, destination_id)
+    resume.assert_awaited_once()
 
 
 @pytest.mark.anyio

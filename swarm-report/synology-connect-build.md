@@ -170,3 +170,34 @@ The warning is limited to pytest cache writing and did not fail tests.
 
 - Synology File Station Official API guide was used to verify `SYNO.FileStation.CreateFolder` and
   `SYNO.FileStation.Rename` method existence and request parameters.
+
+## Runtime Safety Retry (2026-07-29)
+
+User explicitly excluded `tools/setup/synology_sid_inventory.py` from this retry: it is a
+temporary test-folder helper and is not part of the runtime upload flow.
+
+Changed runtime files:
+
+- `.env.example`, `.env.production.example`
+- `app/config.py`, `app/tools/synology.py`, `app/services/destinations.py`,
+  `app/services/transfer.py`
+- `tests/test_config.py`, `tests/test_synology.py`, `tests/test_transfer.py`
+
+Runtime changes:
+
+- Synology share links are public and permanent (`date_expired=-1`) without password or expiry.
+- Destination resolve and transfer both perform live Synology preflight plus real-directory,
+  writable, non-symlink validation.
+- A selected persisted Synology destination no longer invokes `ensure_folder`, so transfer cannot
+  create missing parent folders with `force_parent=true`.
+
+Verification:
+
+```text
+ruff: All checks passed!
+mypy: Success: no issues found in 5 source files
+pytest tests/test_config.py tests/test_synology.py tests/test_transfer.py tests/test_tools_router.py:
+44 passed, 1 warning
+```
+
+The warning was the existing denied `.pytest_cache` write; test execution passed.

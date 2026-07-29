@@ -7,6 +7,7 @@ from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_calendar import RecruiterCalendar
 from app.db.models.recruiter_config import RecruiterConfig
+from app.db.models.routing_job import RoutingJob, RoutingJobStatus
 from app.db.models.storage_destination import StorageDestination
 from app.db.models.yandex_token import YandexToken
 
@@ -25,6 +26,8 @@ __all__ = [
     "RecordingStatus",
     "RecruiterCalendar",
     "RecruiterConfig",
+    "RoutingJob",
+    "RoutingJobStatus",
     "StorageDestination",
     "YandexToken",
 ]

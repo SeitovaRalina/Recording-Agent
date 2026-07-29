@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
 from app.db.models.storage_destination import StorageDestination
-from app.tools.synology import SynologyBackend, SynologyFolder, SynologyPreflight
+from app.tools.synology import SynologyAPIError, SynologyBackend, SynologyFolder, SynologyPreflight
 
 
 class DestinationRejectedError(ValueError):
@@ -50,9 +50,7 @@ class DestinationService:
     ) -> list[StorageDestination]:
         await self.preflight(recruiter)
         folders: list[SynologyFolder] = []
-        per_root_results = max(
-            1, self._settings.synology_discovery_max_results // len(self._roots)
-        )
+        per_root_results = max(1, self._settings.synology_discovery_max_results // len(self._roots))
         for root in self._roots:
             folders.append(
                 SynologyFolder(
@@ -73,8 +71,10 @@ class DestinationService:
         self._reject_duplicate_paths(folders)
         destinations: list[StorageDestination] = []
         for folder in folders:
-            if folder.symlink or not folder.writable or not self._is_allowed_interview_path(
-                folder.path
+            if (
+                folder.symlink
+                or not folder.writable
+                or not self._is_allowed_interview_path(folder.path)
             ):
                 continue
             destinations.append(await self._persist(session, recruiter, folder))
@@ -116,10 +116,18 @@ class DestinationService:
         if destination is None:
             raise DestinationRejectedError("Storage destination is unavailable")
         try:
-            self._require_allowed_interview_path(destination.canonical_path)
+            root = self._require_allowed_interview_path(destination.canonical_path)
         except ValueError as error:
             raise DestinationRejectedError(
                 "Storage destination is outside allowed interview roots"
+            ) from error
+        try:
+            await self._synology.validate_existing_directory_under_root(
+                root, destination.canonical_path
+            )
+        except (SynologyAPIError, PermissionError, ValueError) as error:
+            raise DestinationRejectedError(
+                "Storage destination failed live Synology validation"
             ) from error
         return destination
 
@@ -184,11 +192,11 @@ class DestinationService:
             return False
         return True
 
-    def _require_allowed_interview_path(self, path: str) -> None:
+    def _require_allowed_interview_path(self, path: str) -> str:
         for root in self._roots:
             try:
                 SynologyBackend.canonical_under_root(root, path)
-                return
+                return root
             except ValueError:
                 continue
         raise DestinationRejectedError("Path is outside allowed interview roots")

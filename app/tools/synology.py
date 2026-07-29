@@ -33,6 +33,7 @@ class SynologyFolder:
     name: str
     writable: bool
     symlink: bool
+    directory: bool = True
 
 
 @dataclass(frozen=True)
@@ -152,7 +153,7 @@ class SynologyBackend:
         return SynologyPreflight(
             api_available={"SYNO.FileStation.Info", "SYNO.FileStation.List"}.issubset(api_names),
             root_exists=True,
-            root_writable=root_info.writable and not root_info.symlink,
+            root_writable=root_info.directory and root_info.writable and not root_info.symlink,
             share_links_available="SYNO.FileStation.Sharing" in api_names,
         )
 
@@ -247,9 +248,29 @@ class SynologyBackend:
         )
         self._validate(response)
         created = await self._get_info(target)
-        if created.symlink or not created.writable:
+        if not created.directory or created.symlink or not created.writable:
             raise PermissionError("Created destination is not a writable real folder")
         return created
+
+    async def validate_existing_directory_under_root(self, root: str, path: str) -> SynologyFolder:
+        canonical_root = self.canonical_under_root(root, root)
+        canonical_path = self.canonical_under_root(canonical_root, path)
+        preflight = await self.preflight(canonical_root)
+        if not all(
+            (
+                preflight.api_available,
+                preflight.root_exists,
+                preflight.root_writable,
+                preflight.share_links_available,
+            )
+        ):
+            raise PermissionError("Synology preflight requirements are not satisfied")
+        directory = await self._get_info(canonical_path)
+        if directory.path != canonical_path:
+            raise SynologyPathError("Synology returned a different destination path")
+        if not directory.directory or directory.symlink or not directory.writable:
+            raise PermissionError("Selected destination is not a writable real folder")
+        return directory
 
     async def ensure_folder(self, path: str) -> None:
         info = await self._get(
@@ -462,6 +483,7 @@ class SynologyBackend:
             name=str(item.get("name") or PurePosixPath(canonical).name)[:200],
             writable=self._is_writable(extra),
             symlink=isinstance(real_path, str) and self._canonical(real_path) != canonical,
+            directory=item.get("isdir") is True,
         )
 
     @classmethod
