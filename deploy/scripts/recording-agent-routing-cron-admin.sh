@@ -62,6 +62,7 @@ case $1 in
     fi
     run_openclaw cron create '*/2 * * * *' \
       --name "$JOB_NAME" \
+      --agent recordings-saver \
       --command-argv "[\"$COMMAND\"]" \
       --command-cwd / \
       --timeout-seconds 180 \
