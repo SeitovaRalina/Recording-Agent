@@ -514,11 +514,36 @@ def _execute(args: argparse.Namespace) -> Any:
             },
         )
     if args.command == "notion-reassignment-resolve":
-        return _request("POST", f"/tools/recordings/{args.recording_id}/notion-reassignment/resolve", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "hint": args.hint})
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/notion-reassignment/resolve",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "hint": args.hint,
+            },
+        )
     if args.command == "notion-reassignment-propose":
-        return _request("POST", f"/tools/recordings/{args.recording_id}/notion-reassignment/propose", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "target_page_id": args.target_page_id})
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/notion-reassignment/propose",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "target_page_id": args.target_page_id,
+            },
+        )
     if args.command == "notion-reassignment-confirm":
-        return _request("POST", f"/tools/notion-reassignment/{args.proposal_id}/confirm", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "capability": args.capability, "idempotency_key": args.idempotency_key})
+        return _request(
+            "POST",
+            f"/tools/notion-reassignment/{args.proposal_id}/confirm",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "capability": args.capability,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
     if args.command == "cleanup-preview":
         return _request(
             "POST",
