@@ -47,8 +47,15 @@ docker compose --project-name recording-agent \
   --file /opt/recording-agent/current/compose.prod.yml ps --status running --quiet backend |
   grep -q . || die "Backend is not running"
 
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:18000/health >/dev/null ||
-  die "Backend health failed"
+backend_healthy=false
+for _ in {1..23}; do
+  if curl --fail --silent --max-time 2 http://127.0.0.1:18000/health >/dev/null 2>&1; then
+    backend_healthy=true
+    break
+  fi
+  sleep 2
+done
+[[ $backend_healthy == true ]] || die "Backend health failed after 45 seconds"
 ss -lntH '( sport = :18000 or sport = :18789 or sport = :5432 )' |
   awk '$4 !~ /^(127\.0\.0\.1|\[::1\]):/ { exit 1 }' ||
   die "Gateway, Backend, or PostgreSQL has a non-loopback listener"
