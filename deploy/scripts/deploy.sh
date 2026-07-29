@@ -209,6 +209,10 @@ handle_failure() {
       printf 'deploy failed; previous schema-compatible application release restored\n' >&2
     else
       "${compose[@]}" stop backend >/dev/null 2>&1
+      if [[ -z $previous && -L "$ROOT/current" ]] &&
+        [[ $(readlink -f "$ROOT/current") == "$release" ]]; then
+        rm -- "$ROOT/current"
+      fi
       install -d -o root -g root -m 0700 "$ROOT/failures"
       printf 'commit=%s\nfailed_at=%s\npolicy=stop-writes-forward-fix\n' \
         "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
