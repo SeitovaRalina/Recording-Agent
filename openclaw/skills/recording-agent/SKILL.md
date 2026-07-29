@@ -8,6 +8,23 @@ description: Operate Recording Agent through Mila for Russian or English recruit
 Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before any
 mutation or when interpreting a Backend error.
 
+## Mandatory execution rule
+
+Never inspect this workspace to answer recruiter requests. Do not run `find`, `ls`, `rg`, `grep`,
+or read repository files when a recruiter asks to scan, check status, answer a question, choose a
+folder, reroute a recording, reassign a Notion card, or clean completed sources. The workspace is
+only the skill package; recordings and processing state live in the Backend.
+
+For a recruiter request to check new interview recordings, your first command after loading this
+skill must be exactly the Backend CLI scan intent:
+
+```bash
+python3 scripts/recording_agent.py scan --idempotency-key <stable-uuid-or-request-key>
+```
+
+If the command fails, return the JSON `message` field verbatim. Do not try filesystem discovery as
+a fallback.
+
 ## Route requests
 
 - `scan`: a recruiter asks to check or rescan new recordings. Manual scan remains available while
