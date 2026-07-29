@@ -235,7 +235,7 @@ export RECORDING_AGENT_IMAGE=$image
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="/var/backups/recording-agent/${timestamp}-${commit}.dump"
-"${compose[@]}" up -d postgres
+"${compose[@]}" up -d --wait --wait-timeout 70 postgres
 "${compose[@]}" exec -T postgres sh -eu -c \
   'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$backup"
 [[ -s $backup ]] || die "database backup is empty"
