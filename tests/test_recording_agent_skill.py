@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from urllib.request import Request
 
 import pytest
 
@@ -114,6 +115,208 @@ def test_scan_rejects_explicit_identity_without_trusted_metadata(
                 "scan-0001",
             ]
         )
+
+
+def test_autonomous_routing_activate_uses_only_worker_and_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setattr(CLIENT, "_request", request)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    args = CLIENT._parser().parse_args(
+        ["routing-activate", "--job-id", job_id, "--dispatch-nonce", "nonce_value_123456"]
+    )
+
+    CLIENT._execute(args)
+
+    assert captured == {
+        "method": "POST",
+        "path": f"/internal/routing-jobs/{job_id}/activate",
+        "body": {"worker_id": "recordings-saver", "dispatch_nonce": "nonce_value_123456"},
+        "authenticate": False,
+    }
+
+
+def test_autonomous_routing_request_omits_master_backend_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b"{}"
+
+    def urlopen(request: Request, *, timeout: float) -> Response:
+        captured["headers"] = dict(request.header_items())
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", "must-not-be-used")
+    monkeypatch.setattr(CLIENT, "urlopen", urlopen)
+    args = CLIENT._parser().parse_args(
+        [
+            "routing-activate",
+            "--job-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--dispatch-nonce",
+            "nonce_value_123456",
+        ]
+    )
+
+    CLIENT._execute(args)
+
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert "Authorization" not in headers
+
+
+def test_recruiter_command_keeps_master_backend_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b"{}"
+
+    def urlopen(request: Request, *, timeout: float) -> Response:
+        captured["headers"] = dict(request.header_items())
+        return Response()
+
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", "master-secret")
+    monkeypatch.setattr(CLIENT, "urlopen", urlopen)
+
+    CLIENT._request("GET", "/tools/recordings/status")
+
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers["Authorization"] == "Bearer master-secret"
+
+
+def test_autonomous_routing_resolve_rejects_non_sha256_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(CLIENT, "_request", lambda *_args, **_kwargs: {})
+    args = CLIENT._parser().parse_args(
+        [
+            "routing-resolve",
+            "--job-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--dispatch-nonce",
+            "nonce_value_123456",
+            "--snapshot-hash",
+            "not-a-hash",
+            "--destination-id",
+            "22222222-2222-2222-2222-222222222222",
+        ]
+    )
+
+    with pytest.raises(CLIENT.ClientError, match="Snapshot hash"):
+        CLIENT._execute(args)
+
+
+def test_autonomous_routing_resolve_sends_only_bounded_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setattr(CLIENT, "_request", request)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    destination_id = "22222222-2222-2222-2222-222222222222"
+    snapshot_hash = "a" * 64
+    args = CLIENT._parser().parse_args(
+        [
+            "routing-resolve",
+            "--job-id",
+            job_id,
+            "--dispatch-nonce",
+            "nonce_value_123456",
+            "--snapshot-hash",
+            snapshot_hash,
+            "--destination-id",
+            destination_id,
+        ]
+    )
+
+    CLIENT._execute(args)
+
+    assert captured == {
+        "method": "POST",
+        "path": f"/internal/routing-jobs/{job_id}/resolve",
+        "body": {
+            "worker_id": "recordings-saver",
+            "dispatch_nonce": "nonce_value_123456",
+            "snapshot_hash": snapshot_hash,
+            "destination_id": destination_id,
+        },
+        "authenticate": False,
+    }
+
+
+def test_autonomous_routing_defer_sends_nonce_and_snapshot_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", "must-not-be-used")
+    monkeypatch.setattr(CLIENT, "_request", request)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    args = CLIENT._parser().parse_args(
+        [
+            "routing-defer",
+            "--job-id",
+            job_id,
+            "--dispatch-nonce",
+            "nonce_value_123456",
+            "--snapshot-hash",
+            "a" * 64,
+            "--reason",
+            "ambiguous",
+        ]
+    )
+
+    CLIENT._execute(args)
+
+    assert captured == {
+        "method": "POST",
+        "path": f"/internal/routing-jobs/{job_id}/defer",
+        "body": {
+            "worker_id": "recordings-saver",
+            "dispatch_nonce": "nonce_value_123456",
+            "snapshot_hash": "a" * 64,
+            "reason": "ambiguous",
+        },
+        "authenticate": False,
+    }
 
 
 def test_scan_message_reports_counts_and_every_category() -> None:

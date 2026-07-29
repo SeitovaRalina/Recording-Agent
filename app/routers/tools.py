@@ -6,7 +6,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -15,6 +15,7 @@ from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
+from app.db.models.storage_destination import StorageDestination
 from app.routers.events import verify_openclaw_secret
 from app.scheduler.cron import ScanSummary, _resume_transfer_recording, scan_recruiter
 from app.services.canary import enforce_recruiter_scope
@@ -28,7 +29,12 @@ from app.services.intents import (
     request_fingerprint,
 )
 from app.services.non_interview import NonInterviewRejectedError, NonInterviewService
+from app.services.notion_reassignment import (
+    NotionReassignmentRejectedError,
+    NotionReassignmentService,
+)
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
+from app.services.reroute import RerouteRejectedError, RerouteService
 from app.services.reviews import (
     InteractionBinding,
     InteractionBindingConflict,
@@ -204,6 +210,7 @@ class QuestionBatchResponse(BaseModel):
 class DestinationItem(BaseModel):
     id: uuid.UUID
     display_name: str
+    path_label: str
     writable: bool
 
 
@@ -237,6 +244,84 @@ class NonInterviewRouteResponse(BaseModel):
     version: int
     safe_link: str
     replayed: bool = False
+
+
+class InterviewRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    destination_id: uuid.UUID
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class InterviewRouteResponse(BaseModel):
+    recording_id: uuid.UUID
+    status: RecordingStatus
+    version: int
+    safe_link: str
+    replayed: bool = False
+
+
+class RecordingRerouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    destination_id: uuid.UUID
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class RecordingRerouteResponse(BaseModel):
+    recording_id: uuid.UUID
+    version: int
+    safe_link: str
+    replayed: bool = False
+
+
+class ReassignmentResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    hint: str = Field(min_length=1, max_length=500)
+
+
+class ReassignmentTargetItem(BaseModel):
+    page_id: str
+    title: str
+    url: str
+    recording_present: bool
+
+
+class ReassignmentResolveResponse(BaseModel):
+    items: list[ReassignmentTargetItem]
+
+
+class ReassignmentProposeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    target_page_id: str = Field(min_length=1, max_length=100)
+
+
+class ReassignmentProposeResponse(BaseModel):
+    proposal_id: uuid.UUID
+    capability: str = Field(repr=False)
+    expires_at: str
+    target: ReassignmentTargetItem
+
+
+class ReassignmentConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
+    capability: SecretStr
+    idempotency_key: str = Field(min_length=8, max_length=200)
 
 
 class CleanupPreviewRequest(BaseModel):
@@ -295,10 +380,7 @@ async def list_storage_destinations(
         rows = await service.discover(session, recruiter)
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    items = [
-        DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
-        for row in rows
-    ]
+    items = [_destination_item(row) for row in rows]
     return DestinationListResponse(items=items, count=len(items))
 
 
@@ -318,7 +400,256 @@ async def create_storage_destination(
         )
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    return DestinationItem(id=row.id, display_name=row.display_name, writable=row.writable)
+    return _destination_item(row)
+
+
+@router.post(
+    "/recordings/{recording_id}/route-interview",
+    response_model=InterviewRouteResponse,
+)
+async def route_interview(
+    recording_id: uuid.UUID,
+    body: InterviewRouteRequest,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
+) -> InterviewRouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    payload = body.model_dump(mode="json") | {"recording_id": str(recording_id)}
+    try:
+        claim = await claim_intent(
+            session,
+            actor=body.recruiter_user_id,
+            operation=f"route-interview:{recording_id}",
+            idempotency_key=body.idempotency_key,
+            fingerprint=request_fingerprint(payload),
+            ttl_seconds=settings.intent_claim_ttl_seconds,
+        )
+    except IntentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if claim.completed_response is not None:
+        return InterviewRouteResponse.model_validate(claim.completed_response | {"replayed": True})
+    try:
+        recording = await session.scalar(
+            select(Recording).where(Recording.id == recording_id).with_for_update()
+        )
+        if recording is None or recording.disk_owner_email != recruiter.email:
+            raise DestinationRejectedError("Recording not found")
+        if recording.version != body.expected_version:
+            raise DestinationRejectedError("Recording version is stale")
+        if recording.route_type != "interview":
+            raise DestinationRejectedError("Recording is not an interview")
+        if recording.status not in {
+            RecordingStatus.CANDIDATE_MATCHED,
+            RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        }:
+            raise DestinationRejectedError("Recording is not awaiting interview destination")
+        if (
+            not recording.generated_filename
+            or not recording.candidate_name
+            or not recording.notion_page_id
+        ):
+            raise DestinationRejectedError("Recording candidate state is incomplete")
+        destination = await _destination_service(request).resolve(
+            session, recruiter, body.destination_id
+        )
+        recording.storage_destination_id = destination.id
+        recording.storage_key = None
+        recording.content_identity = (
+            recording.content_identity or recording.disk_md5 or recording.disk_file_id
+        )
+        recording.transition_to(RecordingStatus.TRANSFER_STARTED)
+        recording.version += 1
+        await session.execute(
+            update(ManualReview)
+            .where(
+                ManualReview.recording_id == recording.id,
+                ManualReview.status == ManualReviewStatus.PENDING,
+                ManualReview.question_type.in_(
+                    [
+                        "autonomous_routing_ambiguous",
+                        "autonomous_routing_no_match",
+                        "autonomous_routing_model_error",
+                    ]
+                ),
+            )
+            .values(
+                status=ManualReviewStatus.COMPLETED,
+                completed_at=datetime.now(UTC),
+                result={"resumed_by": "route_interview"},
+            )
+        )
+        await session.commit()
+    except (DestinationRejectedError, PermissionError, ValueError) as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    resumed = await _resume_transfer_recording(
+        recording_id,
+        recruiter,
+        request.app.state.session_factory,
+        request.app.state.disk_scanner,
+        request.app.state.candidate_service,
+        request.app.state.transfer_service,
+        request.app.state.status_service,
+        request.app.state.notion_client,
+        settings,
+    )
+    async with request.app.state.session_factory() as fresh_session:
+        refreshed = await fresh_session.get(Recording, recording_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        response = InterviewRouteResponse(
+            recording_id=refreshed.id,
+            status=refreshed.status,
+            version=refreshed.version,
+            safe_link=refreshed.synology_share_url or "",
+        )
+    if not resumed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=response.model_dump(mode="json")
+            | {"message": "Transfer resume is already in progress or not resumable"},
+        )
+    await complete_intent(session, claim, response.model_dump(mode="json"))
+    return response
+
+
+@router.post(
+    "/recordings/{recording_id}/reroute",
+    response_model=RecordingRerouteResponse,
+)
+async def reroute_recording(
+    recording_id: uuid.UUID,
+    body: RecordingRerouteRequest,
+    session: Session,
+    request: Request,
+) -> RecordingRerouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    try:
+        result = await _reroute_service(request).reroute(
+            session,
+            recording_id=recording_id,
+            recruiter=recruiter,
+            destination_id=body.destination_id,
+            expected_version=body.expected_version,
+            idempotency_key=body.idempotency_key,
+        )
+    except RerouteRejectedError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return RecordingRerouteResponse(
+        recording_id=result.recording_id,
+        version=result.version,
+        safe_link=result.share_url,
+        replayed=result.replayed,
+    )
+
+
+@router.post(
+    "/recordings/{recording_id}/notion-reassignment/resolve",
+    response_model=ReassignmentResolveResponse,
+)
+async def resolve_notion_reassignment(
+    recording_id: uuid.UUID,
+    body: ReassignmentResolveRequest,
+    session: Session,
+    request: Request,
+) -> ReassignmentResolveResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    recording = await session.get(Recording, recording_id)
+    if recording is None or recording.disk_owner_email != recruiter.email:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    pages = await _notion_reassignment_service(request).resolve_targets(recruiter, body.hint)
+    return ReassignmentResolveResponse(
+        items=[
+            ReassignmentTargetItem(
+                page_id=page.id,
+                title=page.title,
+                url=page.url,
+                recording_present=page.recording_present,
+            )
+            for page in pages
+        ]
+    )
+
+
+@router.post(
+    "/recordings/{recording_id}/notion-reassignment/propose",
+    response_model=ReassignmentProposeResponse,
+)
+async def propose_notion_reassignment(
+    recording_id: uuid.UUID,
+    body: ReassignmentProposeRequest,
+    session: Session,
+    request: Request,
+) -> ReassignmentProposeResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
+    recording = await session.get(Recording, recording_id)
+    if recording is None or recording.disk_owner_email != recruiter.email:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    pages = await _notion_reassignment_service(request).resolve_targets(
+        recruiter, body.target_page_id
+    )
+    if len(pages) != 1 or pages[0].id != body.target_page_id:
+        raise HTTPException(status_code=409, detail="Target Notion card is not a bounded candidate")
+    try:
+        proposal = await _notion_reassignment_service(request).propose(
+            session,
+            recording=recording,
+            recruiter_user_id=body.recruiter_user_id,
+            dm_channel_id=body.mattermost_dm_channel_id,
+            target=pages[0],
+        )
+    except NotionReassignmentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ReassignmentProposeResponse(
+        proposal_id=proposal.proposal_id,
+        capability=proposal.capability,
+        expires_at=proposal.expires_at.isoformat(),
+        target=ReassignmentTargetItem(
+            page_id=proposal.target.id,
+            title=proposal.target.title,
+            url=proposal.target.url,
+            recording_present=proposal.target.recording_present,
+        ),
+    )
+
+
+@router.post(
+    "/notion-reassignment/{proposal_id}/confirm",
+    response_model=RecordingRerouteResponse,
+)
+async def confirm_notion_reassignment(
+    proposal_id: uuid.UUID,
+    body: ReassignmentConfirmRequest,
+    session: Session,
+    request: Request,
+) -> RecordingRerouteResponse:
+    try:
+        recording = await _notion_reassignment_service(request).confirm(
+            session,
+            proposal_id=proposal_id,
+            recruiter_user_id=body.recruiter_user_id,
+            dm_channel_id=body.mattermost_dm_channel_id,
+            capability=body.capability.get_secret_value(),
+            idempotency_key=body.idempotency_key,
+        )
+    except NotionReassignmentRejectedError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return RecordingRerouteResponse(
+        recording_id=recording.id,
+        version=recording.version,
+        safe_link=recording.synology_share_url or "",
+    )
 
 
 @router.post(
@@ -475,6 +806,8 @@ async def trigger_scan(
             review_service=request.app.state.review_service,
             question_queue_service=request.app.state.question_queue_service,
             interaction_binding=interaction_binding,
+            destination_service=request.app.state.destination_service,
+            routing_job_service=request.app.state.routing_job_service,
         )
     except InteractionBindingConflict as error:
         await _release_scan_intent(session, claim)
@@ -679,6 +1012,8 @@ async def answer_questions(
             body.mattermost_dm_channel_id,
         )
         for mutation in result.accepted:
+            if mutation.replayed:
+                continue
             recording = await session.get(Recording, mutation.recording_id)
             if recording is None or recording.status not in {
                 RecordingStatus.CALENDAR_EVENT_FOUND,
@@ -896,6 +1231,29 @@ def _destination_service(request: Request) -> DestinationService:
     if service is None:
         raise HTTPException(status_code=409, detail="Synology destinations are disabled")
     return cast(DestinationService, service)
+
+
+def _reroute_service(request: Request) -> RerouteService:
+    service = getattr(request.app.state, "reroute_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="Synology reroute is unavailable")
+    return cast(RerouteService, service)
+
+
+def _notion_reassignment_service(request: Request) -> NotionReassignmentService:
+    service = getattr(request.app.state, "notion_reassignment_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="Notion reassignment is unavailable")
+    return cast(NotionReassignmentService, service)
+
+
+def _destination_item(row: StorageDestination) -> DestinationItem:
+    return DestinationItem(
+        id=row.id,
+        display_name=row.display_name,
+        path_label=row.canonical_path,
+        writable=row.writable,
+    )
 
 
 def _non_interview_service(request: Request) -> NonInterviewService:

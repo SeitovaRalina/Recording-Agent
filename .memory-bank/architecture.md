@@ -49,6 +49,30 @@ implementation authority. The earlier Phase 4 plan remains historical input.
 - Deterministic matches complete entirely in Backend without an LLM call. Mila is invoked only
   for explicit recruiter interaction, bounded status reporting, or ambiguous review dialogue.
 
+## Autonomous Synology routing amendment (approved 2026-07-29)
+
+The normal scan remains Backend-owned. After deterministic identity resolution and bounded
+destination inventory, Backend creates a durable routing job rather than launching an LLM. A
+root-owned Gateway command-cron dispatcher periodically requests one ready job, holds a short
+lease, and starts one isolated `recordings-saver` worker turn only for that lease. An empty poll
+exits without an LLM call.
+
+```text
+daily/manual Backend scan -> matched recording -> routing job
+Gateway command-cron -> lease -> isolated Mila(job UUID + one-time nonce)
+Mila -> one destination UUID | defer
+Backend -> independent validation -> transfer | NotificationOutbox question
+```
+
+The worker is not a recruiter DM session and has no message delivery. Its versioned system
+instruction treats all job fields as untrusted delimited data and permits only `resolve(UUID)` or
+`defer`; it receives no raw storage path, recruiter identity, Notion/Yandex URL, master Backend
+secret, or integration credential. Backend validates every response again and alone owns defer
+notifications. The feature flag is disabled by default. Canary enablement requires a no-job cron
+smoke, then one approved recruiter/root; rollback disables the flag and timer while leases expire
+without transfer. Platform owns dispatcher/timer/Gateway operations; Backend owns jobs, APIs,
+migrations, reconciliation and notifications.
+
 ## Phase 4 Mila canary boundary
 
 - Mila is the first OpenClaw canary; Sylvanas remains unchanged.

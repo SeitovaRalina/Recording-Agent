@@ -796,6 +796,67 @@ async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed(
 
 
 @pytest.mark.anyio
+async def test_synology_candidate_match_waits_for_llm_destination_selection() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(
+        storage_provider="synology",
+        synology_base_url="https://nas.example",
+        synology_user="user",
+        synology_pass="pass",  # pragma: allowlist secret
+        synology_interview_roots=("/home/Recruiting-E/2. Interviews external",),
+    )
+    item = found("synology-await-destination")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    candidate = AsyncMock()
+    candidate.find_and_match.return_value = CandidateMatchResult(
+        page=NotionPage(
+            "page",
+            "https://notion/page",
+            "Different Notion Title",
+            "2026-07-16",
+            project_or_spot="Java-разработчик @Т-банк",
+        ),
+        confidence=1.0,
+    )
+    transfer = AsyncMock()
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        candidate,
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert loaded.manual_review_reason == "storage_destination_required"
+    assert loaded.generated_filename == (
+        "2026-07-16_Ivan_Ivanov_Java-разработчик_@Т-банк_general_interview.webm"
+    )
+    assert loaded.storage_key is None
+    assert loaded.storage_destination_id is None
+    transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
 async def test_blank_spot_storage_key_collision_requires_manual_review() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

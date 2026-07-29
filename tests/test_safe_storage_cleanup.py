@@ -22,6 +22,12 @@ from app.services.status import StatusService
 from app.services.transfer import TransferResult
 from app.tools.synology import SynologyFolder, SynologyPreflight
 
+TEST_INTERVIEW_ROOTS = (
+    "/home/Recruiting-NE/2. Interviews",
+    "/home/Recruiting-E/2. Interviews external",
+    "/home/Recruiting-E/3. Interviews internal",
+)
+
 
 def recruiter() -> RecruiterConfig:
     return RecruiterConfig(
@@ -57,12 +63,34 @@ async def test_destination_discovery_persists_only_writable_real_folders() -> No
     owner = recruiter()
     backend = AsyncMock()
     backend.preflight.return_value = SynologyPreflight(True, True, True, True)
-    backend.discover_folders.return_value = [
-        SynologyFolder("/recruiters/mila/team", "team", True, False),
-        SynologyFolder("/recruiters/mila/link", "link", True, True),
-        SynologyFolder("/recruiters/mila/read-only", "read-only", False, False),
+    backend.discover_folders.side_effect = [
+        [
+            SynologyFolder(
+                "/home/Recruiting-NE/2. Interviews/Backend", "Backend", True, False
+            ),
+            SynologyFolder(
+                "/home/Recruiting-NE/2. Interviews/link", "link", True, True
+            ),
+        ],
+        [
+            SynologyFolder(
+                "/home/Recruiting-E/2. Interviews external/Frontend",
+                "Frontend",
+                True,
+                False,
+            )
+        ],
+        [
+            SynologyFolder(
+                "/home/Recruiting-E/3. Interviews internal/read-only",
+                "read-only",
+                False,
+                False,
+            )
+        ],
     ]
     settings = Settings(
+        synology_interview_roots=TEST_INTERVIEW_ROOTS,
         synology_discovery_max_depth=2,
         synology_discovery_max_pages=4,
         synology_discovery_max_results=25,
@@ -74,10 +102,115 @@ async def test_destination_discovery_persists_only_writable_real_folders() -> No
         rows = await service.discover(session, owner)
     await engine.dispose()
 
-    assert [row.display_name for row in rows] == ["team"]
-    backend.discover_folders.assert_awaited_once_with(
-        "/recruiters/mila", max_depth=2, max_pages=4, max_results=25
+    assert [row.display_name for row in rows] == [
+        "2. Interviews",
+        "Backend",
+        "2. Interviews external",
+        "Frontend",
+        "3. Interviews internal",
+    ]
+    assert [call.kwargs for call in backend.discover_folders.await_args_list] == [
+        {"max_depth": 2, "max_pages": 4, "max_results": 8},
+        {"max_depth": 2, "max_pages": 4, "max_results": 8},
+        {"max_depth": 2, "max_pages": 4, "max_results": 8},
+    ]
+    assert [call.args[0] for call in backend.discover_folders.await_args_list] == list(
+        TEST_INTERVIEW_ROOTS
     )
+
+
+@pytest.mark.anyio
+async def test_interview_destination_candidates_are_bounded_allowed_inventory() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    destinations = [
+        StorageDestination(
+            recruiter_id=owner.id,
+            canonical_path="/home/Recruiting-E/2. Interviews external/Backend",
+            display_name="Backend",
+            writable=True,
+            symlink_safe=True,
+            validated_at=datetime.now(UTC),
+        ),
+        StorageDestination(
+            recruiter_id=owner.id,
+            canonical_path="/home/Recruiting-E/2. Interviews external/Frontend",
+            display_name="Frontend",
+            writable=True,
+            symlink_safe=True,
+            validated_at=datetime.now(UTC),
+        ),
+    ]
+    blocked = StorageDestination(
+        recruiter_id=owner.id,
+        canonical_path="/home/Recruiting-E/2. Interviews external/Backend Link",
+        display_name="Backend Link",
+        writable=True,
+        symlink_safe=False,
+        validated_at=datetime.now(UTC),
+    )
+    outside = StorageDestination(
+        recruiter_id=owner.id,
+        canonical_path="/home/Recruiting-E/1. Other/Backend",
+        display_name="Other Backend",
+        writable=True,
+        symlink_safe=True,
+        validated_at=datetime.now(UTC),
+    )
+    service = DestinationService(
+        AsyncMock(), Settings(synology_interview_roots=TEST_INTERVIEW_ROOTS)
+    )
+    async with factory() as session:
+        session.add(owner)
+        session.add_all([*destinations, blocked, outside])
+        await session.commit()
+        candidates = await service.list_allowed_candidates(session, owner, limit=10)
+    await engine.dispose()
+
+    assert [row.display_name for row in candidates] == ["Backend", "Frontend"]
+
+
+@pytest.mark.anyio
+async def test_interview_destination_candidates_respect_limit_without_matching_text() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    destinations = [
+        StorageDestination(
+            recruiter_id=owner.id,
+            canonical_path=f"/home/Recruiting-E/2. Interviews external/{name}",
+            display_name=name,
+            writable=True,
+            symlink_safe=True,
+            validated_at=datetime.now(UTC),
+        )
+        for name in ("Backend", "Frontend", "QA")
+    ]
+    other_recruiter_destination = StorageDestination(
+        recruiter_id=owner.id,
+        canonical_path="/home/Recruiting-E/3. Interviews internal/Flutter",
+        display_name="Flutter",
+        writable=True,
+        symlink_safe=True,
+        validated_at=datetime.now(UTC),
+    )
+    other_recruiter_destination.recruiter_id = uuid.uuid4()
+    service = DestinationService(
+        AsyncMock(), Settings(synology_interview_roots=TEST_INTERVIEW_ROOTS)
+    )
+    async with factory() as session:
+        session.add(owner)
+        session.add_all([*destinations, other_recruiter_destination])
+        await session.commit()
+        candidates = await service.list_allowed_candidates(session, owner, limit=2)
+    await engine.dispose()
+
+    assert [row.display_name for row in candidates] == ["Backend", "Frontend"]
 
 
 @pytest.mark.anyio

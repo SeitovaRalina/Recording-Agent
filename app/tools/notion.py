@@ -93,6 +93,7 @@ class NotionPage:
     project_or_spot: str | None = "unspecified"
     emails: tuple[str, ...] = ()
     spots: tuple[NotionRelationChoice, ...] = ()
+    recording_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,11 +200,13 @@ class NotionClient:
             date_property=date_prop,
             recording_property=recording_prop,
         )
-        response = await self._query_source(source_id, candidate_name, name_prop)
+        response = await self._query_source(source_id, candidate_name, name_prop, recording_prop)
         if response.status_code == 404 and was_cached:
             self._invalidate(key, source_id)
             source_id, _ = await self._resolve_source(key)
-            response = await self._query_source(source_id, candidate_name, name_prop)
+            response = await self._query_source(
+                source_id, candidate_name, name_prop, recording_prop
+            )
         self._raise_query_error(response)
         payload = self._json_object(response, "query")
         results = payload.get("results")
@@ -212,7 +215,11 @@ class NotionClient:
         pages: list[NotionPage] = []
         relation_cache: dict[str, NotionRelationChoice] = {}
         for item in results[:10]:
-            page = self._parse_page(item, name_prop, date_prop, contacts_prop, project_prop)
+            page = self._parse_page(
+                item, name_prop, date_prop, contacts_prop, project_prop, recording_prop
+            )
+            if page.recording_present:
+                continue
             relation_ids = self._project_relation_ids(item, project_prop)
             relations: list[NotionRelationChoice] = []
             for relation_id in relation_ids:
@@ -238,6 +245,94 @@ class NotionClient:
             pages=[{"id": page.id, "title": page.title, "url": page.url} for page in pages],
         )
         return pages
+
+    async def resolve_reassignment_targets(
+        self,
+        database_id: str,
+        hint: str,
+        *,
+        name_prop: str,
+        date_prop: str,
+        recording_prop: str,
+        contacts_prop: str,
+        project_prop: str,
+        project_prop_type: str,
+    ) -> list[NotionPage]:
+        """Resolve a URL/name hint only in a configured schema-verified database."""
+        key = (
+            database_id,
+            name_prop,
+            date_prop,
+            recording_prop,
+            contacts_prop,
+            project_prop,
+            project_prop_type,
+        )
+        source_id, _ = await self._resolve_source(key)
+        canonical_id = _canonical_notion_page_id(hint)
+        if canonical_id is not None:
+            page = await self._retrieve_reassignment_page(
+                canonical_id,
+                source_id,
+                database_id,
+                name_prop,
+                date_prop,
+                contacts_prop,
+                project_prop,
+                recording_prop,
+            )
+            # Page URL is only a lookup hint; configured-source schema validation happens above.
+            # The schema cache above still proves the configured source before this lookup.
+            return [page]
+        response = await self._query_source_any_recording(source_id, hint, name_prop)
+        self._raise_query_error(response)
+        payload = self._json_object(response, "reassignment query")
+        items = payload.get("results")
+        if not isinstance(items, list):
+            raise NotionMalformedResponseError("Notion reassignment query has invalid results")
+        pages = [
+            self._parse_page(
+                item, name_prop, date_prop, contacts_prop, project_prop, recording_prop
+            )
+            for item in items[:10]
+        ]
+        return [page for page in pages if _hint_matches_page(hint, page)]
+
+    async def _retrieve_reassignment_page(
+        self,
+        page_id: str,
+        source_id: str,
+        database_id: str,
+        name_prop: str,
+        date_prop: str,
+        contacts_prop: str,
+        project_prop: str,
+        recording_prop: str,
+    ) -> NotionPage:
+        try:
+            response = await self._client.get(
+                f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion page retrieval transport failed") from None
+        self._raise_query_error(response)
+        payload = self._json_object(response, "reassignment page")
+        parent = payload.get("parent")
+        parent_id = (
+            parent.get("data_source_id") or parent.get("database_id")
+            if isinstance(parent, dict)
+            else None
+        )
+        if parent_id not in {source_id, database_id}:
+            raise NotionForbiddenError("Notion reassignment page is outside configured database")
+        return self._parse_page(
+            payload,
+            name_prop,
+            date_prop,
+            contacts_prop,
+            project_prop,
+            recording_prop,
+        )
 
     async def update_page_interview(
         self,
@@ -301,6 +396,58 @@ class NotionClient:
             date_property=date_prop,
             recording_property=recording_prop,
         )
+
+    async def get_recording_field(self, page_id: str, recording_prop: str) -> dict[str, object]:
+        """Return the exact configured files field after Notion page retrieval."""
+        try:
+            response = await self._client.get(
+                f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion page retrieval transport failed") from None
+        self._raise_common(response)
+        if response.is_error:
+            raise NotionQueryError(f"Notion page retrieval failed with HTTP {response.status_code}")
+        payload = self._json_object(response, "page retrieval")
+        properties = payload.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError("Notion page properties are malformed")
+        field = properties.get(recording_prop)
+        if not isinstance(field, dict) or field.get("type") != "files":
+            raise NotionMalformedResponseError("Notion recording field is malformed")
+        files = field.get("files")
+        if not isinstance(files, list):
+            raise NotionMalformedResponseError("Notion recording files field is malformed")
+        return {"page_id": page_id, "files": files}
+
+    async def replace_recording_link(
+        self, page_id: str, *, recording_prop: str, filename: str, url: str
+    ) -> None:
+        await self._write_recording_files(
+            page_id,
+            recording_prop=recording_prop,
+            files=[{"name": filename, "external": {"url": url}}],
+        )
+
+    async def clear_recording_link(self, page_id: str, *, recording_prop: str) -> None:
+        await self._write_recording_files(page_id, recording_prop=recording_prop, files=[])
+
+    async def _write_recording_files(
+        self, page_id: str, *, recording_prop: str, files: list[dict[str, object]]
+    ) -> None:
+        try:
+            response = await self._client.patch(
+                f"{NOTION_API_BASE}/pages/{page_id}",
+                headers=self._headers,
+                json={"properties": {recording_prop: {"files": files}}},
+            )
+        except httpx.RequestError:
+            raise NotionUpdateError("Notion recording update transport failed") from None
+        self._raise_common(response)
+        if response.is_error:
+            raise NotionUpdateError(
+                f"Notion recording update failed with HTTP {response.status_code}"
+            )
 
     async def _resolve_source(self, key: SourceCacheKey) -> tuple[str, bool]:
         cached = self._cache_get(key)
@@ -566,6 +713,27 @@ class NotionClient:
         source_id: str,
         candidate_name: str,
         name_prop: str,
+        recording_prop: str,
+    ) -> httpx.Response:
+        try:
+            return await self._client.post(
+                f"{NOTION_API_BASE}/data_sources/{source_id}/query",
+                headers=self._headers,
+                json={
+                    "filter": {
+                        "and": [
+                            {"property": name_prop, "title": {"contains": candidate_name}},
+                            {"property": recording_prop, "files": {"is_empty": True}},
+                        ]
+                    },
+                    "page_size": 10,
+                },
+            )
+        except httpx.RequestError:
+            raise NotionQueryError("Notion query transport failed") from None
+
+    async def _query_source_any_recording(
+        self, source_id: str, candidate_name: str, name_prop: str
     ) -> httpx.Response:
         try:
             return await self._client.post(
@@ -577,7 +745,7 @@ class NotionClient:
                 },
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion query transport failed") from None
+            raise NotionQueryError("Notion reassignment query transport failed") from None
 
     @staticmethod
     def _parse_sources(payload: dict[str, Any]) -> list[NotionDataSource]:
@@ -657,6 +825,7 @@ class NotionClient:
         date_prop: str,
         contacts_prop: str,
         project_prop: str = "",
+        recording_prop: str = DEFAULT_RECORDING_PROP,
     ) -> NotionPage:
         if not isinstance(item, dict):
             raise NotionMalformedResponseError("Notion page payload must be an object")
@@ -678,6 +847,7 @@ class NotionClient:
             project_or_spot=(
                 NotionClient._plain_text(properties.get(project_prop)) if project_prop else None
             ),
+            recording_present=NotionClient._files_present(properties.get(recording_prop)),
         )
 
     @staticmethod
@@ -754,9 +924,36 @@ class NotionClient:
         start = value["date"].get("start")
         return str(start) if start is not None else None
 
+    @staticmethod
+    def _files_present(value: Any) -> bool:
+        if not isinstance(value, dict) or value.get("type") != "files":
+            raise NotionMalformedResponseError("Notion recording field is malformed")
+        files = value.get("files")
+        if not isinstance(files, list):
+            raise NotionMalformedResponseError("Notion recording files field is malformed")
+        return bool(files)
+
 
 def _response_excerpt(value: str) -> str:
     normalized = " ".join(value.split())
     if len(normalized) > _TRACE_BODY_LIMIT:
         return normalized[:_TRACE_BODY_LIMIT]
     return normalized
+
+
+def _hint_matches_page(hint: str, page: NotionPage) -> bool:
+    normalized = " ".join(hint.casefold().split())
+    if normalized == " ".join(page.title.casefold().split()):
+        return True
+    compact = re.sub(r"[^0-9a-f]", "", hint.casefold())
+    return len(compact) == 32 and compact in {
+        re.sub(r"[^0-9a-f]", "", page.id.casefold()),
+        re.sub(r"[^0-9a-f]", "", page.url.casefold()),
+    }
+
+
+def _canonical_notion_page_id(value: str) -> str | None:
+    compact = re.sub(r"[^0-9a-f]", "", value.casefold())
+    if len(compact) != 32:
+        return None
+    return f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-{compact[16:20]}-{compact[20:]}"

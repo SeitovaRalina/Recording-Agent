@@ -29,6 +29,7 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.app_environment == "production"
     assert settings.pipeline_trace_active is False
     assert settings.scheduler_enabled is False
+    assert settings.autonomous_routing_enabled is False
     assert settings.mattermost_delivery_enabled is False
     assert settings.notion_writes_enabled is False
     assert settings.yandex_source_mutation_enabled is False
@@ -49,6 +50,33 @@ def test_phase_two_settings_parse_json_maps() -> None:
     assert isinstance(settings.yandex_caldav_passwords["a@example.com"], SecretStr)
 
 
+def test_synology_interview_roots_parse_from_json_and_csv() -> None:
+    json_settings = Settings(
+        SYNOLOGY_INTERVIEW_ROOTS='["/home/Recruiting-E/2. Interviews external"]'
+    )
+    csv_settings = Settings(
+        SYNOLOGY_INTERVIEW_ROOTS=(
+            "/home/Recruiting-NE/2. Interviews,/home/Recruiting-E/3. Interviews internal/"
+        )
+    )
+
+    assert json_settings.synology_interview_roots == ("/home/Recruiting-E/2. Interviews external",)
+    assert csv_settings.synology_interview_roots == (
+        "/home/Recruiting-NE/2. Interviews",
+        "/home/Recruiting-E/3. Interviews internal",
+    )
+
+
+def test_synology_accepts_public_permanent_share_links() -> None:
+    settings = Settings(
+        storage_provider="synology",
+        synology_base_url="https://nas.test",
+        synology_api_key=SecretStr("key"),
+        synology_interview_roots=("/home/Recruiting-E",),
+    )
+    assert settings.storage_provider == "synology"
+
+
 def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("SCAN_IGNORE_BEFORE_TODAY", "false")
     monkeypatch.setenv("SCAN_LOCAL_TIMEZONE", "UTC")
@@ -67,9 +95,11 @@ def test_scan_cutoff_settings_support_environment_aliases(monkeypatch) -> None: 
 def test_side_effect_flags_are_explicitly_opt_in() -> None:
     settings = Settings(
         scheduler_enabled=True,
+        autonomous_routing_enabled=True,
         mattermost_delivery_enabled=True,
         notion_writes_enabled=True,
         yandex_source_mutation_enabled=True,
     )
     assert settings.scheduler_enabled is True
+    assert settings.autonomous_routing_enabled is True
     assert settings.mattermost_delivery_enabled is True
