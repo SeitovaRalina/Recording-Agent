@@ -25,6 +25,12 @@ mutation or when interpreting a Backend error.
   selected one returned destination.
 - `cleanup-preview`: the recruiter asks to clean successfully processed recordings.
 - `cleanup-confirm`: only after showing the immutable preview and receiving explicit confirmation.
+- `reroute-recording`: first call `destinations`; submit only one returned destination ID and the
+  displayed recording version. Never pass a path. The Backend moves the verified Synology file and
+  replaces the current Notion recording link only after the new public link is verified.
+- `notion-reassignment`: resolve a recruiter URL/name hint to bounded Backend candidates, show the
+  result, then require an explicit confirmation capability. It writes/verifies the target card
+  before clearing the old card's recording field.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
   a one-time dispatch nonce. Read `references/autonomous-routing.md` before this operation.
 

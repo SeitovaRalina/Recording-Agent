@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -14,6 +15,17 @@ from pydantic import SecretStr
 from app.services.storage import StorageCollisionError
 
 QueryValue = str | int
+
+
+def _copy_move_task_id(payload: dict[str, Any]) -> str | None:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    for key in ("taskid", "task_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 class SynologyAPIError(RuntimeError):
@@ -42,6 +54,12 @@ class SynologyPreflight:
     root_exists: bool
     root_writable: bool
     share_links_available: bool
+
+
+@dataclass(frozen=True)
+class SynologyMoveResult:
+    task_id: str | None
+    target_path: str
 
 
 class SynologyBackend:
@@ -525,6 +543,156 @@ class SynologyBackend:
             return str(payload["data"]["links"][0]["url"])
         except (KeyError, IndexError, TypeError) as error:
             raise SynologyAPIError(response.status_code, payload) from error
+
+    async def find_public_share_link(self, path: str) -> str | None:
+        """Recover an existing permanent File Station link by exact stored path."""
+        for offset in range(0, 1000, 100):
+            response = await self._get(
+                "/webapi/entry.cgi",
+                params={
+                    "api": "SYNO.FileStation.Sharing",
+                    "method": "list",
+                    "version": "3",
+                    "offset": str(offset),
+                    "limit": "100",
+                },
+            )
+            payload = self._validate(response)
+            data = payload.get("data")
+            links = data.get("links") if isinstance(data, dict) else None
+            if not isinstance(links, list):
+                raise SynologyAPIError(response.status_code, payload)
+            for item in links:
+                if isinstance(item, dict) and item.get("path") == path:
+                    url = item.get("url")
+                    if isinstance(url, str) and url:
+                        return url
+            total = data.get("total") if isinstance(data, dict) else None
+            if not links or len(links) < 100 or (isinstance(total, int) and offset + 100 >= total):
+                return None
+        raise SynologyAPIError(0, {"error": "Synology share-link scan exceeded safe bound"})
+
+    async def copy_move_verified(
+        self,
+        *,
+        source_path: str,
+        target_folder: str,
+        filename: str,
+        root: str,
+        expected_size: int | None,
+        expected_owner: dict[str, object],
+    ) -> SynologyMoveResult:
+        """Move a proven owned file without overwrite and prove the result before returning."""
+        source = self.canonical_under_root(root, source_path)
+        folder = self.canonical_under_root(root, target_folder)
+        target = self.canonical_under_root(root, f"{folder.rstrip('/')}/{filename}")
+        if await self._file_size(target) is not None:
+            raise StorageCollisionError(
+                "Synology reroute target already exists; overwrite is forbidden"
+            )
+        source_size = await self._file_size(source)
+        if source_size is None:
+            raise StorageCollisionError("Synology reroute source does not exist")
+        self._require_complete_size(source, source_size, expected_size)
+        source_owner = await self._read_owner_marker(
+            str(PurePosixPath(source).parent), PurePosixPath(source).name
+        )
+        if source_owner is None:
+            raise StorageCollisionError("Synology reroute source has no ownership marker")
+        self._require_same_owner(source, source_owner, expected_owner)
+        task_id = await self._start_copy_move(source, folder)
+        target_size = await self._file_size(target)
+        if target_size is None:
+            raise StorageCollisionError("Synology CopyMove target is absent after task completion")
+        self._require_complete_size(target, target_size, expected_size)
+        marker_name = self._owner_marker_name(filename)
+        source_marker = self.canonical_under_root(
+            root, f"{PurePosixPath(source).parent}/{marker_name}"
+        )
+        target_marker = self.canonical_under_root(root, f"{folder.rstrip('/')}/{marker_name}")
+        if await self._file_size(target_marker) is not None:
+            raise StorageCollisionError("Synology reroute owner-marker target already exists")
+        await self._start_copy_move(source_marker, folder)
+        target_owner = await self._read_owner_marker(folder, filename)
+        if target_owner is None:
+            raise StorageCollisionError("Synology CopyMove did not preserve ownership marker")
+        self._require_same_owner(target, target_owner, expected_owner)
+        if await self._file_size(source) is not None:
+            raise StorageCollisionError("Synology CopyMove did not remove the physical source")
+        if await self._file_size(source_marker) is not None:
+            raise StorageCollisionError("Synology CopyMove did not remove the source owner marker")
+        return SynologyMoveResult(task_id=task_id, target_path=target)
+
+    async def verify_moved_target(
+        self,
+        *,
+        target_path: str,
+        filename: str,
+        root: str,
+        expected_size: int | None,
+        expected_owner: dict[str, object],
+    ) -> None:
+        target = self.canonical_under_root(root, target_path)
+        size = await self._file_size(target)
+        if size is None:
+            raise StorageCollisionError("Synology reroute target is absent")
+        self._require_complete_size(target, size, expected_size)
+        owner = await self._read_owner_marker(str(PurePosixPath(target).parent), filename)
+        if owner is None:
+            raise StorageCollisionError("Synology reroute target has no owner marker")
+        self._require_same_owner(target, owner, expected_owner)
+
+    async def _start_copy_move(self, source: str, target_folder: str) -> str | None:
+        response = await self._post(
+            "/webapi/entry.cgi",
+            params={"api": "SYNO.FileStation.CopyMove", "method": "start", "version": "3"},
+            data={
+                "path": json.dumps([source]),
+                "dest_folder_path": target_folder,
+                "remove_src": "true",
+                "overwrite": "false",
+            },
+        )
+        payload = self._validate(response)
+        task_id = _copy_move_task_id(payload)
+        if task_id:
+            await self._wait_background_task(task_id)
+        return task_id
+
+    async def _wait_background_task(self, task_id: str) -> None:
+        # File Station reports CopyMove asynchronously. Bounded polling avoids declaring an
+        # ambiguous NAS mutation successful before the task is terminal.
+        for _ in range(30):
+            response = await self._get(
+                "/webapi/entry.cgi",
+                params={
+                    "api": "SYNO.FileStation.CopyMove",
+                    "method": "status",
+                    "version": "3",
+                    "taskid": task_id,
+                },
+            )
+            try:
+                payload = self._validate(response)
+            except SynologyAPIError as error:
+                code = (
+                    error.payload.get("error", {}).get("code")
+                    if isinstance(error.payload, dict)
+                    else None
+                )
+                if code == 599:  # DSM removes a completed CopyMove task from status.
+                    return
+                raise
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise SynologyAPIError(response.status_code, payload)
+            status = data.get("status")
+            if status in {"finished", True}:
+                return
+            if data.get("has_fail") is True or status in {"failed", "error", "cancelled"}:
+                raise SynologyAPIError(response.status_code, payload)
+            await asyncio.sleep(min(0.25 * (2**_), 2.0))
+        raise SynologyAPIError(0, {"error": "Synology CopyMove task did not complete"})
 
     @staticmethod
     async def _multipart(

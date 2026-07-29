@@ -19,6 +19,7 @@ from app.config import Settings, get_settings
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
+from app.db.models.recording_storage_artifact import RecordingStorageArtifact
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import (
     enforce_recruiter_scope,
@@ -778,6 +779,8 @@ async def _run_transfer_recording(
             synology_folder_path=result.folder_path,
             synology_file_path=result.file_path,
         )
+        if settings.storage_provider == "synology":
+            await _ensure_active_storage_artifact(session, recording)
         await session.commit()
         trace(
             settings,
@@ -805,6 +808,8 @@ async def _run_transfer_recording(
             synology_share_url=share_url,
             storage_is_durable=settings.storage_provider == "synology",
         )
+        if settings.storage_provider == "synology":
+            await _ensure_active_storage_artifact(session, recording)
         await session.commit()
         trace(
             settings,
@@ -1778,3 +1783,36 @@ async def _send_recruiter_notifications(
 
 def _enforce_recruiter_scope(settings: Settings, recruiter: RecruiterConfig) -> None:
     enforce_recruiter_scope(settings, recruiter)
+
+
+async def _ensure_active_storage_artifact(session: AsyncSession, recording: Recording) -> None:
+    """Persist the initial durable placement once its public link is committed."""
+    if not (
+        recording.synology_folder_path
+        and recording.synology_file_path
+        and recording.synology_share_url
+    ):
+        return
+    existing = await session.scalar(
+        select(RecordingStorageArtifact).where(
+            RecordingStorageArtifact.recording_id == recording.id,
+            RecordingStorageArtifact.is_active.is_(True),
+        )
+    )
+    if existing is not None:
+        return
+    filename = recording.generated_filename or recording.disk_filename
+    session.add(
+        RecordingStorageArtifact(
+            recording_id=recording.id,
+            destination_id=recording.storage_destination_id,
+            folder_path=recording.synology_folder_path,
+            file_path=recording.synology_file_path,
+            share_url=recording.synology_share_url,
+            owner_marker_path=(
+                f"{recording.synology_folder_path.rstrip('/')}/.{filename}.recording-agent-owner.json"
+            ),
+            size_bytes=recording.disk_size_bytes,
+            is_active=True,
+        )
+    )

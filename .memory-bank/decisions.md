@@ -202,3 +202,16 @@ logs; Backend owner owns job APIs, migrations, flag, reconciliation and notifica
 **Why:** This preserves Backend side-effect ownership while providing reliable, restart-safe,
 low-frequency worker delivery without a generic event-push assumption or polling LLM calls.
 **Date:** 2026-07-29
+# ADR-022: Public permanent Synology links and reroute safety
+
+- Synology links are intentionally public, passwordless, and permanent: File Station Sharing
+  `create` version 3 sends `date_expired=-1` and `date_available=0` only.
+- The public-link risk is accepted without a dedicated human incident owner. The technical File
+  Station account is `inerview_recordis_saver`. To revoke a leaked URL, an operator opens File
+  Station -> Tools -> Shared Links, finds the link/path and removes the share; this does not
+  delete the stored recording.
+- Reroute accepts a persisted opaque destination UUID only. File Station CopyMove uses
+  `remove_src=true` and `overwrite=false`, separately moves the data and owner-marker files,
+  polls the task, then verifies target size/owner and physical source absence.
+- Ordinary candidate lookup filters `General Interview recording` to empty. Explicit Notion
+  reassignment writes and verifies the target link before clearing the source field.

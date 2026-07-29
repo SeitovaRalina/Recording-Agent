@@ -13,7 +13,7 @@ rename, overwrite, or other automatic deletion is introduced.
 
 1. Production Synology sharing intentionally creates public, no-password, no-expiry links with
    `date_expired=-1`; URL is persisted. No expiry/password settings or validation remain.
-2. Public exposure risk, revocation/incident owner, and exact File Station request are documented
+2. Public exposure risk, explicit no-human-owner waiver, technical account, revocation procedure, and exact File Station request are documented
    in Memory Bank and Synology contract; tests assert no password/expiry field is sent.
 3. Current uncommitted expiring-link retry is reconciled in an isolated checkpoint without losing
    live destination validation and no-parent-creation fixes.
@@ -43,16 +43,17 @@ rename, overwrite, or other automatic deletion is introduced.
    checkpoint through `/commit`.
 2. Update `.memory-bank/architecture.md`, `decisions.md`, `open-questions.md`, API docs, examples,
    `synology-connect` plan/build report: public permanent policy is explicit, accepted risk;
-   document operator link revocation procedure and owner.
+   document File Station link revocation procedure, the `inerview_recordis_saver` technical
+   account, and the user-approved absence of a dedicated human incident owner.
 3. Before code, prove deployed DSM `SYNO.FileStation.CopyMove` API version, same/cross-share behavior,
-   permissions, async task polling, collision behavior, `remove_source` semantics, and owner-marker/
+   permissions, async task polling, collision behavior, `remove_src` semantics, and owner-marker/
    file preservation. If unsupported, allow re-upload only while Yandex source is available; otherwise
    fail actionable without mutation.
 4. Generate an Alembic migration via `/migrate`: immutable `recording_storage_artifacts`, reroute
    operation/audit state, and Notion reassignment proposal state. Backfill only rows with complete,
    proven Synology path/link identity; mark all others legacy/unreroutable, never guess.
 5. Add reroute saga service. Use recording-level ownership lease plus operation lease/checkpoints:
-   validate target, CopyMove with `remove_source=true`/re-upload with `overwrite=false`, poll/verify
+   validate target, CopyMove with `remove_src=true`/re-upload with `overwrite=false`, poll/verify
    marker and size, create
    link, write pending/new artifact, replace the current card's `General Interview recording` value
    with exactly the new link, switch active artifact, record prior artifact, complete. Reconciliation
@@ -95,10 +96,14 @@ rename, overwrite, or other automatic deletion is introduced.
 
 ## Blockers
 
-1. **CopyMove implementation proof:** User selected move (`remove_source` after verified target).
-   Prove API task/cross-share/marker behavior on isolated test data before build.
-2. **Public-link incident owner:** name operational owner and revocation procedure before production
-   rollout; public permanent URLs are deliberately exposed indefinitely.
+1. **RESOLVED 2026-07-29 — CopyMove implementation proof:** isolated DSM v3 smoke under
+   `/home/Recruiting-E/3. Interviews internal/Flutter` proved separate source file and owner-marker
+   CopyMove tasks with `remove_src=true`, `overwrite=false`, task completion, target size/marker
+   verification, physical source absence, public permanent link creation, and generated-test-tree cleanup.
+2. **RESOLVED BY USER WAIVER 2026-07-29 — Public-link incident owner:** public permanent URLs
+   deliberately have no dedicated human incident owner. `inerview_recordis_saver` is the technical
+   File Station account. Documentation must retain the File Station link-revocation procedure and
+   explicitly state this accepted operational risk.
 
 ## Out of scope
 

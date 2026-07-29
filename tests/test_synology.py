@@ -95,6 +95,51 @@ async def test_create_share_link_and_error_propagation() -> None:
 
 
 @pytest.mark.anyio
+async def test_find_public_share_link_recovers_exact_path_only() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "links": [
+                                {"path": "/base/other.webm", "url": "https://wrong"},
+                                {"path": "/base/video.webm", "url": "https://right"},
+                            ]
+                        },
+                    },
+                )
+            )
+            assert await backend.find_public_share_link("/base/video.webm") == "https://right"
+    assert route.calls.last.request.url.params["method"] == "list"
+
+
+@pytest.mark.anyio
+async def test_find_public_share_link_paginates_to_exact_path() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        first = [{"path": f"/base/{index}", "url": "https://other"} for index in range(100)]
+        with respx.mock(assert_all_called=True) as router:
+            route = router.get(URL).mock(
+                side_effect=[
+                    httpx.Response(200, json={"success": True, "data": {"links": first}}),
+                    httpx.Response(
+                        200,
+                        json={
+                            "success": True,
+                            "data": {"links": [{"path": "/base/video.webm", "url": "https://right"}]},
+                        },
+                    ),
+                ]
+            )
+            assert await backend.find_public_share_link("/base/video.webm") == "https://right"
+    assert [call.request.url.params["offset"] for call in route.calls] == ["0", "100"]
+
+
+@pytest.mark.anyio
 async def test_sid_login_is_used_when_api_key_is_unavailable() -> None:
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend(

@@ -18,7 +18,9 @@ from app.services.cleanup import CleanupService
 from app.services.destinations import DestinationService
 from app.services.matching import InterviewMatcher
 from app.services.non_interview import NonInterviewService
+from app.services.notion_reassignment import NotionReassignmentService
 from app.services.question_queue import QuestionQueueService
+from app.services.reroute import RerouteService
 from app.services.reviews import ReviewService
 from app.services.routing_jobs import RoutingJobService
 from app.services.status import StatusService
@@ -72,6 +74,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if destination_service is not None
         else None
     )
+    reroute_service = (
+        RerouteService(storage, destination_service, notion, settings)
+        if isinstance(storage, SynologyBackend) and destination_service is not None
+        else None
+    )
     app.state.notion_client = notion
     app.state.storage_backend = storage
     app.state.candidate_service = candidate_service
@@ -82,6 +89,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.cleanup_service = cleanup_service
     app.state.destination_service = destination_service
     app.state.non_interview_service = non_interview_service
+    app.state.reroute_service = reroute_service
+    app.state.notion_reassignment_service = NotionReassignmentService(notion, settings)
     app.state.routing_job_service = RoutingJobService()
     register_jobs(
         scheduler,

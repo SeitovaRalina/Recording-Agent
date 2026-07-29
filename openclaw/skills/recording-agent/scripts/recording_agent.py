@@ -257,6 +257,31 @@ def _parser() -> argparse.ArgumentParser:
     route_interview.add_argument("--expected-version", required=True, type=int)
     route_interview.add_argument("--idempotency-key", required=True)
 
+    reroute = subparsers.add_parser("reroute-recording", help="move one completed recording")
+    _add_recruiter_user_id_argument(reroute)
+    _add_dm_channel_argument(reroute)
+    reroute.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reroute.add_argument("--destination-id", required=True, type=uuid.UUID)
+    reroute.add_argument("--expected-version", required=True, type=int)
+    reroute.add_argument("--idempotency-key", required=True)
+
+    reassignment_resolve = subparsers.add_parser("notion-reassignment-resolve")
+    _add_recruiter_user_id_argument(reassignment_resolve)
+    _add_dm_channel_argument(reassignment_resolve)
+    reassignment_resolve.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reassignment_resolve.add_argument("--hint", required=True)
+    reassignment_propose = subparsers.add_parser("notion-reassignment-propose")
+    _add_recruiter_user_id_argument(reassignment_propose)
+    _add_dm_channel_argument(reassignment_propose)
+    reassignment_propose.add_argument("--recording-id", required=True, type=uuid.UUID)
+    reassignment_propose.add_argument("--target-page-id", required=True)
+    reassignment_confirm = subparsers.add_parser("notion-reassignment-confirm")
+    _add_recruiter_user_id_argument(reassignment_confirm)
+    _add_dm_channel_argument(reassignment_confirm)
+    reassignment_confirm.add_argument("--proposal-id", required=True, type=uuid.UUID)
+    reassignment_confirm.add_argument("--capability", required=True)
+    reassignment_confirm.add_argument("--idempotency-key", required=True)
+
     cleanup_preview = subparsers.add_parser(
         "cleanup-preview", help="preview eligible completed source recordings"
     )
@@ -476,6 +501,24 @@ def _execute(args: argparse.Namespace) -> Any:
                 "idempotency_key": args.idempotency_key,
             },
         )
+    if args.command == "reroute-recording":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/reroute",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
+                "destination_id": str(args.destination_id),
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "notion-reassignment-resolve":
+        return _request("POST", f"/tools/recordings/{args.recording_id}/notion-reassignment/resolve", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "hint": args.hint})
+    if args.command == "notion-reassignment-propose":
+        return _request("POST", f"/tools/recordings/{args.recording_id}/notion-reassignment/propose", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "target_page_id": args.target_page_id})
+    if args.command == "notion-reassignment-confirm":
+        return _request("POST", f"/tools/notion-reassignment/{args.proposal_id}/confirm", body={"recruiter_user_id": args.recruiter_user_id, "mattermost_dm_channel_id": args.mattermost_dm_channel_id, "capability": args.capability, "idempotency_key": args.idempotency_key})
     if args.command == "cleanup-preview":
         return _request(
             "POST",
@@ -741,6 +784,14 @@ def _message_for(command: str, result: Any) -> str:
             f"Interview recording processed; status: {_status_label(result.get('status'))}; "
             f"link: {result.get('safe_link') or 'unavailable'}."
         )
+    if command == "reroute-recording":
+        return f"Recording moved; link: {result.get('safe_link') or 'unavailable'}."
+    if command == "notion-reassignment-resolve":
+        return _destinations_message({"items": result.get("items", [])})
+    if command == "notion-reassignment-propose":
+        return "Confirm the displayed Notion reassignment before it changes either card."
+    if command == "notion-reassignment-confirm":
+        return "Notion recording link reassigned."
     if command == "cleanup-preview":
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":
