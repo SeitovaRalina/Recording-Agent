@@ -29,6 +29,18 @@ python3 scripts/recording_agent.py scan \
 If the command fails, return the JSON `message` field verbatim. Do not try filesystem discovery as
 a fallback.
 
+For a recruiter request to show recording status, your first command after loading this skill must
+be the Backend CLI status intent with the trusted Mattermost sender id from the current invocation:
+
+```bash
+python3 scripts/recording_agent.py status \
+  --recruiter-user-id <metadata.sender_id>
+```
+
+Add only explicit recruiter-requested filters such as `--date`, `--candidate`, `--recording-id`,
+or `--status`. Never run `python3 scripts/recording_agent.py` without a subcommand. If the command
+fails, return the JSON `message` field verbatim.
+
 ## Route requests
 
 - `scan`: a recruiter asks to check or rescan new recordings. Manual scan remains available while
