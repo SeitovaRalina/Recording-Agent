@@ -56,22 +56,24 @@ def test_questions_reject_conflicting_explicit_dm_metadata(
         )
 
 
-def test_explicit_dm_metadata_cannot_establish_missing_trusted_environment(
+def test_questions_accept_invocation_metadata_without_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("RECORDING_AGENT_RECRUITER_USER_ID", raising=False)
     monkeypatch.delenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", raising=False)
 
-    with pytest.raises(CLIENT.ClientError, match="Trusted recruiter identity"):
-        CLIENT._parser().parse_args(
-            [
-                "questions",
-                "--recruiter-user-id",
-                "local-user",
-                "--mattermost-dm-channel-id",
-                "local-dm",
-            ]
-        )
+    args = CLIENT._parser().parse_args(
+        [
+            "questions",
+            "--recruiter-user-id",
+            "metadata-user",
+            "--mattermost-dm-channel-id",
+            "metadata-dm",
+        ]
+    )
+
+    assert args.recruiter_user_id == "metadata-user"
+    assert args.mattermost_dm_channel_id == "metadata-dm"
 
 
 def test_conflict_failure_does_not_print_backend_secret(
