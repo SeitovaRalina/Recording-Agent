@@ -184,9 +184,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="trigger one recruiter scan")
-    _add_recruiter_email_argument(scan, trusted_only=True)
-    _add_recruiter_user_id_argument(scan, trusted_only=True)
-    _add_dm_channel_argument(scan, trusted_only=True)
+    _add_recruiter_user_id_argument(scan)
+    _add_dm_channel_argument(scan)
     scan.add_argument("--idempotency-key", required=True)
 
     status = subparsers.add_parser("status", help="query bounded recording statuses")
@@ -215,14 +214,14 @@ def _parser() -> argparse.ArgumentParser:
             mutation.add_argument("--choice", required=True, type=int, choices=range(1, 11))
 
     questions = subparsers.add_parser("questions", help="list active DM questions")
-    _add_recruiter_user_id_argument(questions, trusted_only=True)
-    _add_dm_channel_argument(questions, trusted_only=True)
+    _add_recruiter_user_id_argument(questions)
+    _add_dm_channel_argument(questions)
     questions.add_argument("--question-set-id", type=uuid.UUID)
     questions.add_argument("--limit", type=int, default=50, choices=range(1, 51), metavar="1..50")
 
     answer = subparsers.add_parser("answer", help="submit bounded partial question actions")
-    _add_recruiter_user_id_argument(answer, trusted_only=True)
-    _add_dm_channel_argument(answer, trusted_only=True)
+    _add_recruiter_user_id_argument(answer)
+    _add_dm_channel_argument(answer)
     answer.add_argument("--actions-json", required=True)
 
     destinations = subparsers.add_parser("destinations", help="list safe storage destinations")
@@ -406,7 +405,6 @@ def _execute(args: argparse.Namespace) -> Any:
             "POST",
             "/tools/scans/trigger",
             body={
-                "recruiter_email": args.recruiter_email,
                 "recruiter_user_id": args.recruiter_user_id,
                 "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
                 "scope": "test",

@@ -48,10 +48,9 @@ def test_conflicting_explicit_recruiter_identity_is_rejected(
         CLIENT._parser().parse_args(["status", "--recruiter-user-id", "metadata-user-id"])
 
 
-def test_scan_uses_trusted_recruiter_email_from_environment(
+def test_scan_uses_trusted_mattermost_binding_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
     monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
     captured: dict[str, object] = {}
@@ -65,9 +64,7 @@ def test_scan_uses_trusted_recruiter_email_from_environment(
     args = CLIENT._parser().parse_args(["scan", "--idempotency-key", "scan-0001"])
     CLIENT._execute(args)
 
-    assert args.recruiter_email == "trusted@example.com"
     assert captured["body"] == {
-        "recruiter_email": "trusted@example.com",
         "recruiter_user_id": "trusted-user",
         "mattermost_dm_channel_id": "trusted-dm",
         "scope": "test",
@@ -75,46 +72,45 @@ def test_scan_uses_trusted_recruiter_email_from_environment(
     }
 
 
-def test_scan_rejects_conflicting_explicit_recruiter_email(
+def test_scan_rejects_unknown_recruiter_email_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RECORDING_AGENT_RECRUITER_EMAIL", "trusted@example.com")
     monkeypatch.setenv("RECORDING_AGENT_RECRUITER_USER_ID", "trusted-user")
     monkeypatch.setenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", "trusted-dm")
 
-    with pytest.raises(CLIENT.ClientError, match="trusted recruiter email"):
+    with pytest.raises(SystemExit):
         CLIENT._parser().parse_args(
             [
                 "scan",
                 "--recruiter-email",
-                "attacker@example.com",
+                "local-codex@example.com",
                 "--idempotency-key",
                 "scan-0001",
             ]
         )
 
 
-def test_scan_rejects_explicit_identity_without_trusted_metadata(
+def test_scan_accepts_invocation_metadata_arguments_without_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("RECORDING_AGENT_RECRUITER_EMAIL", raising=False)
     monkeypatch.delenv("RECORDING_AGENT_RECRUITER_USER_ID", raising=False)
     monkeypatch.delenv("RECORDING_AGENT_MATTERMOST_DM_CHANNEL_ID", raising=False)
 
-    with pytest.raises(CLIENT.ClientError, match="Trusted recruiter email"):
-        CLIENT._parser().parse_args(
-            [
-                "scan",
-                "--recruiter-email",
-                "local-codex@example.com",
-                "--recruiter-user-id",
-                "local-user",
-                "--mattermost-dm-channel-id",
-                "local-dm",
-                "--idempotency-key",
-                "scan-0001",
-            ]
-        )
+    args = CLIENT._parser().parse_args(
+        [
+            "scan",
+            "--recruiter-user-id",
+            "metadata-user",
+            "--mattermost-dm-channel-id",
+            "metadata-dm",
+            "--idempotency-key",
+            "scan-0001",
+        ]
+    )
+
+    assert args.recruiter_user_id == "metadata-user"
+    assert args.mattermost_dm_channel_id == "metadata-dm"
 
 
 def test_autonomous_routing_activate_uses_only_worker_and_nonce(

@@ -54,7 +54,7 @@ AppSettings = Annotated[Settings, Depends(get_settings)]
 class ScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    recruiter_email: str = Field(min_length=3, max_length=320)
+    recruiter_email: str | None = Field(default=None, min_length=3, max_length=320)
     recruiter_user_id: str = Field(min_length=1, max_length=200)
     mattermost_dm_channel_id: str = Field(min_length=1, max_length=200)
     scope: Literal["test", "production"] = "test"
@@ -766,14 +766,7 @@ async def trigger_scan(
     if settings.test_mode_enabled and body.scope != "test":
         raise HTTPException(status_code=403, detail="Production scan is forbidden in test mode")
     operation = f"scan:{body.scope}"
-    recruiter = await session.scalar(
-        select(RecruiterConfig).where(
-            RecruiterConfig.email == body.recruiter_email,
-            RecruiterConfig.active.is_(True),
-        )
-    )
-    if recruiter is None:
-        raise HTTPException(status_code=404, detail="Active recruiter not found")
+    recruiter = await _scan_recruiter(session, settings, body)
     try:
         enforce_recruiter_scope(settings, recruiter)
         interaction_binding = _scan_interaction_binding(settings, recruiter, body)
@@ -1164,6 +1157,25 @@ def _scan_interaction_binding(
     if recruiter.mattermost_dm_channel != body.mattermost_dm_channel_id:
         raise PermissionError("Scan channel does not match recruiter configuration")
     return None
+
+
+async def _scan_recruiter(
+    session: AsyncSession,
+    settings: Settings,
+    body: ScanRequest,
+) -> RecruiterConfig:
+    criteria = [RecruiterConfig.active.is_(True)]
+    if body.recruiter_email is not None:
+        criteria.append(RecruiterConfig.email == body.recruiter_email)
+    else:
+        criteria.append(RecruiterConfig.mattermost_user_id == body.recruiter_user_id)
+        offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
+        if not offline:
+            criteria.append(RecruiterConfig.mattermost_dm_channel == body.mattermost_dm_channel_id)
+    recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
+    if recruiter is None:
+        raise HTTPException(status_code=404, detail="Active recruiter not found")
+    return recruiter
 
 
 async def _question_recruiter(

@@ -16,10 +16,14 @@ folder, reroute a recording, reassign a Notion card, or clean completed sources.
 only the skill package; recordings and processing state live in the Backend.
 
 For a recruiter request to check new interview recordings, your first command after loading this
-skill must be exactly the Backend CLI scan intent:
+skill must be the Backend CLI scan intent with the trusted Mattermost metadata from the current
+invocation:
 
 ```bash
-python3 scripts/recording_agent.py scan --idempotency-key <stable-uuid-or-request-key>
+python3 scripts/recording_agent.py scan \
+  --recruiter-user-id <metadata.sender_id> \
+  --mattermost-dm-channel-id <metadata.group_channel_without_leading_hash> \
+  --idempotency-key <stable-uuid-or-request-key>
 ```
 
 If the command fails, return the JSON `message` field verbatim. Do not try filesystem discovery as

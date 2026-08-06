@@ -24,6 +24,7 @@ from app.routers.tools import (
     ScanRequest,
     _question_recruiter,
     _scan_interaction_binding,
+    _scan_recruiter,
     _scan_response,
 )
 from app.scheduler.cron import ScanError, ScanSummary
@@ -183,6 +184,32 @@ def test_offline_scan_binding_is_exact_and_in_request_payload() -> None:
     assert binding.recruiter_user_id == "trusted-user"
     assert binding.dm_channel_id == "trusted-dm"
     assert body.model_dump()["mattermost_dm_channel_id"] == "trusted-dm"
+
+
+@pytest.mark.anyio
+async def test_scan_recruiter_resolves_from_mattermost_binding_without_email(
+    session: AsyncSession,
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="trusted-dm",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+    settings = get_settings().model_copy(update={"test_mode_enabled": False})
+    body = ScanRequest(
+        recruiter_user_id="trusted-user",
+        mattermost_dm_channel_id="trusted-dm",
+        idempotency_key="scan-0001",
+    )
+
+    resolved = await _scan_recruiter(session, settings, body)
+
+    assert resolved.email == "r@example.com"
 
 
 @pytest.mark.anyio
