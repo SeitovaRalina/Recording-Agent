@@ -1,7 +1,7 @@
 # Backend contract
 
 `RECORDING_AGENT_BACKEND_URL` must be loopback HTTP(S), defaulting to
-`http://127.0.0.1:8000`. `RECORDING_AGENT_BACKEND_SECRET` exists only in the recruiter-facing
+`http://127.0.0.1:18000`. `RECORDING_AGENT_BACKEND_SECRET` exists only in the recruiter-facing
 process/service environment. The CLI never prints it. Autonomous routing commands never require,
 read, or send this secret.
 
