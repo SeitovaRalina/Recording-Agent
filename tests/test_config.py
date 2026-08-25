@@ -1,4 +1,5 @@
-from pydantic import SecretStr
+import pytest
+from pydantic import SecretStr, ValidationError
 
 from app.config import Settings, get_settings
 
@@ -9,6 +10,7 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
         "postgresql+asyncpg://user:pass@localhost/test",  # pragma: allowlist secret
     )
     monkeypatch.setenv("NOTION_TOKEN", "notion-secret")
+    monkeypatch.setenv("NOTION_PROXY_URL", "http://notion-proxy:7890")
     monkeypatch.setenv("YANDEX_CLIENT_SECRET", "yandex-secret")
     monkeypatch.setenv("APP_ENVIRONMENT", "production")
     monkeypatch.setenv("PIPELINE_TRACE_ENABLED", "false")
@@ -18,6 +20,7 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
 
     assert isinstance(settings.database_url, SecretStr)
     assert isinstance(settings.notion_token, SecretStr)
+    assert isinstance(settings.notion_proxy_url, SecretStr)
     assert isinstance(settings.yandex_client_secret, SecretStr)
     assert settings.storage_provider == "minio"
     assert settings.notion_project_prop == "📍 Spots"
@@ -34,6 +37,36 @@ def test_settings_secret_types_and_defaults(monkeypatch) -> None:  # type: ignor
     assert settings.notion_writes_enabled is False
     assert settings.yandex_source_mutation_enabled is False
     get_settings.cache_clear()
+
+
+def test_production_requires_notion_proxy_url() -> None:
+    with pytest.raises(ValidationError, match="Production requires NOTION_PROXY_URL"):
+        Settings(app_environment="production")
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "socks5://notion-proxy:7890",
+        "http://",
+        "http://notion-proxy/not-allowed",
+        "http://notion-proxy:70000",
+        "https://notion-proxy:7890?token=secret",
+    ],
+)
+def test_production_rejects_invalid_notion_proxy_url(proxy_url: str) -> None:
+    with pytest.raises(ValidationError, match="NOTION_PROXY_URL must be a valid HTTP proxy URL"):
+        Settings(app_environment="production", notion_proxy_url=proxy_url)
+
+
+def test_notion_proxy_url_is_secret_and_development_may_omit_it() -> None:
+    proxy_url = "http://proxy-user:proxy-password@notion-proxy:7890"
+    settings = Settings(app_environment="development", notion_proxy_url=proxy_url)
+
+    assert settings.notion_proxy_url.get_secret_value() == proxy_url
+    assert proxy_url not in str(settings)
+    assert proxy_url not in repr(settings)
+    assert Settings(app_environment="test").notion_proxy_url.get_secret_value() == ""
 
 
 def test_phase_two_settings_parse_json_maps() -> None:

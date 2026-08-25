@@ -19,24 +19,25 @@ die() {
 if [[ ${EUID} -ne 0 ]]; then
   [[ $# -eq 0 && -n ${SSH_ORIGINAL_COMMAND:-} ]] ||
     die "deploy identity accepts only its forced SSH command"
-  [[ $SSH_ORIGINAL_COMMAND =~ ^sudo\ -n\ /usr/local/sbin/recording-agent-deploy\ ([0-9a-f]{40})\ (ghcr\.io/seitovaralina/recording-agent@sha256:[0-9a-f]{64})\ ([0-9a-f]{64})\ ([0-9a-f]{64})\ ([0-9a-f]{64})$ ]] ||
+  [[ $SSH_ORIGINAL_COMMAND =~ ^sudo\ -n\ /usr/local/sbin/recording-agent-deploy\ ([0-9a-f]{40})\ (ghcr\.io/seitovaralina/recording-agent@sha256:[0-9a-f]{64})\ ([0-9a-f]{64})\ ([0-9a-f]{64})\ ([0-9a-f]{64})\ ([0-9a-f]{64})$ ]] ||
     die "rejected SSH command"
   exec sudo -n /usr/local/sbin/recording-agent-deploy \
     "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" \
-    "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
+    "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}"
 fi
 
-[[ $# -eq 5 ]] ||
-  die "usage: recording-agent-deploy COMMIT IMAGE COMPOSE_SHA SKILL_SHA METADATA_SHA"
+[[ $# -eq 6 ]] ||
+  die "usage: recording-agent-deploy COMMIT IMAGE COMPOSE_SHA SKILL_SHA METADATA_SHA MIHOMO_SHA"
 commit=$1
 image=$2
 compose_sha=$3
 skill_sha=$4
 metadata_sha=$5
+mihomo_sha=$6
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "invalid commit"
 [[ $image =~ ^ghcr\.io/seitovaralina/recording-agent@sha256:[0-9a-f]{64}$ ]] ||
   die "image must be the allowlisted GHCR repository pinned by digest"
-for digest in "$compose_sha" "$skill_sha" "$metadata_sha"; do
+for digest in "$compose_sha" "$skill_sha" "$metadata_sha" "$mihomo_sha"; do
   [[ $digest =~ ^[0-9a-f]{64}$ ]] || die "invalid artifact digest"
 done
 [[ -f $ENV_FILE ]] || die "missing protected runtime environment"
@@ -52,12 +53,13 @@ manifest="$release/release-manifest.json"
 if [[ -f $manifest ]]; then
   jq -e \
     --arg commit "$commit" --arg image "$image" --arg compose "$compose_sha" \
-    --arg skill "$skill_sha" --arg metadata "$metadata_sha" '
+    --arg skill "$skill_sha" --arg metadata "$metadata_sha" --arg mihomo "$mihomo_sha" '
       .schemaVersion == 1 and .status == "deployed" and
       .commit == $commit and .image == $image and
       .artifacts.composeSha256 == $compose and
       .artifacts.skillSha256 == $skill and
-      .artifacts.migrationMetadataSha256 == $metadata
+      .artifacts.migrationMetadataSha256 == $metadata and
+      .artifacts.mihomoAssetsSha256 == $mihomo
     ' "$manifest" >/dev/null || die "existing release manifest does not match command"
   [[ $(readlink -f "$ROOT/current") == "$release" ]] ||
     die "release is recorded as deployed but is not current"
@@ -72,11 +74,11 @@ if [[ ! -d $staged ]]; then
   cp -a "$incoming/." "$staged/"
   chown -R root:root "$staged"
 fi
-for name in compose.prod.yml recording-agent-skill.tar.gz release-metadata.json; do
+for name in compose.prod.yml recording-agent-skill.tar.gz release-metadata.json mihomo-assets.tar.gz; do
   [[ -f "$staged/$name" && ! -L "$staged/$name" ]] || die "missing or unsafe staged $name"
 done
 staged_files=$(find "$staged" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')
-if grep -Ev '^(compose\.prod\.yml|compose\.prod\.yml\.sha256|recording-agent-skill\.tar\.gz|recording-agent-skill\.tar\.gz\.sha256|release-metadata\.json)$' \
+if grep -Ev '^(compose\.prod\.yml|compose\.prod\.yml\.sha256|recording-agent-skill\.tar\.gz|recording-agent-skill\.tar\.gz\.sha256|release-metadata\.json|mihomo-assets\.tar\.gz|mihomo-assets\.tar\.gz\.sha256)$' \
   <<<"$staged_files" | grep -q .; then
   die "unexpected staged files"
 fi
@@ -86,6 +88,8 @@ fi
   die "skill digest does not match authenticated command"
 [[ $(sha256sum "$staged/release-metadata.json" | awk '{print $1}') == "$metadata_sha" ]] ||
   die "migration metadata digest does not match authenticated command"
+[[ $(sha256sum "$staged/mihomo-assets.tar.gz" | awk '{print $1}') == "$mihomo_sha" ]] ||
+  die "Mihomo assets digest does not match authenticated command"
 
 jq -e '
   .schemaVersion == 1 and
@@ -113,6 +117,12 @@ grep -Ev '^recording-agent(/|$)' <<<"$archive_listing" | grep -q . &&
 archive_verbose=$(tar -tvzf "$staged/recording-agent-skill.tar.gz")
 grep -Eq '^[lh]' <<<"$archive_verbose" && die "skill archive links are forbidden"
 
+mihomo_listing=$(tar -tzf "$staged/mihomo-assets.tar.gz")
+[[ $mihomo_listing == $'mihomo/config.yaml\nmihomo/entrypoint.sh' ]] ||
+  die "Mihomo asset archive has unexpected contents"
+mihomo_verbose=$(tar -tvzf "$staged/mihomo-assets.tar.gz")
+grep -Eq '^[lh]' <<<"$mihomo_verbose" && die "Mihomo asset archive links are forbidden"
+
 if [[ -e $release ]]; then
   [[ ! -f $manifest ]] || die "existing release collision"
   rm -rf -- "$release"
@@ -121,6 +131,11 @@ install -d -o root -g root -m 0755 "$release"
 install -o root -g root -m 0644 "$staged/compose.prod.yml" "$release/compose.prod.yml"
 install -o root -g root -m 0444 "$staged/release-metadata.json" \
   "$release/release-metadata.json"
+install -d -o root -g root -m 0755 "$release/deploy"
+tar -xzf "$staged/mihomo-assets.tar.gz" --no-same-owner --no-same-permissions -C "$release/deploy"
+chown -R root:root "$release/deploy/mihomo"
+chmod 0555 "$release/deploy/mihomo/entrypoint.sh"
+chmod 0444 "$release/deploy/mihomo/config.yaml"
 install -d -o openclaw -g openclaw -m 0750 "$release/skill"
 tar -xzf "$staged/recording-agent-skill.tar.gz" --strip-components=1 \
   --no-same-owner --no-same-permissions -C "$release/skill"
@@ -136,6 +151,10 @@ export POSTGRES_IMAGE
 POSTGRES_IMAGE=$(sed -n 's/^POSTGRES_IMAGE=//p' "$ENV_FILE")
 [[ $POSTGRES_IMAGE =~ ^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] ||
   die "POSTGRES_IMAGE must be pinned by digest"
+export MIHOMO_IMAGE
+MIHOMO_IMAGE=$(sed -n 's/^MIHOMO_IMAGE=//p' "$ENV_FILE")
+[[ $MIHOMO_IMAGE =~ ^ghcr\.io/metacubex/mihomo@sha256:[0-9a-f]{64}$ ]] ||
+  die "MIHOMO_IMAGE must use allowlisted ghcr.io/metacubex/mihomo digest"
 compose=(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" \
   --file "$release/compose.prod.yml")
 "${compose[@]}" config --quiet
@@ -260,6 +279,7 @@ previous_json=null
 jq -n \
   --arg commit "$commit" --arg image "$image" \
   --arg compose "$compose_sha" --arg skill "$skill_sha" --arg metadata "$metadata_sha" \
+  --arg mihomo "$mihomo_sha" \
   --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg started_at "$deploy_started_at" \
   --argjson previous "$previous_json" \
@@ -271,7 +291,8 @@ jq -n \
     artifacts: {
       composeSha256: $compose,
       skillSha256: $skill,
-      migrationMetadataSha256: $metadata
+      migrationMetadataSha256: $metadata,
+      mihomoAssetsSha256: $mihomo
     },
     migration: $migration[0],
     previousRelease: $previous,

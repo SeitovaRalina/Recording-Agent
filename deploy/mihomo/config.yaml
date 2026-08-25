@@ -1,0 +1,34 @@
+mixed-port: 7890
+allow-lan: false
+bind-address: "0.0.0.0"
+mode: rule
+log-level: warning
+ipv6: false
+
+profile:
+  store-selected: false
+  store-fake-ip: false
+
+proxy-providers:
+  notion-subscription:
+    type: http
+    url: "__VPN_SUB_URL__"
+    path: /tmp/mihomo/providers/notion-subscription.yaml
+    interval: 3600
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+proxy-groups:
+  - name: NOTION
+    type: url-test
+    use:
+      - notion-subscription
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 100
+
+rules:
+  - DOMAIN,api.notion.com,NOTION
+  - MATCH,DIRECT

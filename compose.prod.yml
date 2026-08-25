@@ -62,8 +62,14 @@ services:
     <<: *runtime
     init: true
     user: "10001:10001"
+    networks:
+      - backend
+      - notion-proxy
     environment:
       APP_ENVIRONMENT: production
+      # The proxy is private to this Compose project. Do not put VPN_SUB_URL in
+      # RECORDING_AGENT_ENV_FILE; its dedicated env file belongs to notion-proxy.
+      NOTION_PROXY_URL: http://notion-proxy:7890
       TEST_MODE_ENABLED: "false"
       SCHEDULER_ENABLED: "false"
       YANDEX_SOURCE_MUTATION_ENABLED: "false"
@@ -77,6 +83,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      notion-proxy:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -96,6 +104,52 @@ services:
     cpus: 1.0
     pids_limit: 128
 
+  notion-proxy:
+    image: ${MIHOMO_IMAGE:?MIHOMO_IMAGE must be an immutable Mihomo image digest}
+    env_file:
+      # Contains VPN_SUB_URL only. Never reuse RECORDING_AGENT_ENV_FILE here.
+      - /etc/recording-agent/notion-proxy.env
+    entrypoint: ["/usr/local/bin/recording-agent-mihomo"]
+    volumes:
+      - type: bind
+        source: ./deploy/mihomo/config.yaml
+        target: /etc/mihomo/config.yaml
+        read_only: true
+      - type: bind
+        source: ./deploy/mihomo/entrypoint.sh
+        target: /usr/local/bin/recording-agent-mihomo
+        read_only: true
+    networks:
+      # Egress only for the tunnel provider and selected Notion route.
+      - notion-egress
+      # Backend is the sole proxy client; this network has no host egress.
+      - notion-proxy
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/mihomo:size=16m,mode=0755,uid=65532,gid=65532
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Entrypoint creates marker only after a proxied Notion API JSON probe.
+      test: ["CMD-SHELL", "test -f /run/mihomo/notion-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 15s
+    mem_limit: 192m
+    mem_reservation: 96m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres-data:
     name: recording-agent-postgres
@@ -103,5 +157,13 @@ volumes:
 networks:
   backend:
     name: recording-agent-backend
+    driver: bridge
+    internal: false
+  notion-proxy:
+    name: recording-agent-notion-proxy
+    driver: bridge
+    internal: true
+  notion-egress:
+    name: recording-agent-notion-egress
     driver: bridge
     internal: false

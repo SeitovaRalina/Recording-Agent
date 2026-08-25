@@ -18,6 +18,7 @@ def anyio_backend() -> str:
 @pytest.fixture(autouse=True)
 def isolate_settings_from_workspace_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+    monkeypatch.setenv("APP_ENVIRONMENT", "test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

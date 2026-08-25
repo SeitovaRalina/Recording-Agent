@@ -1,6 +1,7 @@
 import json
 from functools import lru_cache
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -65,6 +66,7 @@ class Settings(BaseSettings):
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7
     notion_token: SecretStr = SecretStr("")
+    notion_proxy_url: SecretStr = SecretStr("")
     notion_name_prop: str = "Name"
     notion_date_prop: str = "General Interview Date"
     notion_recording_prop: str = "General Interview recording"
@@ -111,6 +113,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_canary_boundary(self) -> "Settings":
+        if self.app_environment == "production" and not self.notion_proxy_url.get_secret_value():
+            raise ValueError("Production requires NOTION_PROXY_URL")
         if self.test_mode_enabled:
             if self.storage_provider != "minio":
                 raise ValueError("Test mode requires MinIO storage")
@@ -132,6 +136,31 @@ class Settings(BaseSettings):
             if not self.synology_interview_roots:
                 raise ValueError("Synology storage requires SYNOLOGY_INTERVIEW_ROOTS")
         return self
+
+    @field_validator("notion_proxy_url", mode="before")
+    @classmethod
+    def validate_notion_proxy_url(cls, value: Any) -> SecretStr:
+        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if not isinstance(raw_value, str):
+            raise ValueError("NOTION_PROXY_URL must be a valid HTTP proxy URL")
+        url = raw_value.strip()
+        if not url:
+            return SecretStr("")
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("NOTION_PROXY_URL must be a valid HTTP proxy URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("NOTION_PROXY_URL must be a valid HTTP proxy URL")
+        return SecretStr(url)
 
     @field_validator("yandex_refresh_tokens", "yandex_caldav_passwords", mode="before")
     @classmethod

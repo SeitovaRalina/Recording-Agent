@@ -45,14 +45,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.scheduler = scheduler
     token_manager = YandexTokenManager(session_factory, settings)
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10))
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10),
+        trust_env=False,
+    )
+    notion_http_client = httpx.AsyncClient(
+        proxy=settings.notion_proxy_url.get_secret_value() or None,
+        timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10),
+        trust_env=False,
+    )
     disk = DiskScanner(token_manager, session_factory, http_client=http_client)
     calendar = CalDAVClient(settings, session_factory, http_client=http_client)
     app.state.calendar_client = calendar
     matcher = InterviewMatcher(settings)
     app.state.disk_scanner = disk
     app.state.matcher = matcher
-    notion = NotionClient(settings.notion_token, http_client, settings=settings)
+    notion = NotionClient(settings.notion_token, notion_http_client, settings=settings)
     storage = StorageFactory.create(settings, http_client)
     candidate_service = CandidateService(notion, settings)
     transfer_service = TransferService(disk, storage, http_client, settings)
@@ -80,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else None
     )
     app.state.notion_client = notion
+    app.state.notion_http_client = notion_http_client
     app.state.storage_backend = storage
     app.state.candidate_service = candidate_service
     app.state.transfer_service = transfer_service
@@ -112,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        await notion_http_client.aclose()
         await http_client.aclose()
         await engine.dispose()
 

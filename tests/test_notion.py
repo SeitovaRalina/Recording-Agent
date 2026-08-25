@@ -745,3 +745,26 @@ async def test_transport_failures_are_typed_and_sanitized(
         assert "secret-share-url" not in message
         assert "secret-recording-name" not in message
         assert "credential-bearing" not in message
+
+
+@pytest.mark.anyio
+async def test_proxy_transport_failure_is_sanitized_without_direct_retry() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("secret-token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.patch(f"{BASE}/pages/secret-page-id").mock(
+                side_effect=httpx.ProxyError("proxy-user:proxy-password@notion-proxy")
+            )
+            with pytest.raises(NotionUpdateError) as raised:
+                await client.update_page_interview(
+                    "secret-page-id",
+                    date_prop=DATE,
+                    recording_prop=RECORDING,
+                    event_date=date(2026, 7, 16),
+                    url="https://secret-share-url",
+                    filename="secret-recording-name.webm",
+                )
+
+    assert len(route.calls) == 1
+    assert "proxy-user" not in str(raised.value)
+    assert "proxy-password" not in str(raised.value)
