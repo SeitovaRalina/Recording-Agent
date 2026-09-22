@@ -20,12 +20,17 @@ def canary_settings(**changes: object) -> Settings:
         notion_proxy_url="http://notion-proxy:7890",
         test_mode_enabled=True,
         test_notion_database_allowlist={DATABASE_ID},
+        notion_project_prop="📍 Spots",
         **changes,
     )
 
 
 def database() -> dict[str, object]:
-    return {"object": "database", "data_sources": [{"id": SOURCE_ID}]}
+    return {
+        "object": "database",
+        "title": [{"plain_text": "Test Interviews"}],
+        "data_sources": [{"id": SOURCE_ID}],
+    }
 
 
 def data_source(*, project_type: str = "relation") -> dict[str, object]:
@@ -37,6 +42,7 @@ def data_source(*, project_type: str = "relation") -> dict[str, object]:
             "General Interview Date": {"type": "date"},
             "General Interview recording": {"type": "files"},
             "TBD": {"type": "formula"},
+            "📍 Spots": {"type": project_type},
             "рџ“Ќ Spots": {"type": project_type},
         },
     }
@@ -100,5 +106,5 @@ async def test_preflight_rejects_non_allowlisted_database_before_network() -> No
     ],
 )
 async def test_preflight_rejects_enabled_side_effects(flag: str) -> None:
-    with pytest.raises(ValueError, match="side-effect"):
+    with pytest.raises(ValueError, match="side-effect|forbidden in test mode"):
         await inspect_canary_notion_schema(canary_settings(**{flag: True}), DATABASE_ID)

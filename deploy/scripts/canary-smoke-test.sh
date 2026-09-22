@@ -23,5 +23,12 @@ proxy_id=$("${compose[@]}" ps --quiet notion-proxy)
 docker exec "$proxy_id" sh -eu -c 'test -f /run/mihomo/notion-ready' || die "Notion proxy did not pass JSON readiness"
 backend_id=$("${compose[@]}" ps --quiet backend)
 [[ -n $backend_id ]] || die "backend is unavailable"
-docker exec "$backend_id" python tools/setup/preflight_notion.py --test-only-schema || die "read-only Notion schema preflight failed"
+database_id=$(docker exec "$backend_id" python -c '
+import json
+import os
+ids = json.loads(os.environ["TEST_NOTION_DATABASE_ALLOWLIST"])
+assert isinstance(ids, list) and len(ids) == 1 and isinstance(ids[0], str) and ids[0]
+print(ids[0])
+') || die "canary requires exactly one test Notion database"
+docker exec "$backend_id" python tools/setup/preflight_notion.py --database-id "$database_id" || die "read-only Notion schema preflight failed"
 printf 'canary smoke checks passed\n'

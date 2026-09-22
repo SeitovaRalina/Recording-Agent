@@ -123,6 +123,7 @@ jobs:
           docker buildx build \
             --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" \
             --file Dockerfile \
+            --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
             --tag "${IMAGE_NAME}:${CANDIDATE_SHA}" \
             --provenance=mode=max \
             --sbom=true \

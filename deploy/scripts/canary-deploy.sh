@@ -8,6 +8,8 @@ readonly PROXY_ENV_FILE=/etc/recording-agent/canary/notion-proxy.env
 readonly PROJECT=recording-agent-canary
 readonly MIN_AVAILABLE_KIB=1179648
 readonly CANARY_RESERVATION_KIB=786432
+readonly MIN_AVAILABLE_DISK_KIB=4194304
+readonly ROOT_PARENT="${ROOT%/*}"
 [[ ${EUID} -eq 0 ]] || die "must be invoked by root"
 [[ $# -eq 3 ]] || die "usage: canary-deploy COMMIT IMAGE ARCHIVE_SHA256"
 commit=$1
@@ -16,6 +18,8 @@ archive_sha=$3
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "commit must be a full lowercase SHA"
 [[ $image =~ ^ghcr\.io/seitovaralina/recording-agent@sha256:[0-9a-f]{64}$ ]] || die "image must be a pinned allowlisted digest"
 [[ $archive_sha =~ ^[0-9a-f]{64}$ ]] || die "invalid archive digest"
+image_commit=$(docker buildx imagetools inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+[[ $image_commit == "$commit" ]] || die "image revision does not match canary commit"
 [[ ! -e $ROOT || ! -L $ROOT ]] || die "canary root must not be a symlink"
 for file in "$ENV_FILE" "$PROXY_ENV_FILE"; do
   [[ -f $file && ! -L $file ]] || die "missing protected environment file"
@@ -42,6 +46,8 @@ available=$(awk '/MemAvailable:/ { print $2 }' /proc/meminfo)
 [[ $available =~ ^[0-9]+$ && $available -ge $MIN_AVAILABLE_KIB ]] || die "capacity gate failed: need canary reservation plus 384 MiB production headroom"
 [[ $(awk '/SwapTotal:/ { print $2 }' /proc/meminfo) -eq 0 ]] || die "canary requires no-swap host profile"
 [[ $CANARY_RESERVATION_KIB -eq 786432 ]] || die "internal capacity invariant failed"
+available_disk=$(df -Pk "$ROOT_PARENT" | awk 'NR == 2 { print $4 }')
+[[ $available_disk =~ ^[0-9]+$ && $available_disk -ge $MIN_AVAILABLE_DISK_KIB ]] || die "disk capacity gate failed: need at least 4 GiB free under $ROOT_PARENT"
 
 incoming="$ROOT/incoming/${commit}.tar.gz"
 [[ -f $incoming && ! -L $incoming ]] || die "missing canary archive"
