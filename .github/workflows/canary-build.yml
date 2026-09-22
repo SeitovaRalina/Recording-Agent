@@ -111,8 +111,9 @@ jobs:
           MIHOMO_IMAGE: ghcr.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
           sudo install -d -o root -g root -m 0700 /etc/recording-agent/canary
-          sudo install -o root -g root -m 0600 /dev/null /etc/recording-agent/canary/backend.env
-          sudo install -o root -g root -m 0600 /dev/null /etc/recording-agent/canary/notion-proxy.env
+          # Empty CI-only files: production host files remain root-owned mode 0600.
+          sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/canary/backend.env
+          sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/canary/notion-proxy.env
           trap 'sudo rm -rf /etc/recording-agent' EXIT
           docker compose -f compose.canary.yml config --quiet
 
