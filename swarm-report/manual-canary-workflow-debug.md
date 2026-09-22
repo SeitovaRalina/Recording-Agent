@@ -25,3 +25,11 @@ capacity gate, and missing focused canary test coverage.
 - Full suite: `poetry run pytest -q` — `352 passed, 1 warning in 250.35s`.
 - Warning: pytest cache cannot be written due existing Windows permissions under `.pytest_cache`.
   No test failure.
+
+## Follow-up review coverage
+
+- Added workflow and Compose isolation tests plus hermetic Linux shell tests for OCI-revision and
+  disk-gate rejection. The two shell executions are skipped on Windows because the root-only Bash
+  scripts execute on the Linux canary host.
+- Focused suite: `15 passed, 2 skipped, 1 warning in 1.30s`.
+- Final full suite: `356 passed, 2 skipped, 1 warning in 174.43s`.
