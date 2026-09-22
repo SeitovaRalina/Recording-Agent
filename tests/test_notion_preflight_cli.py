@@ -7,7 +7,6 @@ from app.config import Settings
 from app.tools.notion import NotionSchemaError
 from tools.setup.preflight_notion import inspect_canary_notion_schema
 
-
 DATABASE_ID = "00000000-0000-0000-0000-000000000001"
 SOURCE_ID = "00000000-0000-0000-0000-000000000002"
 BASE_URL = "https://api.notion.com/v1"

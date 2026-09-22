@@ -1,10 +1,9 @@
-from pathlib import Path
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 

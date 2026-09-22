@@ -1,13 +1,12 @@
-from pathlib import Path
 import os
 import shutil
 import subprocess
 import tempfile
-from uuid import uuid4
 from collections.abc import Iterator
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 BASH = Path("C:/Program Files/Git/bin/bash.exe")
@@ -48,7 +47,9 @@ def _copy_deploy_for_test(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     env_file = tmp_path / "backend.env"
     proxy_env_file = tmp_path / "notion-proxy.env"
     script = (ROOT / "deploy/scripts/canary-deploy.sh").read_text(encoding="utf-8")
-    script = script.replace("readonly ROOT=/opt/recording-agent-canary", f"readonly ROOT={_bash_path(root)}")
+    script = script.replace(
+        "readonly ROOT=/opt/recording-agent-canary", f"readonly ROOT={_bash_path(root)}"
+    )
     script = script.replace(
         "readonly ENV_FILE=/etc/recording-agent/canary/backend.env",
         f"readonly ENV_FILE={_bash_path(env_file)}",
@@ -56,7 +57,9 @@ def _copy_deploy_for_test(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "readonly PROXY_ENV_FILE=/etc/recording-agent/canary/notion-proxy.env",
         f"readonly PROXY_ENV_FILE={_bash_path(proxy_env_file)}",
     )
-    script = script.replace("[[ ${EUID} -eq 0 ]] || die \"must be invoked by root\"", ": # test root bypass")
+    script = script.replace(
+        '[[ ${EUID} -eq 0 ]] || die "must be invoked by root"', ": # test root bypass"
+    )
     script = script.replace("readonly MIN_AVAILABLE_KIB=1179648", "readonly MIN_AVAILABLE_KIB=0")
     copied = tmp_path / "canary-deploy.sh"
     copied.write_text(script, encoding="utf-8")
@@ -100,14 +103,17 @@ case "$*" in
   *"inspect --format"*) printf '%s\\n' true ;;
 esac''',
     )
-    _write_mock(
-        mock_bin,
-        "df",
-        f"printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' '/dev/mock 9999999 1 {disk_available} 1% /opt'",
+    df_output = (
+        "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' "
+        f"'/dev/mock 9999999 1 {disk_available} 1% /opt'"
     )
+    _write_mock(mock_bin, "df", df_output)
     _write_mock(mock_bin, "stat", "printf '%s\\n' 600:root:root")
     _write_mock(mock_bin, "chown", ":")
-    return os.environ | {"PATH": f"{_bash_path(mock_bin)}:{os.environ['PATH']}", "MOCK_DOCKER_LOG": _bash_path(log)}
+    return os.environ | {
+        "PATH": f"{_bash_path(mock_bin)}:{os.environ['PATH']}",
+        "MOCK_DOCKER_LOG": _bash_path(log),
+    }
 
 
 def test_canary_deploy_rejects_wrong_oci_revision_before_compose_mutation(
@@ -116,7 +122,13 @@ def test_canary_deploy_rejects_wrong_oci_revision_before_compose_mutation(
     script, *_ = _copy_deploy_for_test(script_tmp)
     commit = "a" * 40
     result = subprocess.run(
-        [git_bash, _bash_path(script), commit, f"ghcr.io/seitovaralina/recording-agent@sha256:{'b' * 64}", "c" * 64],
+        [
+            git_bash,
+            _bash_path(script),
+            commit,
+            f"ghcr.io/seitovaralina/recording-agent@sha256:{'b' * 64}",
+            "c" * 64,
+        ],
         capture_output=True,
         check=False,
         env=_deploy_env(script_tmp, "d" * 40, 9_999_999),
@@ -134,7 +146,13 @@ def test_canary_deploy_rejects_low_disk_before_archive_or_compose_mutation(
     script, *_ = _copy_deploy_for_test(script_tmp)
     commit = "a" * 40
     result = subprocess.run(
-        [git_bash, _bash_path(script), commit, f"ghcr.io/seitovaralina/recording-agent@sha256:{'b' * 64}", "c" * 64],
+        [
+            git_bash,
+            _bash_path(script),
+            commit,
+            f"ghcr.io/seitovaralina/recording-agent@sha256:{'b' * 64}",
+            "c" * 64,
+        ],
         capture_output=True,
         check=False,
         env=_deploy_env(script_tmp, commit, 1),
@@ -150,14 +168,14 @@ def test_canary_smoke_passes_one_allowlisted_database_id_to_schema_cli() -> None
     script = (ROOT / "deploy/scripts/canary-smoke-test.sh").read_text(encoding="utf-8")
 
     assert "--test-only-schema" not in script
-    assert "--database-id \"$database_id\"" in script
+    assert '--database-id "$database_id"' in script
     assert "TEST_NOTION_DATABASE_ALLOWLIST" in script
 
 
 def test_canary_deploy_binds_image_revision_and_gates_disk_capacity() -> None:
     script = (ROOT / "deploy/scripts/canary-deploy.sh").read_text(encoding="utf-8")
 
-    assert 'org.opencontainers.image.revision' in script
+    assert "org.opencontainers.image.revision" in script
     assert '[[ $image_commit == "$commit" ]]' in script
     assert 'df -Pk "$ROOT_PARENT"' in script
 
