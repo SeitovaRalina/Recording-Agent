@@ -119,3 +119,10 @@ def test_readiness_rejects_cloudflare_html() -> None:
 
     assert 'grep -q \'"object":"error"\' "$response_file"' in entrypoint
     assert "! grep -qiE 'cloudflare|<html' \"$response_file\"" in entrypoint
+
+
+def test_entrypoint_uses_mihomo_binary_from_official_image() -> None:
+    entrypoint = (ROOT / "deploy" / "mihomo" / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert 'if /mihomo -t -f "$next_config"' in entrypoint
+    assert '/mihomo -f "$runtime_config" &' in entrypoint

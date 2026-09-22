@@ -33,7 +33,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
 done <"$template" >"$next_config"
 
-if mihomo -t -f "$next_config" >/dev/null 2>&1; then
+if /mihomo -t -f "$next_config" >/dev/null 2>&1; then
   mv -f "$next_config" "$runtime_config"
   cp "$runtime_config" "$last_known_good"
 elif [ -f "$last_known_good" ]; then
@@ -44,7 +44,7 @@ else
   fail "subscription configuration validation failed"
 fi
 
-mihomo -f "$runtime_config" &
+/mihomo -f "$runtime_config" &
 mihomo_pid=$!
 trap 'kill "$mihomo_pid" 2>/dev/null || true; wait "$mihomo_pid" 2>/dev/null || true' INT TERM EXIT
 
