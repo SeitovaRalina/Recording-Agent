@@ -60,7 +60,7 @@ def test_production_rejects_invalid_notion_proxy_url(proxy_url: str) -> None:
 
 
 def test_notion_proxy_url_is_secret_and_development_may_omit_it() -> None:
-    proxy_url = "http://proxy-user:proxy-password@notion-proxy:7890"
+    proxy_url = "http://proxy-user:proxy-password@notion-proxy:7890"  # pragma: allowlist secret
     settings = Settings(app_environment="development", notion_proxy_url=proxy_url)
 
     assert settings.notion_proxy_url.get_secret_value() == proxy_url
