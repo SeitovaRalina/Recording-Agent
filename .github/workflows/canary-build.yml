@@ -109,7 +109,12 @@ jobs:
           RECORDING_AGENT_IMAGE: ghcr.io/example/recording-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
           POSTGRES_IMAGE: postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000
           MIHOMO_IMAGE: ghcr.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
-        run: docker compose -f compose.canary.yml config --quiet
+        run: |
+          sudo install -d -o root -g root -m 0700 /etc/recording-agent/canary
+          sudo install -o root -g root -m 0600 /dev/null /etc/recording-agent/canary/backend.env
+          sudo install -o root -g root -m 0600 /dev/null /etc/recording-agent/canary/notion-proxy.env
+          trap 'sudo rm -rf /etc/recording-agent' EXIT
+          docker compose -f compose.canary.yml config --quiet
 
       - name: Prepare Docker Buildx
         run: docker buildx create --name recording-agent-canary-builder --driver docker-container --use
