@@ -1,0 +1,151 @@
+name: recording-agent-canary
+
+x-runtime: &runtime
+  image: ${RECORDING_AGENT_IMAGE:?RECORDING_AGENT_IMAGE must be an immutable image reference}
+  env_file:
+    - /etc/recording-agent/canary/backend.env
+  networks:
+    - canary-backend
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be an immutable image reference}
+    env_file:
+      - /etc/recording-agent/canary/backend.env
+    volumes:
+      - canary-postgres-data:/var/lib/postgresql/data
+    networks:
+      - canary-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 384m
+    mem_reservation: 192m
+    cpus: 0.75
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    <<: *runtime
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 0.5
+    pids_limit: 64
+
+  backend:
+    <<: *runtime
+    init: true
+    user: "10001:10001"
+    networks:
+      - canary-backend
+      - canary-notion-proxy
+    environment:
+      APP_ENVIRONMENT: production
+      NOTION_PROXY_URL: http://notion-proxy:7890
+      TEST_MODE_ENABLED: "true"
+      SCHEDULER_ENABLED: "false"
+      AUTONOMOUS_ROUTING_ENABLED: "false"
+      YANDEX_SOURCE_MUTATION_ENABLED: "false"
+      NOTION_WRITES_ENABLED: "false"
+      MATTERMOST_DELIVERY_ENABLED: "false"
+      PIPELINE_TRACE_ENABLED: "false"
+      STORAGE_PROVIDER: minio
+      # Schema preflight must never contact a storage service.
+      MINIO_ENDPOINT: http://127.0.0.1:1
+    ports:
+      - "127.0.0.1:${CANARY_APP_PORT:-18001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      notion-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 640m
+    mem_reservation: 320m
+    cpus: 1.0
+    pids_limit: 128
+
+  notion-proxy:
+    image: ${MIHOMO_IMAGE:?MIHOMO_IMAGE must be an immutable Mihomo image digest}
+    env_file:
+      - /etc/recording-agent/canary/notion-proxy.env
+    entrypoint: ["/usr/local/bin/recording-agent-mihomo"]
+    volumes:
+      - type: bind
+        source: ./deploy/mihomo/config.yaml
+        target: /etc/mihomo/config.yaml
+        read_only: true
+      - type: bind
+        source: ./deploy/mihomo/entrypoint.sh
+        target: /usr/local/bin/recording-agent-mihomo
+        read_only: true
+    networks:
+      - canary-notion-egress
+      - canary-notion-proxy
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/mihomo:size=16m,mode=0755,uid=65532,gid=65532
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /run/mihomo/notion-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 15s
+    mem_limit: 192m
+    mem_reservation: 96m
+    cpus: 0.5
+    pids_limit: 64
+
+volumes:
+  canary-postgres-data:
+    name: recording-agent-canary-postgres
+
+networks:
+  canary-backend:
+    name: recording-agent-canary-backend
+    driver: bridge
+    internal: true
+  canary-notion-proxy:
+    name: recording-agent-canary-notion-proxy
+    driver: bridge
+    internal: true
+  canary-notion-egress:
+    name: recording-agent-canary-notion-egress
+    driver: bridge
+    internal: false
