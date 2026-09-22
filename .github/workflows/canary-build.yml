@@ -110,7 +110,8 @@ jobs:
           POSTGRES_IMAGE: postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000
           MIHOMO_IMAGE: ghcr.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
-          sudo install -d -o root -g root -m 0700 /etc/recording-agent/canary
+          # CI-only fixture directory; host keeps this directory root-only mode 0700.
+          sudo install -d -o root -g root -m 0755 /etc/recording-agent/canary
           # Empty CI-only files: production host files remain root-owned mode 0600.
           sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/canary/backend.env
           sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/canary/notion-proxy.env
