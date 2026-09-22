@@ -122,6 +122,10 @@ services:
         source: ./deploy/mihomo/entrypoint.sh
         target: /usr/local/bin/recording-agent-mihomo
         read_only: true
+      - type: bind
+        source: /etc/recording-agent/notion-koala-profile.yaml
+        target: /etc/mihomo/koala-profile.yaml
+        read_only: true
     networks:
       # Egress only for the tunnel provider and selected Notion route.
       - notion-egress
@@ -135,7 +139,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      # Entrypoint creates marker only after a proxied Notion API JSON probe.
+      # Deployment smoke tests perform the proxied Notion API probe from backend.
       test: ["CMD-SHELL", "test -f /run/mihomo/notion-ready"]
       interval: 10s
       timeout: 3s

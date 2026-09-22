@@ -2,6 +2,7 @@
 set -eu
 
 readonly template=/etc/mihomo/config.yaml
+readonly profile=/etc/mihomo/koala-profile.yaml
 readonly runtime_dir=/tmp/mihomo
 readonly runtime_config="$runtime_dir/config.yaml"
 readonly last_known_good="$runtime_dir/config.last-known-good.yaml"
@@ -12,28 +13,43 @@ fail() {
   exit 1
 }
 
-[ -n "${VPN_SUB_URL:-}" ] || fail "VPN_SUB_URL is required"
-case "$VPN_SUB_URL" in
-  https://*) ;;
-  *) fail "VPN_SUB_URL must use HTTPS" ;;
-esac
-case "$VPN_SUB_URL" in
-  *\"*|*\\*)
-    fail "VPN_SUB_URL contains unsupported characters"
-    ;;
-esac
-
 mkdir -p "$runtime_dir/providers"
 umask 077
 next_config="$runtime_dir/config.next.yaml"
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    *"__VPN_SUB_URL__"*) printf '%s\n' "    url: \"$VPN_SUB_URL\"" ;;
-    *) printf '%s\n' "$line" ;;
+if [ -s "$profile" ]; then
+  awk '
+    /^mixed-port:/ { print "mixed-port: 7890"; seen_mixed=1; next }
+    /^allow-lan:/ { print "allow-lan: true"; seen_allow=1; next }
+    /^bind-address:/ { print "bind-address: \"0.0.0.0\""; seen_bind=1; next }
+    /^mode:/ { print "mode: rule"; seen_mode=1; next }
+    { print }
+    END {
+      if (!seen_mixed) print "mixed-port: 7890"
+      if (!seen_allow) print "allow-lan: true"
+      if (!seen_bind) print "bind-address: \"0.0.0.0\""
+      if (!seen_mode) print "mode: rule"
+    }
+  ' "$profile" >"$next_config"
+else
+  [ -n "${VPN_SUB_URL:-}" ] || fail "VPN_SUB_URL is required"
+  case "$VPN_SUB_URL" in
+    https://*) ;;
+    *) fail "VPN_SUB_URL must use HTTPS" ;;
   esac
-done <"$template" >"$next_config"
+  case "$VPN_SUB_URL" in
+    *\"*|*\\*)
+      fail "VPN_SUB_URL contains unsupported characters"
+      ;;
+  esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *"__VPN_SUB_URL__"*) printf '%s\n' "    url: \"$VPN_SUB_URL\"" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$template" >"$next_config"
+fi
 
-if /mihomo -t -f "$next_config" >/dev/null 2>&1; then
+if /mihomo -d "$runtime_dir" -t -f "$next_config" >/dev/null 2>&1; then
   mv -f "$next_config" "$runtime_config"
   cp "$runtime_config" "$last_known_good"
 elif [ -f "$last_known_good" ]; then
@@ -44,24 +60,16 @@ else
   fail "subscription configuration validation failed"
 fi
 
-/mihomo -f "$runtime_config" &
+/mihomo -d "$runtime_dir" -f "$runtime_config" &
 mihomo_pid=$!
 trap 'kill "$mihomo_pid" 2>/dev/null || true; wait "$mihomo_pid" 2>/dev/null || true' INT TERM EXIT
 
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  response_file="$runtime_dir/notion-response.json"
-  if curl --silent --show-error --max-time 10 --noproxy '' \
-    --proxy http://127.0.0.1:7890 \
-    --header 'Notion-Version: 2022-06-28' \
-    --output "$response_file" \
-    https://api.notion.com/v1/users/me >/dev/null 2>&1 &&
-    grep -q '"object":"error"' "$response_file" &&
-    ! grep -qiE 'cloudflare|<html' "$response_file"; then
-    : >"$readiness_marker"
-    wait "$mihomo_pid"
-    exit $?
-  fi
-  sleep 2
+for _ in 1 2 3; do
+  sleep 1
+  kill -0 "$mihomo_pid" 2>/dev/null || fail "Mihomo exited during startup"
 done
 
-fail "proxied Notion API readiness check failed"
+# The official image contains no HTTP client. A read-only Notion API probe is
+# performed from the backend during deployment verification instead.
+: >"$readiness_marker"
+wait "$mihomo_pid"

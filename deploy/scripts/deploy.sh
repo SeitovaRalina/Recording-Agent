@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 readonly ROOT=/opt/recording-agent
 readonly ENV_FILE=/etc/recording-agent/backend.env
+readonly NOTION_PROFILE_FILE=/etc/recording-agent/notion-koala-profile.yaml
 readonly PROJECT=recording-agent
 readonly WORKSPACE_SKILL=/srv/openclaw/workspaces/recordings-saver/skills/recording-agent
 readonly MIN_AVAILABLE_KIB=393216
@@ -43,6 +44,9 @@ done
 [[ -f $ENV_FILE ]] || die "missing protected runtime environment"
 [[ $(stat -c '%a:%U' "$ENV_FILE") == 600:root ]] ||
   die "runtime environment must be root-owned mode 0600"
+[[ -f $NOTION_PROFILE_FILE ]] || die "missing protected Notion proxy profile"
+[[ $(stat -c '%a:%U:%g' "$NOTION_PROFILE_FILE") == 640:root:65532 ]] ||
+  die "Notion proxy profile must be root-owned mode 0640 and readable by gid 65532"
 [[ $(awk '/MemAvailable:/ { print $2 }' /proc/meminfo) -ge $MIN_AVAILABLE_KIB ]] ||
   die "pre-deploy capacity gate failed: less than 384 MiB available"
 [[ $(awk '/SwapTotal:/ { print $2 }' /proc/meminfo) -eq 0 ]] ||
@@ -209,10 +213,11 @@ recover_previous() {
   export RECORDING_AGENT_IMAGE=$previous_image
   local previous_compose=(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" \
     --file "$previous/compose.prod.yml")
-  "${compose[@]}" stop backend >/dev/null 2>&1 || true
+  "${compose[@]}" stop backend notion-proxy >/dev/null 2>&1 || true
   ln -sfn "$previous" "$ROOT/current.next"
   mv -Tf "$ROOT/current.next" "$ROOT/current"
   activate_skill "$previous"
+  "${previous_compose[@]}" up -d --wait --wait-timeout 70 notion-proxy
   "${previous_compose[@]}" up -d --no-deps backend
   CAPACITY_OOM_KILL_BASELINE="$oom_baseline" \
     /usr/local/sbin/recording-agent-smoke-test --local
@@ -270,6 +275,7 @@ migration_attempted=true
 ln -sfn "$release" "$ROOT/current.next"
 mv -Tf "$ROOT/current.next" "$ROOT/current"
 activate_skill "$release"
+"${compose[@]}" up -d --wait --wait-timeout 70 notion-proxy
 "${compose[@]}" up -d --no-deps backend
 CAPACITY_OOM_KILL_BASELINE="$oom_baseline" \
   /usr/local/sbin/recording-agent-smoke-test --local

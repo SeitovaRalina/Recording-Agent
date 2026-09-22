@@ -22,6 +22,12 @@ def test_production_compose_isolates_notion_proxy() -> None:
     assert services["migrate"]["environment"]["NOTION_PROXY_URL"] == "http://notion-proxy:7890"
     assert "ports" not in proxy
     assert proxy["env_file"] == ["/etc/recording-agent/notion-proxy.env"]
+    assert {
+        "type": "bind",
+        "source": "/etc/recording-agent/notion-koala-profile.yaml",
+        "target": "/etc/mihomo/koala-profile.yaml",
+        "read_only": True,
+    } in proxy["volumes"]
     assert backend["depends_on"]["notion-proxy"]["condition"] == "service_healthy"
 
 
@@ -65,6 +71,15 @@ def test_production_compose_renders() -> None:
     )
     proxy_env.write("VPN_SUB_URL=https://example.invalid/subscription\n")
     proxy_env.close()
+    profile = tempfile.NamedTemporaryFile(
+        dir=ROOT,
+        encoding="utf-8",
+        mode="w",
+        suffix=".yaml",
+        delete=False,
+    )
+    profile.write("proxies: []\nproxy-groups: []\nrules: []\n")
+    profile.close()
     render_compose = tempfile.NamedTemporaryFile(
         dir=ROOT,
         encoding="utf-8",
@@ -76,6 +91,7 @@ def test_production_compose_renders() -> None:
         (ROOT / "compose.prod.yml")
         .read_text(encoding="utf-8")
         .replace("/etc/recording-agent/notion-proxy.env", proxy_env.name)
+        .replace("/etc/recording-agent/notion-koala-profile.yaml", profile.name)
     )
     render_compose.close()
     environment = os.environ | {
@@ -101,6 +117,7 @@ def test_production_compose_renders() -> None:
         )
     finally:
         Path(proxy_env.name).unlink(missing_ok=True)
+        Path(profile.name).unlink(missing_ok=True)
         Path(render_compose.name).unlink(missing_ok=True)
 
     assert result.returncode == 0, result.stderr
@@ -115,15 +132,37 @@ def test_mihomo_config_routes_only_notion_through_tunnel() -> None:
     assert "external-controller" not in config
 
 
-def test_readiness_rejects_cloudflare_html() -> None:
+def test_readiness_requires_a_live_mihomo_process() -> None:
     entrypoint = (ROOT / "deploy" / "mihomo" / "entrypoint.sh").read_text(encoding="utf-8")
 
-    assert 'grep -q \'"object":"error"\' "$response_file"' in entrypoint
-    assert "! grep -qiE 'cloudflare|<html' \"$response_file\"" in entrypoint
+    assert 'kill -0 "$mihomo_pid" 2>/dev/null || fail "Mihomo exited during startup"' in entrypoint
+    assert ': >"$readiness_marker"' in entrypoint
+    assert "curl --" not in entrypoint
+
+
+def test_entrypoint_prefers_koala_profile_file_with_backend_overrides() -> None:
+    entrypoint = (ROOT / "deploy" / "mihomo" / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "readonly profile=/etc/mihomo/koala-profile.yaml" in entrypoint
+    assert 'if [ -s "$profile" ]; then' in entrypoint
+    assert 'print "allow-lan: true"' in entrypoint
+    assert 'print "mode: rule"' in entrypoint
+    assert "[ -n \"${VPN_SUB_URL:-}\" ] || fail \"VPN_SUB_URL is required\"" in entrypoint
+
+
+def test_deploy_starts_notion_proxy_before_backend_and_rolls_it_back() -> None:
+    deploy = (ROOT / "deploy" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    smoke = (ROOT / "deploy" / "scripts" / "smoke-test.sh").read_text(encoding="utf-8")
+
+    assert "readonly NOTION_PROFILE_FILE=/etc/recording-agent/notion-koala-profile.yaml" in deploy
+    assert 'stat -c \'%a:%U:%g\' "$NOTION_PROFILE_FILE"' in deploy
+    assert '"${compose[@]}" up -d --wait --wait-timeout 70 notion-proxy' in deploy
+    assert '"${previous_compose[@]}" up -d --wait --wait-timeout 70 notion-proxy' in deploy
+    assert 'ps --status running --quiet notion-proxy' in smoke
 
 
 def test_entrypoint_uses_mihomo_binary_from_official_image() -> None:
     entrypoint = (ROOT / "deploy" / "mihomo" / "entrypoint.sh").read_text(encoding="utf-8")
 
-    assert 'if /mihomo -t -f "$next_config"' in entrypoint
-    assert '/mihomo -f "$runtime_config" &' in entrypoint
+    assert 'if /mihomo -d "$runtime_dir" -t -f "$next_config"' in entrypoint
+    assert '/mihomo -d "$runtime_dir" -f "$runtime_config" &' in entrypoint
