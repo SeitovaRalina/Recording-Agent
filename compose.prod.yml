@@ -49,6 +49,9 @@ services:
   migrate:
     <<: *runtime
     command: ["alembic", "upgrade", "head"]
+    environment:
+      # Settings validation also runs in Alembic's environment.
+      NOTION_PROXY_URL: http://notion-proxy:7890
     depends_on:
       postgres:
         condition: service_healthy

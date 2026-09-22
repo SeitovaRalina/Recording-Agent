@@ -19,6 +19,7 @@ def test_production_compose_isolates_notion_proxy() -> None:
     proxy = services["notion-proxy"]
 
     assert backend["environment"]["NOTION_PROXY_URL"] == "http://notion-proxy:7890"
+    assert services["migrate"]["environment"]["NOTION_PROXY_URL"] == "http://notion-proxy:7890"
     assert "ports" not in proxy
     assert proxy["env_file"] == ["/etc/recording-agent/notion-proxy.env"]
     assert backend["depends_on"]["notion-proxy"]["condition"] == "service_healthy"
