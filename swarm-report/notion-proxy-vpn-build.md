@@ -40,7 +40,7 @@ Implemented; review pending. Full tests deferred by explicit user instruction un
 
 - Review found proxy-network isolation, immutable-image validation, and Compose-test defects.
 - `/debug` fixed them with separate proxy egress/internal networks, an allowlisted immutable
-  `ghcr.io/metacubex/mihomo@sha256:<64hex>` deployment gate, and robust rendered Compose tests.
+  `docker.io/metacubex/mihomo@sha256:<64hex>` deployment gate, and robust rendered Compose tests.
 - Focused regression: `12 passed, 1 warning in 0.74s`.
 - Full regression: `341 passed, 1 warning in 76.55s (0:01:16)`.
 - Warning: pytest could not write its local cache due to workspace permissions.

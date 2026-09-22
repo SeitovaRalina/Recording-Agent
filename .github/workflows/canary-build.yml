@@ -108,7 +108,7 @@ jobs:
         env:
           RECORDING_AGENT_IMAGE: ghcr.io/example/recording-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
           POSTGRES_IMAGE: postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000
-          MIHOMO_IMAGE: ghcr.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          MIHOMO_IMAGE: docker.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
           # CI-only fixture directory; host keeps this directory root-only mode 0700.
           sudo install -d -o root -g root -m 0755 /etc/recording-agent/canary

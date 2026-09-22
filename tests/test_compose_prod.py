@@ -39,12 +39,19 @@ def test_proxy_network_cannot_reach_backend_or_postgres() -> None:
 
 def test_mihomo_image_is_allowlisted_immutable_digest() -> None:
     deploy = (ROOT / "deploy" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    template = (ROOT / ".env.production.example").read_text(encoding="utf-8")
+    canary_build = (ROOT / ".github" / "workflows" / "canary-build.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert 'MIHOMO_IMAGE=$(sed -n \'s/^MIHOMO_IMAGE=//p\' "$ENV_FILE")' in deploy
     assert (
         '[[ $MIHOMO_IMAGE =~ '
-        '^ghcr\\.io/metacubex/mihomo@sha256:[0-9a-f]{64}$ ]]' in deploy
+        '^docker\\.io/metacubex/mihomo@sha256:[0-9a-f]{64}$ ]]' in deploy
     )
+    assert "docker.io/metacubex/mihomo@sha256:" in template
+    assert "docker.io/metacubex/mihomo@sha256:" in canary_build
+    assert "ghcr.io/metacubex/mihomo" not in "\n".join((deploy, template, canary_build))
 
 
 def test_production_compose_renders() -> None:

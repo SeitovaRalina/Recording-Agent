@@ -153,8 +153,8 @@ POSTGRES_IMAGE=$(sed -n 's/^POSTGRES_IMAGE=//p' "$ENV_FILE")
   die "POSTGRES_IMAGE must be pinned by digest"
 export MIHOMO_IMAGE
 MIHOMO_IMAGE=$(sed -n 's/^MIHOMO_IMAGE=//p' "$ENV_FILE")
-[[ $MIHOMO_IMAGE =~ ^ghcr\.io/metacubex/mihomo@sha256:[0-9a-f]{64}$ ]] ||
-  die "MIHOMO_IMAGE must use allowlisted ghcr.io/metacubex/mihomo digest"
+[[ $MIHOMO_IMAGE =~ ^docker\.io/metacubex/mihomo@sha256:[0-9a-f]{64}$ ]] ||
+  die "MIHOMO_IMAGE must use allowlisted docker.io/metacubex/mihomo digest"
 compose=(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" \
   --file "$release/compose.prod.yml")
 "${compose[@]}" config --quiet
