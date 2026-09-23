@@ -323,8 +323,13 @@ async def _run(args: argparse.Namespace) -> None:
     settings = get_settings()
     engine = create_engine(settings)
     factory = create_session_factory(engine)
-    async with httpx.AsyncClient(timeout=30) as client:
-        notion = NotionClient(settings.notion_token, client, settings=settings)
+    notion_client = httpx.AsyncClient(
+        proxy=settings.notion_proxy_url.get_secret_value() or None,
+        timeout=30,
+        trust_env=False,
+    )
+    async with httpx.AsyncClient(timeout=30) as client, notion_client:
+        notion = NotionClient(settings.notion_token, notion_client, settings=settings)
         inspector = NotionInspector(notion, settings)
         try:
             async with factory() as session:
@@ -372,6 +377,9 @@ async def _run(args: argparse.Namespace) -> None:
                                     settings.synology_base_url,
                                     settings.synology_api_key,
                                     client,
+                                    username=settings.synology_user,
+                                    password=settings.synology_pass,
+                                    device_id=settings.synology_device_id,
                                 )
                                 if settings.storage_provider == "synology"
                                 else None
