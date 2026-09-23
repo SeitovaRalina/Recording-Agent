@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -712,6 +713,11 @@ def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
     )
     assert dispatcher.kwargs["coalesce"] is True
     assert dispatcher.kwargs["misfire_grace_time"] == 86400
+    # `now` must stay unset: optional services are passed by keyword, never positionally.
+    signature = inspect.signature(run_due_recruiter_summaries)
+    bound = signature.bind(*dispatcher.kwargs["args"], **dispatcher.kwargs["kwargs"])
+    assert "now" not in bound.arguments
+    assert set(dispatcher.kwargs["kwargs"]) == {"destination_service", "routing_job_service"}
     assert dispatcher.kwargs["max_instances"] == 1
     assert all(
         call.kwargs["id"] != "cleanup_expired_recordings"

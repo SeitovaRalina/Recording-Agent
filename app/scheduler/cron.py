@@ -1520,9 +1520,12 @@ def register_jobs(
             notion,
             review_service,
             question_queue_service,
-            destination_service,
-            routing_job_service,
         ],
+        # Keyword arguments: the positional slot after question_queue_service is `now`.
+        kwargs={
+            "destination_service": destination_service,
+            "routing_job_service": routing_job_service,
+        },
         max_instances=1,
         coalesce=True,
         misfire_grace_time=86400,
