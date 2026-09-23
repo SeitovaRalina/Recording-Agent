@@ -84,7 +84,12 @@ jobs:
           POSTGRES_IMAGE: postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000
           MIHOMO_IMAGE: docker.io/metacubex/mihomo@sha256:0000000000000000000000000000000000000000000000000000000000000000
           RECORDING_AGENT_ENV_FILE: .env.production.example
-        run: docker compose -f compose.prod.yml config --quiet
+        run: |
+          sudo install -d -o root -g root -m 0755 /etc/recording-agent
+          sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/notion-proxy.env
+          sudo install -o root -g root -m 0644 /dev/null /etc/recording-agent/notion-koala-profile.yaml
+          trap 'sudo rm -rf /etc/recording-agent' EXIT
+          docker compose -f compose.prod.yml config --quiet
 
       - name: Prepare Docker Buildx
         run: docker buildx create --name recording-agent-builder --driver docker-container --use
