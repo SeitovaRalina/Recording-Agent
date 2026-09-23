@@ -30,7 +30,7 @@ from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import CalDAVClient
 from app.tools.disk import DiskScanner
 from app.tools.mattermost import MattermostClient
-from app.tools.notion import NotionClient
+from app.tools.notion import NotionClient, build_notion_http_client
 from app.tools.synology import SynologyBackend
 
 
@@ -49,10 +49,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10),
         trust_env=False,
     )
-    notion_http_client = httpx.AsyncClient(
-        proxy=settings.notion_proxy_url.get_secret_value() or None,
-        timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10),
-        trust_env=False,
+    notion_http_client = build_notion_http_client(
+        settings, httpx.Timeout(connect=10, read=300, write=300, pool=10)
     )
     disk = DiskScanner(token_manager, session_factory, http_client=http_client)
     calendar = CalDAVClient(settings, session_factory, http_client=http_client)

@@ -2,6 +2,7 @@ import pytest
 
 from app.config import get_settings
 from app.main import app
+from app.tools.notion import ConnectRetryTransport
 
 
 @pytest.mark.anyio
@@ -22,11 +23,8 @@ async def test_lifespan_uses_dedicated_notion_proxy_client(
         assert direct_client is not None
         assert direct_client._trust_env is False
         assert notion_http_client._trust_env is False
-        assert any(
-            transport is not None
-            and getattr(transport._pool, "_proxy_url", None) is not None
-            for transport in notion_http_client._mounts.values()
-        )
+        assert isinstance(notion_http_client._transport, ConnectRetryTransport)
+        assert notion_http_client._transport.inner._pool._proxy_url is not None
 
     assert notion_http_client.is_closed
     assert direct_client.is_closed

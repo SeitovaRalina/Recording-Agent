@@ -18,6 +18,9 @@ NOTION_API_VERSION = "2026-03-11"
 DEFAULT_RECORDING_PROP = "General Interview recording"
 DEFAULT_CACHE_SIZE = 128
 MAX_SPOT_CHOICES = 10
+# The VPN sidecar upstream drops a share of TCP handshakes; connect failures never reach Notion,
+# so retrying them is safe for reads and writes alike.
+NOTION_CONNECT_RETRIES = 3
 _TRACE_BODY_LIMIT = 500
 _EMAIL_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
@@ -26,6 +29,51 @@ _EMAIL_CANDIDATE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)"
     r"(?![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
 )
+
+
+class ConnectRetryTransport(httpx.AsyncBaseTransport):
+    """Retry requests whose connection or proxy tunnel could not be established.
+
+    `httpx.AsyncHTTPTransport(retries=...)` does not apply retries to proxied pools, and a failed
+    sidecar upstream surfaces as `ProxyError`. Neither error means the request reached Notion.
+    """
+
+    RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError)
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        *,
+        attempts: int = NOTION_CONNECT_RETRIES,
+        backoff_seconds: float = 0.5,
+    ) -> None:
+        self.inner = inner
+        self._attempts = max(1, attempts)
+        self._backoff = backoff_seconds
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        for attempt in range(1, self._attempts + 1):
+            try:
+                return await self.inner.handle_async_request(request)
+            except self.RETRYABLE:
+                if attempt == self._attempts:
+                    raise
+                await asyncio.sleep(self._backoff * attempt)
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+def build_notion_http_client(settings: Settings, timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Create the proxied Notion HTTP client that retries only failed connection attempts."""
+    return httpx.AsyncClient(
+        transport=ConnectRetryTransport(
+            httpx.AsyncHTTPTransport(proxy=settings.notion_proxy_url.get_secret_value() or None)
+        ),
+        timeout=timeout,
+        trust_env=False,
+    )
 
 
 class NotionAPIError(RuntimeError):

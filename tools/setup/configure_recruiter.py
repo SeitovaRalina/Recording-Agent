@@ -21,7 +21,7 @@ from app.services.canary import notion_schema_hash, notion_token_hash, require_n
 from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import DISCOVERY_MAX_AGE, CalDAVClient
 from app.tools.mattermost import MattermostClient
-from app.tools.notion import NotionClient
+from app.tools.notion import NotionClient, build_notion_http_client
 from app.tools.synology import SynologyBackend, SynologyPreflight
 
 
@@ -323,11 +323,7 @@ async def _run(args: argparse.Namespace) -> None:
     settings = get_settings()
     engine = create_engine(settings)
     factory = create_session_factory(engine)
-    notion_client = httpx.AsyncClient(
-        proxy=settings.notion_proxy_url.get_secret_value() or None,
-        timeout=30,
-        trust_env=False,
-    )
+    notion_client = build_notion_http_client(settings, httpx.Timeout(30))
     async with httpx.AsyncClient(timeout=30) as client, notion_client:
         notion = NotionClient(settings.notion_token, notion_client, settings=settings)
         inspector = NotionInspector(notion, settings)
