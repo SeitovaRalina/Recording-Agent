@@ -67,6 +67,16 @@ fails, return the JSON `message` field verbatim.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
   a one-time dispatch nonce. Read `references/autonomous-routing.md` before this operation.
 
+Choose the storage command by the recording `status` returned by `status`, never by wording such
+as "retry", "again", "move", or "same folder":
+
+- `candidate_matched` or `manual_review_required` (including `storage_destination_required` and
+  `storage_key_collision`): the file is not stored yet. Use `route-interview` with the current
+  `version`; this also retries a failed transfer into the chosen folder.
+- `completed`: the file is already stored. Use `reroute-recording` only when the recruiter asks
+  to move it to a different folder.
+- Any other status: report the status and do not submit a storage command.
+
 Legacy `review`, `resolve`, and `ignore` commands remain compatibility tools. Prefer the ordinary
 DM `questions` and partial `answer` flow; threads are not required.
 
