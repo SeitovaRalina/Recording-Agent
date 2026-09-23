@@ -412,6 +412,9 @@ class SynologyBackend:
         if not isinstance(files, list) or not files:
             return None
         item = files[0]
+        # DSM 7 reports a missing path as a successful response with a per-item error code.
+        if isinstance(item, dict) and item.get("code") == 408:
+            return None
         if not isinstance(item, dict) or not isinstance(item.get("size"), int):
             raise StorageCollisionError(
                 f"Synology destination exists but its size cannot be verified: {path}"

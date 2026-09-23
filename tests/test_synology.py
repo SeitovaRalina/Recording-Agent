@@ -535,3 +535,20 @@ async def test_missing_owner_marker_is_detected_without_download_behind_proxy() 
     assert path == "/base/video.webm"
     assert download.call_count == 0
     assert info.call_count >= 2
+
+
+@pytest.mark.anyio
+async def test_file_size_treats_dsm7_per_item_not_found_as_missing() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {"files": [{"code": 408, "path": "/base/.missing.json"}]},
+                    },
+                )
+            )
+            assert await backend._file_size("/base/.missing.json") is None  # noqa: SLF001
