@@ -1,11 +1,11 @@
-name: recording-agent
+name: recording-agent-canary
 
 x-runtime: &runtime
   image: ${RECORDING_AGENT_IMAGE:?RECORDING_AGENT_IMAGE must be an immutable image reference}
   env_file:
-    - ${RECORDING_AGENT_ENV_FILE:-/etc/recording-agent/backend.env}
+    - /etc/recording-agent/canary/backend.env
   networks:
-    - backend
+    - canary-backend
   security_opt:
     - no-new-privileges:true
   read_only: true
@@ -21,11 +21,11 @@ services:
   postgres:
     image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be an immutable image reference}
     env_file:
-      - ${RECORDING_AGENT_ENV_FILE:-/etc/recording-agent/backend.env}
+      - /etc/recording-agent/canary/backend.env
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - canary-postgres-data:/var/lib/postgresql/data
     networks:
-      - backend
+      - canary-backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -40,18 +40,10 @@ services:
     pids_limit: 128
     security_opt:
       - no-new-privileges:true
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   migrate:
     <<: *runtime
     command: ["alembic", "upgrade", "head"]
-    environment:
-      # Settings validation also runs in Alembic's environment.
-      NOTION_PROXY_URL: http://notion-proxy:7890
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,21 +58,23 @@ services:
     init: true
     user: "10001:10001"
     networks:
-      - backend
-      - notion-proxy
+      - canary-backend
+      - canary-notion-proxy
     environment:
       APP_ENVIRONMENT: production
-      # The proxy is private to this Compose project. Do not put VPN_SUB_URL in
-      # RECORDING_AGENT_ENV_FILE; its dedicated env file belongs to notion-proxy.
       NOTION_PROXY_URL: http://notion-proxy:7890
-      TEST_MODE_ENABLED: "false"
+      TEST_MODE_ENABLED: "true"
       SCHEDULER_ENABLED: "false"
+      AUTONOMOUS_ROUTING_ENABLED: "false"
       YANDEX_SOURCE_MUTATION_ENABLED: "false"
       NOTION_WRITES_ENABLED: "false"
       MATTERMOST_DELIVERY_ENABLED: "false"
       PIPELINE_TRACE_ENABLED: "false"
+      STORAGE_PROVIDER: minio
+      # Schema preflight must never contact a storage service.
+      MINIO_ENDPOINT: http://127.0.0.1:1
     ports:
-      - "127.0.0.1:${APP_PORT:-18000}:8000"
+      - "127.0.0.1:${CANARY_APP_PORT:-18001}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,13 +83,7 @@ services:
       notion-proxy:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
-        ]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -110,8 +98,7 @@ services:
   notion-proxy:
     image: ${MIHOMO_IMAGE:?MIHOMO_IMAGE must be an immutable Mihomo image digest}
     env_file:
-      # Contains VPN_SUB_URL only. Never reuse RECORDING_AGENT_ENV_FILE here.
-      - /etc/recording-agent/notion-proxy.env
+      - /etc/recording-agent/canary/notion-proxy.env
     entrypoint: ["/usr/local/bin/recording-agent-mihomo"]
     volumes:
       - type: bind
@@ -122,15 +109,9 @@ services:
         source: ./deploy/mihomo/entrypoint.sh
         target: /usr/local/bin/recording-agent-mihomo
         read_only: true
-      - type: bind
-        source: /etc/recording-agent/notion-koala-profile.yaml
-        target: /etc/mihomo/koala-profile.yaml
-        read_only: true
     networks:
-      # Egress only for the tunnel provider and selected Notion route.
-      - notion-egress
-      # Backend is the sole proxy client; this network has no host egress.
-      - notion-proxy
+      - canary-notion-egress
+      - canary-notion-proxy
     user: "65532:65532"
     read_only: true
     tmpfs:
@@ -139,7 +120,6 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      # Deployment smoke tests perform the proxied Notion API probe from backend.
       test: ["CMD-SHELL", "test -f /run/mihomo/notion-ready"]
       interval: 10s
       timeout: 3s
@@ -151,26 +131,21 @@ services:
     mem_reservation: 96m
     cpus: 0.5
     pids_limit: 64
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 volumes:
-  postgres-data:
-    name: recording-agent-postgres
+  canary-postgres-data:
+    name: recording-agent-canary-postgres
 
 networks:
-  backend:
-    name: recording-agent-backend
-    driver: bridge
-    internal: false
-  notion-proxy:
-    name: recording-agent-notion-proxy
+  canary-backend:
+    name: recording-agent-canary-backend
     driver: bridge
     internal: true
-  notion-egress:
-    name: recording-agent-notion-egress
+  canary-notion-proxy:
+    name: recording-agent-canary-notion-proxy
+    driver: bridge
+    internal: true
+  canary-notion-egress:
+    name: recording-agent-canary-notion-egress
     driver: bridge
     internal: false

@@ -99,6 +99,27 @@ grep -F -- '--property="EnvironmentFile=$GATEWAY_ENV"' \
   "$ROOT/deploy/scripts/openclaw-shared-deploy.sh" >/dev/null
 ! grep -F 'runuser -u openclaw' \
   "$ROOT/deploy/scripts/openclaw-shared-deploy.sh" >/dev/null
+
+CANARY_WORKFLOW="$ROOT/.github/workflows/canary-build.yml"
+CANARY_COMPOSE="$ROOT/compose.canary.yml"
+grep -F 'workflow_dispatch:' "$CANARY_WORKFLOW" >/dev/null
+grep -F 'Full lowercase non-main commit SHA to build' "$CANARY_WORKFLOW" >/dev/null
+grep -F 'git merge-base --is-ancestor' "$CANARY_WORKFLOW" >/dev/null
+grep -F 'provenance=mode=max' "$CANARY_WORKFLOW" >/dev/null
+grep -F 'Manifest.Digest' "$CANARY_WORKFLOW" >/dev/null
+! grep -Eq '(VPN_SUB_URL|DEPLOY_HOST|DEPLOY_USER|STAGE_KEY|DEPLOY_KEY|^[[:space:]]*environment:)' \
+  "$CANARY_WORKFLOW"
+grep -F 'name: recording-agent-canary' "$CANARY_COMPOSE" >/dev/null
+grep -F '/etc/recording-agent/canary/backend.env' "$CANARY_COMPOSE" >/dev/null
+grep -F '/etc/recording-agent/canary/notion-proxy.env' "$CANARY_COMPOSE" >/dev/null
+grep -F '127.0.0.1:${CANARY_APP_PORT:-18001}:8000' "$CANARY_COMPOSE" >/dev/null
+grep -F 'TEST_MODE_ENABLED: "true"' "$CANARY_COMPOSE" >/dev/null
+for flag in SCHEDULER_ENABLED AUTONOMOUS_ROUTING_ENABLED YANDEX_SOURCE_MUTATION_ENABLED \
+  NOTION_WRITES_ENABLED MATTERMOST_DELIVERY_ENABLED; do
+  grep -F "${flag}: \"false\"" "$CANARY_COMPOSE" >/dev/null
+done
+! grep -Eq '(recording-agent-postgres|recording-agent-backend|recording-agent-notion-proxy)' \
+  "$CANARY_COMPOSE"
 grep -F 'POST /internal/routing-jobs/dispatch' \
   "$ROOT/openclaw/skills/recording-agent/references/contract.md" >/dev/null
 grep -F 'routing-activate' "$ROOT/openclaw/skills/recording-agent/SKILL.md" >/dev/null

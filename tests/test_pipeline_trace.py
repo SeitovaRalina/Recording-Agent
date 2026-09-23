@@ -7,7 +7,11 @@ from app.services.pipeline_trace import safe_url, trace
 def test_trace_requires_explicit_development_opt_in(caplog) -> None:  # type: ignore[no-untyped-def]
     with caplog.at_level(logging.INFO, logger="recording_agent.pipeline"):
         trace(
-            Settings(app_environment="production", pipeline_trace_enabled=True),
+            Settings(
+                app_environment="production",
+                notion_proxy_url="http://notion-proxy:7890",
+                pipeline_trace_enabled=True,
+            ),
             "pipeline.test",
             candidate_name="Ivan",
         )

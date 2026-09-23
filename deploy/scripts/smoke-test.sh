@@ -46,6 +46,10 @@ docker compose --project-name recording-agent \
   --env-file /etc/recording-agent/backend.env \
   --file /opt/recording-agent/current/compose.prod.yml ps --status running --quiet backend |
   grep -q . || die "Backend is not running"
+docker compose --project-name recording-agent \
+  --env-file /etc/recording-agent/backend.env \
+  --file /opt/recording-agent/current/compose.prod.yml ps --status running --quiet notion-proxy |
+  grep -q . || die "Notion proxy is not running"
 
 backend_healthy=false
 for _ in {1..23}; do
@@ -76,7 +80,7 @@ if [[ -n ${CAPACITY_OOM_KILL_BASELINE:-} ]]; then
   [[ $oom_now -eq $CAPACITY_OOM_KILL_BASELINE ]] ||
     die "OOM kill detected during rollout"
 fi
-for service in postgres backend; do
+for service in postgres backend notion-proxy; do
   container_id=$(docker compose --project-name recording-agent \
     --env-file /etc/recording-agent/backend.env \
     --file /opt/recording-agent/current/compose.prod.yml ps --quiet "$service")
@@ -85,14 +89,17 @@ for service in postgres backend; do
     die "$service was OOM-killed"
 done
 gateway_memory=$(systemctl show openclaw-gateway.service --property=MemoryCurrent --value)
+postgres_id=$(docker compose --project-name recording-agent \
+  --env-file /etc/recording-agent/backend.env \
+  --file /opt/recording-agent/current/compose.prod.yml ps --quiet postgres)
+backend_id=$(docker compose --project-name recording-agent \
+  --env-file /etc/recording-agent/backend.env \
+  --file /opt/recording-agent/current/compose.prod.yml ps --quiet backend)
+proxy_id=$(docker compose --project-name recording-agent \
+  --env-file /etc/recording-agent/backend.env \
+  --file /opt/recording-agent/current/compose.prod.yml ps --quiet notion-proxy)
 container_memory=$(docker stats --no-stream --format '{{.Name}}={{.MemUsage}}' \
-  "$(docker compose --project-name recording-agent \
-    --env-file /etc/recording-agent/backend.env \
-    --file /opt/recording-agent/current/compose.prod.yml ps --quiet postgres)" \
-  "$(docker compose --project-name recording-agent \
-    --env-file /etc/recording-agent/backend.env \
-    --file /opt/recording-agent/current/compose.prod.yml ps --quiet backend)" |
-  paste -sd, -)
+  "$postgres_id" "$backend_id" "$proxy_id" | paste -sd, -)
 printf 'capacity: available_kib=%s gateway_bytes=%s containers=%s\n' \
   "$mem_available" "$gateway_memory" "$container_memory"
 

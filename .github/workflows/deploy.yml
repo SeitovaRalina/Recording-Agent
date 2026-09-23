@@ -90,17 +90,31 @@ jobs:
             -cf - \
             recording-agent \
             | gzip -n > "${release_dir}/recording-agent-skill.tar.gz"
+          tar \
+            --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C deploy \
+            -cf - \
+            mihomo/config.yaml \
+            mihomo/entrypoint.sh \
+            | gzip -n > "${release_dir}/mihomo-assets.tar.gz"
           (
             cd "${release_dir}"
             sha256sum compose.prod.yml > compose.prod.yml.sha256
             sha256sum recording-agent-skill.tar.gz > recording-agent-skill.tar.gz.sha256
+            sha256sum mihomo-assets.tar.gz > mihomo-assets.tar.gz.sha256
             compose_sha="$(sha256sum compose.prod.yml | awk '{print $1}')"
             skill_sha="$(sha256sum recording-agent-skill.tar.gz | awk '{print $1}')"
             metadata_sha="$(sha256sum release-metadata.json | awk '{print $1}')"
+            mihomo_sha="$(sha256sum mihomo-assets.tar.gz | awk '{print $1}')"
             {
               printf 'compose_sha=%s\n' "${compose_sha}"
               printf 'skill_sha=%s\n' "${skill_sha}"
               printf 'metadata_sha=%s\n' "${metadata_sha}"
+              printf 'mihomo_sha=%s\n' "${mihomo_sha}"
             } >> "${GITHUB_OUTPUT}"
           )
 
@@ -140,6 +154,8 @@ jobs:
             printf 'put %s %s/recording-agent-skill.tar.gz\n' "${RUNNER_TEMP}/recording-agent-release/recording-agent-skill.tar.gz" "${incoming}"
             printf 'put %s %s/recording-agent-skill.tar.gz.sha256\n' "${RUNNER_TEMP}/recording-agent-release/recording-agent-skill.tar.gz.sha256" "${incoming}"
             printf 'put %s %s/release-metadata.json\n' "${RUNNER_TEMP}/recording-agent-release/release-metadata.json" "${incoming}"
+            printf 'put %s %s/mihomo-assets.tar.gz\n' "${RUNNER_TEMP}/recording-agent-release/mihomo-assets.tar.gz" "${incoming}"
+            printf 'put %s %s/mihomo-assets.tar.gz.sha256\n' "${RUNNER_TEMP}/recording-agent-release/mihomo-assets.tar.gz.sha256" "${incoming}"
           } > "${batch}"
           sftp \
             -b "${batch}" \
@@ -159,6 +175,7 @@ jobs:
           COMPOSE_SHA: ${{ steps.package.outputs.compose_sha }}
           SKILL_SHA: ${{ steps.package.outputs.skill_sha }}
           METADATA_SHA: ${{ steps.package.outputs.metadata_sha }}
+          MIHOMO_SHA: ${{ steps.package.outputs.mihomo_sha }}
         run: |
           port="${DEPLOY_PORT:-22}"
           if [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" ]]; then
@@ -174,4 +191,4 @@ jobs:
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
             sudo -n /usr/local/sbin/recording-agent-deploy \
-            "${COMMIT_SHA}" "${IMAGE}" "${COMPOSE_SHA}" "${SKILL_SHA}" "${METADATA_SHA}"
+            "${COMMIT_SHA}" "${IMAGE}" "${COMPOSE_SHA}" "${SKILL_SHA}" "${METADATA_SHA}" "${MIHOMO_SHA}"

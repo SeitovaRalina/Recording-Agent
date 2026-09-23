@@ -164,6 +164,82 @@ has different ownership or permissions.
 
 ## Canary and activation
 
+### Manual root-SSH canary
+
+The canary is deliberately separate from production, but it shares the host failure domain. It is
+an operator-run validation lane: GitHub receives no host credential, VPN subscription, deployment
+key, or Environment secret. Do not use it to process a recording, query Notion pages, write Notion,
+or contact a recruiter.
+
+The root operator first creates only the fixed canary roots:
+
+```bash
+install -d -o root -g root -m 0700 /opt/recording-agent-canary/{incoming,releases}
+install -d -o root -g root -m 0700 /etc/recording-agent/canary
+install -o root -g root -m 0600 /root/backend.env /etc/recording-agent/canary/backend.env
+install -o root -g root -m 0600 /root/notion-proxy.env /etc/recording-agent/canary/notion-proxy.env
+```
+
+Create `backend.env` from `.env.canary.example` outside Git. It needs independently issued test
+credentials, exact test recruiter and Notion database allowlists, pinned PostgreSQL/Mihomo images,
+and port `18001`. All effect flags must remain `false`; `TEST_MODE_ENABLED=true` and
+`STORAGE_PROVIDER=minio` are enforced. `notion-proxy.env` contains exactly the root-owned
+mode-0600 `VPN_SUB_URL`; it is never copied to the archive, image, command line, GitHub, or logs.
+Delete the temporary `/root/*.env` source files immediately after verifying destination ownership
+and mode without printing their contents.
+
+From the reviewed non-main checkout, create a deterministic archive. The archive contains only the
+canary Compose file and the checked-in Mihomo assets; it contains no secret:
+
+```bash
+./deploy/scripts/canary-package.sh <40-lowercase-commit> <existing-output-directory>
+```
+
+Run `canary-build` manually for the same commit and copy its immutable GHCR digest. Copy the archive
+and its reported SHA-256 to the host as root (the operator's normal SSH key is sufficient). Install
+the reviewed canary scripts from that exact checkout as root before using them; do not replace any
+production dispatcher or bootstrap file:
+
+```bash
+scp deploy/scripts/canary-{deploy,smoke-test,rollback,teardown}.sh root@host:/root/
+ssh root@host 'install -o root -g root -m 0755 /root/canary-*.sh /usr/local/sbin/'
+scp recording-agent-canary-<commit>.tar.gz root@host:/opt/recording-agent-canary/incoming/<commit>.tar.gz
+ssh root@host 'sha256sum /opt/recording-agent-canary/incoming/<commit>.tar.gz'
+```
+
+Compare that output locally, then deploy with the exact values. The deploy script checks root,
+hashes, archive shape, fixed paths, production container state, no-swap capacity, and the full
+canary reservation plus 384 MiB production headroom before any Docker mutation.
+
+```bash
+ssh root@host \
+  '/usr/local/sbin/canary-deploy.sh <commit> ghcr.io/seitovaralina/recording-agent@sha256:<digest> <archive-sha256>'
+ssh root@host '/usr/local/sbin/canary-smoke-test.sh'
+```
+
+Smoke checks only canary health, Mihomo's JSON Notion readiness marker, and the dedicated
+read-only Notion database/data-source schema command. It does not start scheduler/routing or call
+any page-query or write endpoint. Snapshot production Compose IDs and health before deploy and
+compare them afterwards; any production difference is a stop condition.
+
+To switch only to a previously verified canary release, use its full commit. This does not touch
+production or restore a database:
+
+```bash
+ssh root@host '/usr/local/sbin/canary-rollback.sh <previous-40-lowercase-commit>'
+```
+
+Teardown is intentionally destructive only to named canary containers, volumes, releases, and
+incoming archive. It retains root env files for secret rotation; remove them separately only after
+the operator confirms they are no longer needed. It never runs `docker system prune`.
+
+```bash
+ssh root@host '/usr/local/sbin/canary-teardown.sh TEARDOWN_RECORDING_AGENT_CANARY'
+```
+
+Promote only through the normal reviewed PR and `main` production path. Canary success is evidence,
+not automatic promotion authority.
+
 Keep scheduler, Notion writes, Mattermost delivery, Yandex mutations, Synology transfer, and
 cleanup effects disabled initially. Validate local health and authenticated loopback Backend
 access, then explicitly approve external preflights. Test each LLM identity, exact bot-to-agent

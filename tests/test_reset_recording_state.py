@@ -33,7 +33,12 @@ def _test_settings(*, scheduler_enabled: bool = False) -> Settings:
 
 def test_reset_requires_test_mode_and_disabled_scheduler() -> None:
     with pytest.raises(RuntimeError, match="test mode"):
-        require_safe_reset_settings(Settings(app_environment="production"))
+        require_safe_reset_settings(
+            Settings(
+                app_environment="production",
+                notion_proxy_url="http://notion-proxy:7890",
+            )
+        )
 
     with pytest.raises(RuntimeError, match="scheduler"):
         require_safe_reset_settings(_test_settings(scheduler_enabled=True))
