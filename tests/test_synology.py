@@ -130,7 +130,9 @@ async def test_find_public_share_link_paginates_to_exact_path() -> None:
                         200,
                         json={
                             "success": True,
-                            "data": {"links": [{"path": "/base/video.webm", "url": "https://right"}]},
+                            "data": {
+                                "links": [{"path": "/base/video.webm", "url": "https://right"}]
+                            },
                         },
                     ),
                 ]
@@ -414,3 +416,74 @@ async def test_folder_discovery_is_paginated_bounded_and_omits_symlinks() -> Non
 
     assert [folder.path for folder in folders] == ["/root/real"]
     assert len(route.calls) == 2
+
+
+def _dsm7_folder(path: str, real_path: str, *, write: bool = True) -> dict[str, object]:
+    return {
+        "path": path,
+        "name": path.rsplit("/", 1)[-1],
+        "isdir": True,
+        "additional": {
+            "perm": {
+                "acl": {"append": write, "del": write, "exec": True, "read": True, "write": write},
+                "is_acl_mode": True,
+                "posix": 777,
+            },
+            "real_path": real_path,
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_home_share_folders_with_dsm7_acl_are_writable_and_not_symlinks() -> None:
+    home = "/volume1/homes/saver"
+    root = "/home/Recruiting-E/3. Interviews internal"
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "total": 3,
+                            "files": [
+                                _dsm7_folder(
+                                    f"{root}/Flutter",
+                                    f"{home}/Recruiting-E/3. Interviews internal/Flutter",
+                                ),
+                                _dsm7_folder(
+                                    f"{root}/Web",
+                                    f"{home}/Recruiting-E/3. Interviews internal/Web",
+                                    write=False,
+                                ),
+                                _dsm7_folder(f"{root}/Linked", "/volume2/other/Linked"),
+                            ],
+                        },
+                    },
+                )
+            )
+            folders = await backend.discover_folders(root, max_depth=0, max_pages=1, max_results=10)
+
+    assert [(folder.path, folder.writable) for folder in folders] == [
+        (f"{root}/Flutter", True),
+        (f"{root}/Web", False),
+    ]
+
+
+def test_symlink_detection_uses_share_relative_tail() -> None:
+    assert not SynologyBackend._is_symlink("/home", "/volume1/homes/saver")
+    assert not SynologyBackend._is_symlink("/home/a/b", "/volume1/homes/saver/a/b")
+    assert not SynologyBackend._is_symlink("/root", "/root")
+    assert not SynologyBackend._is_symlink("/root/real", "/root/real")
+    assert SynologyBackend._is_symlink("/home/a/b", "/volume1/homes/saver/a/c")
+    assert SynologyBackend._is_symlink("/root/team", "/elsewhere")
+    assert not SynologyBackend._is_symlink("/root/team", None)
+
+
+def test_writable_reads_dsm7_acl_and_legacy_flat_perm() -> None:
+    assert SynologyBackend._is_writable({"perm": {"acl": {"write": True}, "posix": 777}})
+    assert not SynologyBackend._is_writable({"perm": {"acl": {"write": False}, "posix": 777}})
+    assert SynologyBackend._is_writable({"perm": {"write": True}})
+    assert not SynologyBackend._is_writable({})

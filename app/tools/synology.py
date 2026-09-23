@@ -225,7 +225,7 @@ class SynologyBackend:
                     additional = item.get("additional")
                     extra = additional if isinstance(additional, dict) else {}
                     real_path = extra.get("real_path")
-                    symlink = isinstance(real_path, str) and self._canonical(real_path) != path
+                    symlink = self._is_symlink(path, real_path)
                     folder = SynologyFolder(
                         path=path,
                         name=name[:200],
@@ -500,7 +500,7 @@ class SynologyBackend:
             path=canonical,
             name=str(item.get("name") or PurePosixPath(canonical).name)[:200],
             writable=self._is_writable(extra),
-            symlink=isinstance(real_path, str) and self._canonical(real_path) != canonical,
+            symlink=self._is_symlink(canonical, real_path),
             directory=item.get("isdir") is True,
         )
 
@@ -526,7 +526,29 @@ class SynologyBackend:
     @staticmethod
     def _is_writable(additional: dict[str, Any]) -> bool:
         perm = additional.get("perm")
-        return isinstance(perm, dict) and perm.get("write") is True
+        if not isinstance(perm, dict):
+            return False
+        # DSM 7 reports effective rights under perm.acl; keep the flat form for older payloads.
+        acl = perm.get("acl")
+        if isinstance(acl, dict):
+            return acl.get("write") is True
+        return perm.get("write") is True
+
+    @classmethod
+    def _is_symlink(cls, path: str, real_path: object) -> bool:
+        """Detect a redirected folder without assuming share names equal volume paths.
+
+        DSM maps the first path component to a share volume (for `/home` it is
+        `/volume1/homes/<user>`), so only the share-relative remainder must match the tail of
+        `real_path`.
+        """
+        if not isinstance(real_path, str):
+            return False
+        relative = PurePosixPath(path).parts[2:]
+        real_parts = PurePosixPath(cls._canonical(real_path)).parts[1:]
+        if not relative:
+            return False
+        return tuple(real_parts[-len(relative) :]) != relative
 
     async def create_share_link(self, path: str) -> str:
         response = await self._post(
