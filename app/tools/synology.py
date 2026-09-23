@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
@@ -735,10 +734,14 @@ class SynologyBackend:
             yield (
                 f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
             ).encode()
-        encoded_name = quote(filename, safe="._- ")
+        # File Station stores the multipart filename verbatim, so percent-encoding would become
+        # part of the name; send raw UTF-8 inside an escaped quoted-string instead.
+        if any(character in filename for character in "\r\n\x00"):
+            raise SynologyPathError("Upload filename contains control characters")
+        quoted_name = filename.replace("\\", "\\\\").replace('"', '\\"')
         yield (
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-            f'filename="{encoded_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            f'filename="{quoted_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
         ).encode()
         async for chunk in stream:
             yield chunk

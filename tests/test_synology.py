@@ -552,3 +552,21 @@ async def test_file_size_treats_dsm7_per_item_not_found_as_missing() -> None:
                 )
             )
             assert await backend._file_size("/base/.missing.json") is None  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_upload_sends_cyrillic_filename_as_raw_utf8() -> None:
+    name = "2026-09-24_Дмитрий_Голуб_Java-разработчик_@Т-банк_general_interview.webm"
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(return_value=httpx.Response(404))
+            route = router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
+            await backend.upload(
+                "/base", name, chunks(), 10, recording_id="r-1", content_identity="md5-1"
+            )
+
+    bodies = [call.request.content for call in route.calls]
+    assert f'filename="{name}"'.encode() in bodies[-1]
+    assert f'filename=".{name}.recording-agent-owner.json"'.encode() in bodies[0]
+    assert b"%D0" not in b"".join(bodies)
