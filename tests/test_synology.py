@@ -280,6 +280,18 @@ async def test_upload_refuses_existing_destination() -> None:
                 )
 
 
+def _marker_exists() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {
+                "files": [{"path": "/base/.video.webm.recording-agent-owner.json", "size": 70}]
+            },
+        },
+    )
+
+
 @pytest.mark.anyio
 async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner() -> None:
     marker = b'{"content_identity":"md5-1","recording_id":"recording-1","size":10,"v":1}'
@@ -288,6 +300,7 @@ async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner
         with respx.mock(assert_all_called=True) as router:
             router.get(URL).mock(
                 side_effect=[
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(
                         200,
@@ -316,7 +329,13 @@ async def test_upload_rejects_existing_destination_owned_by_another_recording() 
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
         with respx.mock(assert_all_called=True) as router:
-            router.get(URL).mock(return_value=httpx.Response(200, content=marker))
+            router.get(URL).mock(
+                side_effect=[
+                    _marker_exists(),
+                    httpx.Response(200, content=marker),
+                    _marker_exists(),
+                ]
+            )
 
             with pytest.raises(StorageCollisionError, match="different ownership"):
                 await backend.upload(
@@ -337,8 +356,10 @@ async def test_upload_recovers_timeout_after_synology_accepted_exact_owned_file(
         with respx.mock(assert_all_called=True) as router:
             router.get(URL).mock(
                 side_effect=[
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(404),
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(
                         200,
@@ -487,3 +508,30 @@ def test_writable_reads_dsm7_acl_and_legacy_flat_perm() -> None:
     assert not SynologyBackend._is_writable({"perm": {"acl": {"write": False}, "posix": 777}})
     assert SynologyBackend._is_writable({"perm": {"write": True}})
     assert not SynologyBackend._is_writable({})
+
+
+@pytest.mark.anyio
+async def test_missing_owner_marker_is_detected_without_download_behind_proxy() -> None:
+    """A DSM reverse proxy answers Download of a missing file with HTML 502."""
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=False) as router:
+            info = router.get(URL, params={"method": "getinfo"}).mock(
+                return_value=httpx.Response(200, json={"success": False, "error": {"code": 408}})
+            )
+            download = router.get(URL, params={"method": "download"}).mock(
+                return_value=httpx.Response(502, text="<!DOCTYPE html>")
+            )
+            router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
+
+    assert path == "/base/video.webm"
+    assert download.call_count == 0
+    assert info.call_count >= 2

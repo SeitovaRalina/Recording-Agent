@@ -420,6 +420,10 @@ class SynologyBackend:
 
     async def _read_owner_marker(self, folder: str, filename: str) -> dict[str, object] | None:
         marker_path = f"{folder.rstrip('/')}/{self._owner_marker_name(filename)}"
+        # A reverse proxy in front of DSM may turn Download's "not found" into an HTML 502, so
+        # existence is established through List.getinfo before the marker body is read.
+        if await self._file_size(marker_path) is None:
+            return None
         response = await self._get(
             "/webapi/entry.cgi",
             params={
