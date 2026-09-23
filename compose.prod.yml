@@ -74,11 +74,13 @@ services:
       # RECORDING_AGENT_ENV_FILE; its dedicated env file belongs to notion-proxy.
       NOTION_PROXY_URL: http://notion-proxy:7890
       TEST_MODE_ENABLED: "false"
-      SCHEDULER_ENABLED: "false"
-      YANDEX_SOURCE_MUTATION_ENABLED: "false"
-      NOTION_WRITES_ENABLED: "false"
-      MATTERMOST_DELIVERY_ENABLED: "false"
       PIPELINE_TRACE_ENABLED: "false"
+      # Effect flags are enabled only by the root-owned env file passed as `--env-file`;
+      # a missing value stays disabled.
+      SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-false}"
+      YANDEX_SOURCE_MUTATION_ENABLED: "${YANDEX_SOURCE_MUTATION_ENABLED:-false}"
+      NOTION_WRITES_ENABLED: "${NOTION_WRITES_ENABLED:-false}"
+      MATTERMOST_DELIVERY_ENABLED: "${MATTERMOST_DELIVERY_ENABLED:-false}"
     ports:
       - "127.0.0.1:${APP_PORT:-18000}:8000"
     depends_on:
