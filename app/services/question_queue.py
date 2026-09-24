@@ -30,6 +30,24 @@ QuestionAction = Literal["resolve", "ignore"]
 SETTLED_RECORDING_STATUSES = (RecordingStatus.COMPLETED, RecordingStatus.IGNORED)
 
 
+_QUESTION_LABELS = {
+    "low_confidence": "подтвердите событие календаря",
+    "no_compatible_event": "событие календаря не найдено — это собеседование?",
+    "multiple_compatible_events": "выберите событие календаря",
+    "multiple_eligible_events": "выберите событие календаря",
+    "unmonitored_only": "событие найдено только в неотслеживаемом календаре",
+    "unmonitored_collision": "похожее событие есть в неотслеживаемом календаре",
+    "no_candidate_name_in_event": "в названии события нет имени кандидата",
+    "no_candidate_found": "кандидат не найден в Notion",
+    "multiple_candidates": "выберите карточку кандидата",
+    "candidate_choices_exceed_limit": "слишком много похожих карточек в Notion",
+    "multiple_spots": "выберите проект (📍 Spots)",
+    "storage_destination_required": "выберите папку в Synology",
+    "storage_key_collision": "в папке уже есть файл с таким именем",
+    "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
+    "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
+}
+
 _FAILED_STEP_LABELS = {
     "calendar_matching": "сопоставление с календарём",
     "candidate_matching": "поиск карточки в Notion",
@@ -291,7 +309,10 @@ class QuestionQueueService:
             )
             session.add(digest)
             await session.flush()
-        lines = ["Recording Agent questions:"]
+        lines = [
+            f"Вопросы по записям собеседований: {len(questions)}. "
+            "Ответьте Миле одним сообщением, например: «1 — 2, 2 — пропусти»."
+        ]
         for number, question in enumerate(questions, start=1):
             question.digest_id = digest.id
             self._reviews.rotate_digest_capability(question, issued_at=now)
@@ -309,7 +330,8 @@ class QuestionQueueService:
 
     @staticmethod
     def _render_question(number: int, question: ManualReview) -> list[str]:
-        lines = [f"{number}. {question.recording.disk_filename}: {question.question_type}"]
+        label = _QUESTION_LABELS.get(question.question_type, question.question_type)
+        lines = [f"{number}. {question.recording.disk_filename}: {label}"]
         choices = question.question_context.get("choices")
         if not isinstance(choices, list):
             return lines

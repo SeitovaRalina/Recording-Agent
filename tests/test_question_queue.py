@@ -2,7 +2,7 @@ import hashlib
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -176,6 +176,8 @@ async def test_digest_renders_bounded_notion_differentiators(session: AsyncSessi
 
     assert message is not None
     rendered = str(message.payload["message"])
+    assert rendered.startswith("Вопросы по записям собеседований: 1.")
+    assert "Recording Agent questions" not in rendered
     assert "https://notion.example/interview-1" in rendered
     assert "Spots: Backend" in rendered
     assert "https://notion.example/spot-1" in rendered
@@ -715,3 +717,14 @@ async def test_terminal_sweep_renders_routes_and_skips_already_notified(
     assert message.startswith("✅ Запись рабочей встречи сохранена")
     assert "Папка: Recruiting-NE / 2. Interviews / BizDev" in message
     assert item.mattermost_channel_id == "dm"
+
+
+def test_digest_question_uses_recruiter_label_not_internal_code() -> None:
+    question = MagicMock()
+    question.recording.disk_filename = "interview.webm"
+    question.question_type = "storage_destination_required"
+    question.question_context = {}
+
+    lines = QuestionQueueService._render_question(1, question)
+
+    assert lines == ["1. interview.webm: выберите папку в Synology"]
