@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 import traceback
@@ -94,6 +95,7 @@ class RouteCtx:
         self.conclusions: list[str] = []
         self.error: str = ""
         self._stopped: set[str] = set()
+        self._env_restore: dict[str, str] = {}
         self.dir = REPORTS / run_id
         self.dir.mkdir(parents=True, exist_ok=True)
         self.attempt = 1
@@ -138,12 +140,13 @@ class RouteCtx:
         file_offset_s: int = 60,
         expected_folder: str | None = None,
         duplicate_event: bool = False,
+        file_title: str | None = None,
     ) -> Interview:
         candidate = self.person(candidate)
         start = start_utc or self.unique_minute(len(self.interviews) * 3)
         summary = summary or f"Собеседование ({candidate})"
         rec_start = (start + timedelta(seconds=file_offset_s)).astimezone(MSK)
-        name = disk_name or f"{rec_start:%Y-%m-%d_%H%M%S}_{summary}.webm"
+        name = disk_name or f"{rec_start:%Y-%m-%d_%H%M%S}_{file_title or summary}.webm"
         item = Interview(candidate, summary, name, start, expected_folder=expected_folder)
         if create_card:
             item.card = remote.stand(
@@ -286,10 +289,10 @@ class RouteCtx:
         terminal = [
             o
             for o in state["outbox"]
-            if str(o.get("dedupe_key", "")).startswith(f"terminal:{rec['id']}:")
+            if str(o.get("dedupe_key", "")).startswith(f"terminal:{rec['id']}:completed:")
         ]
         self.check(
-            f"{item.candidate}: одно итоговое уведомление бэкенда",
+            f"{item.candidate}: одно уведомление бэкенда «готово»",
             "1 × sent",
             f"{len(terminal)} × {','.join(sorted({o['status'] for o in terminal})) or '—'}",
             ok=len(terminal) == 1 and terminal[0]["status"] == "sent",
@@ -317,19 +320,79 @@ class RouteCtx:
         else:
             self._stopped.discard(name)
 
+    # ------------------------------------------------------------ stand switches
+
+    def backend_env(self, name: str, value: str) -> None:
+        """Temporarily set one backend.env flag and recreate the backend on the SAME image.
+
+        The original value is restored in teardown. Only allow-listed flags.
+        """
+        allowed = {
+            "AUTONOMOUS_ROUTING_ENABLED",
+            "YANDEX_SOURCE_MUTATION_ENABLED",
+            "SUMMARY_LOCAL_TIME",
+        }
+        if name not in allowed:
+            raise ValueError(f"flag {name} is not allowed")
+        current = remote.bash(
+            f"sed -n 's/^{name}=//p' /etc/recording-agent/backend.env | tail -1", check=False
+        ).strip()
+        if name not in self._env_restore:
+            self._env_restore[name] = current
+        remote.bash(_SET_ENV.format(name=name, value=value), timeout=300)
+        self.stand_notes.append(f"`{name}={value}` (было `{current or '—'}`), backend пересоздан")
+
+    def skill_cli(self, *args: str) -> dict[str, Any]:
+        """Run the skill CLI on the server without an LLM turn (as a scheduled scan would)."""
+        quoted = " ".join(f"'{a}'" for a in args)
+        out = remote.bash(
+            "set -a; . /etc/openclaw/gateway.env; set +a; "
+            "cd /srv/openclaw/workspaces/recordings-saver/skills/recording-agent && "
+            "runuser -u openclaw -- env RECORDING_AGENT_BACKEND_URL=$RECORDING_AGENT_BACKEND_URL "
+            "RECORDING_AGENT_BACKEND_SECRET=$RECORDING_AGENT_BACKEND_SECRET "
+            f"python3 scripts/recording_agent.py {quoted}",
+            timeout=400,
+            check=False,
+        )
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            return {"ok": False, "message": out[-500:]}
+
+    def cron_run(self, name: str = "recordings-saver-rout") -> str:
+        """Force one run of the Gateway cron job (the autonomous routing dispatcher)."""
+        return remote.bash(
+            mila.OC
+            + f"ID=$(oc cron list 2>/dev/null | awk '/{name}/ {{print $1; exit}}'); "
+            + 'oc cron run "$ID" 2>&1 | tail -3',
+            timeout=300,
+            check=False,
+        )
+
+    def syno_exists(self, paths: list[str]) -> dict[str, bool]:
+        return remote.stand("syno_exists", {"paths": [p for p in paths if p]})
+
+    def check_completed_after_retry(
+        self, state: dict[str, Any], item: Interview, uploaded_before: str | None
+    ) -> None:
+        self.check_completed(state, item)
+        rec = self.recording(state, item) or {}
+        if uploaded_before:
+            self.check(
+                f"{item.candidate}: повтор использовал уже загруженный файл (F2)",
+                uploaded_before,
+                rec.get("synology_file_path"),
+            )
+
     def open_reviews(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         return [r for r in state["reviews"] if r["status"] == "pending"]
 
     @staticmethod
     def cli(turn: mila.Turn) -> list[str]:
-        """Skill CLI subcommands Mila ran in this turn, in order."""
-        out = []
+        """Skill CLI subcommands Mila ran in this turn, in order (chained `&&` calls included)."""
+        out: list[str] = []
         for call in turn.tool_calls:
-            parts = call.command.split()
-            if "scripts/recording_agent.py" in parts:
-                i = parts.index("scripts/recording_agent.py")
-                if i + 1 < len(parts):
-                    out.append(parts[i + 1])
+            out.extend(re.findall(r"scripts/recording_agent\.py\s+([a-z][a-z-]*)", call.command))
         return out
 
     def check_cli(
@@ -389,7 +452,15 @@ class RouteCtx:
     def teardown(self) -> None:
         for name in list(self._stopped):
             self.container("start", name)
-        urls = [e["url"] for i in self.interviews for e in ([i.event] if i.event else []) + i.extra_events]
+        for name, value in self._env_restore.items():
+            remote.bash(_SET_ENV.format(name=name, value=value), timeout=300)
+            self.stand_notes.append(f"`{name}` возвращён в `{value or '—'}`")
+        self._env_restore.clear()
+        urls = [
+            e["url"]
+            for i in self.interviews
+            for e in ([i.event] if i.event else []) + i.extra_events
+        ]
         if urls:
             try:
                 res = remote.stand("calendar_delete", {"urls": urls})
@@ -591,6 +662,21 @@ class RouteCtx:
             if a not in ("удалены", "ошибка")
         ]
         path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+_SET_ENV = r"""
+set -e
+F=/etc/recording-agent/backend.env
+[ -f /root/backend.env.e2e-backup ] || cp -a $F /root/backend.env.e2e-backup
+V='{value}'
+if [ -z "$V" ]; then sed -i '/^{name}=/d' $F
+elif grep -q '^{name}=' $F; then sed -i "s|^{name}=.*|{name}=$V|" $F; else echo "{name}=$V" >> $F; fi
+IMG=$(docker inspect -f '{{{{.Config.Image}}}}' recording-agent-backend-1)
+cd /opt/recording-agent/hotfix-abe9942
+RECORDING_AGENT_IMAGE=$IMG docker compose -p recording-agent -f compose.prod.yml --env-file $F up -d --no-deps --force-recreate backend >/dev/null 2>&1
+for i in $(seq 1 40); do s=$(docker inspect -f '{{{{.State.Health.Status}}}}' recording-agent-backend-1 || true); [ "$s" = healthy ] && break; sleep 3; done
+echo health=$s
+"""
 
 
 def run_route(ctx: RouteCtx, body: Callable[[RouteCtx], None]) -> Path:
