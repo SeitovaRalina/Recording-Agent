@@ -106,6 +106,9 @@ class RouteCtx:
             self.attempt += 1
             self.session += f"-a{self.attempt}"
         (self.dir / "artifacts" / route_id).mkdir(parents=True, exist_ok=True)
+        # Test candidates get a per-run/route/attempt tag so leftovers of earlier attempts never
+        # become namesakes (they stay in Notion until the batch cleanup).
+        self.tag = f"{route_id}-{run_id[5:].replace('-', '')}a{self.attempt}"
         known = self.dir / "defects.json"
         if known.exists():
             for d in json.loads(known.read_text(encoding="utf-8")).get(route_id, []):
@@ -133,6 +136,7 @@ class RouteCtx:
         file_offset_s: int = 60,
         expected_folder: str | None = None,
     ) -> Interview:
+        candidate = self.person(candidate)
         start = start_utc or self.unique_minute(len(self.interviews) * 3)
         summary = summary or f"Собеседование ({candidate})"
         rec_start = (start + timedelta(seconds=file_offset_s)).astimezone(MSK)
@@ -182,6 +186,24 @@ class RouteCtx:
             self.seed_rows.append(("Ожидаемая папка Synology", f"`{expected_folder}`"))
         self.interviews.append(item)
         return item
+
+    def person(self, name: str) -> str:
+        """Unique test candidate name: `E2E Олег Тестов` -> `E2E Олег Тестов R01-0924_1a2`."""
+        return f"{name} {self.tag}" if name.startswith("E2E ") and self.tag not in name else name
+
+    def card(self, name: str, *, spot_ids: list[str] | None = None) -> dict[str, Any]:
+        """Extra Notion card without a recording (namesakes, reassignment targets)."""
+        name = self.person(name)
+        card = remote.stand("notion_card_create", {"name": name, "spot_ids": spot_ids or []})
+        self.register_cleanup("Notion-карточка", card["url"], "в корзину Notion")
+        self.seed_rows.append(
+            (
+                "Карточка Notion (без записи)",
+                f"`{name}`, 📍 Spots: `{', '.join(s['title'] for s in card['spots']) or '—'}`, "
+                f"{card['url']}",
+            )
+        )
+        return card
 
     def register_cleanup(self, kind: str, ref: str, action: str) -> None:
         self.cleanup_rows.append((kind, ref, action))
@@ -281,6 +303,65 @@ class RouteCtx:
 
     def open_reviews(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         return [r for r in state["reviews"] if r["status"] == "pending"]
+
+    @staticmethod
+    def cli(turn: mila.Turn) -> list[str]:
+        """Skill CLI subcommands Mila ran in this turn, in order."""
+        out = []
+        for call in turn.tool_calls:
+            parts = call.command.split()
+            if "scripts/recording_agent.py" in parts:
+                i = parts.index("scripts/recording_agent.py")
+                if i + 1 < len(parts):
+                    out.append(parts[i + 1])
+        return out
+
+    def check_cli(
+        self,
+        turn: mila.Turn,
+        *,
+        must: tuple[str, ...] = (),
+        must_not: tuple[str, ...] = (),
+    ) -> None:
+        ran = self.cli(turn)
+        shown = " → ".join(ran) or "—"
+        if must:
+            self.check(
+                f"Мила вызвала {', '.join(must)}",
+                " + ".join(must),
+                shown,
+                ok=all(m in ran for m in must),
+            )
+        for name in must_not:
+            self.check(f"Мила не вызывала {name}", f"без {name}", shown, ok=name not in ran)
+        # I7: only SKILL.md reads, skill CLI calls and polling of a still-running exec.
+        stray = [
+            c.command[:80]
+            for c in turn.tool_calls
+            if "recording_agent.py" not in c.command
+            and "SKILL.md" not in c.command
+            and "references/" not in c.command
+            and '"action": "poll"' not in c.command
+            and '"action": "log"' not in c.command
+        ]
+        self.check(
+            "Мила не лезет в файлы воркспейса (I7)",
+            "только SKILL.md/references и CLI навыка",
+            "; ".join(stray) or "ок",
+            ok=not stray,
+        )
+
+    def check_waiting(self, state: dict[str, Any], item: Interview, reason: str | None) -> None:
+        """Recording is parked on a question: nothing stored yet."""
+        rec = self.recording(state, item) or {}
+        self.check(
+            f"{item.candidate}: ждёт ответа рекрутера",
+            f"manual_review_required ({reason or 'любой'})",
+            f"{rec.get('status')} ({rec.get('manual_review_reason')})",
+            ok=rec.get("status") == "manual_review_required"
+            and (reason is None or rec.get("manual_review_reason") == reason),
+        )
+        self.check(f"{item.candidate}: файл ещё не загружен", None, rec.get("synology_file_path"))
 
     def defect(self, severity: str, description: str) -> None:
         self.defects.append(

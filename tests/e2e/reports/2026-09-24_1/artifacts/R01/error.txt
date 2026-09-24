@@ -1,0 +1,21 @@
+Traceback (most recent call last):
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 580, in run_route
+    body(ctx)
+    ~~~~^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r01.py", line 31, in body
+    state = ctx.wait_for(lambda s: terminal_sent(s, 1), timeout=120)
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 247, in wait_for
+    state = self.observe(notion=False)
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 233, in observe
+    return remote.stand(
+           ~~~~~~~~~~~~^
+        "observe",
+        ^^^^^^^^^^
+    ...<5 lines>...
+        },
+        ^^
+    )
+    ^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\remote.py", line 69, in stand
+    raise RemoteError(f"stand {command}: {result['error']}")
+tests.e2e.lib.remote.RemoteError: stand observe: StorageCollisionError: Synology destination exists but its size cannot be verified: /home/Recruiting-E/2. Interviews external/Python/2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm

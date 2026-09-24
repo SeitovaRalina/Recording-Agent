@@ -1,6 +1,6 @@
 # R01 — стенограмма
 
-## Ход 1 (50 с)
+## Ход 1 (100 с)
 
 **Рекрутер:**
 
@@ -9,7 +9,7 @@
 **Команды:**
 
 ```text
-{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 240}
+{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 200}
 ```
 
 <details><summary>ответ</summary>
@@ -64,9 +64,8 @@ fails, report its JSON `message`.
 `scan`, `answer`, `route-interview`, `non-interview`, `reroute-recording`,
 `notion-reassignment-confirm` and `cleanup-confirm` can take several minutes (Disk, calendar,
 Notion and Synology are called synchronously). Run them with an exec timeout of at least 320
-seconds. If exec reports that the
-command is still running, poll it until it exits; never tell the recruiter that something failed
-while the command is still running.
+seconds. If exec reports that the command is still running, poll it until it exits; never tell the
+recruiter that something failed while the command is still running.
 
 ## Finish the job in one turn
 
@@ -82,22 +81,103 @@ After `scan` (and whenever the recruiter asks what is pending):
 </details>
 
 ```text
-python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key e15144fd-7107-47aa-9133-cf0be0a0f001
+python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key d935ee01-146e-338f-ccea-0ab813000001
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 0.\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 1.\n- 2026-09-24_041039_Собеседование (E2E Олег Тестов).webm; новая запись; статус: ошибка обработки; ошибка: Notion query transport failed","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":0,"without_review":0,"pending":0,"failed":0,"failed_recordings":1,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"e04bae89-3f51-4466-8349-031a5f3631c3","filename":"2026-09-24_041039_Собеседование (E2E Олег Тестов).webm","candidate_name":null,"status":"failed","is_new":true,"requires_review":false,"review_reason":null,"generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":"Notion query transport failed"}]}}
+{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 1.\n- 2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm; кандидат: E2E Олег Тестов R01-0924_1a5; новая запись; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":1,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"120a7334-54c0-4396-ade1-541862d9b6ac","filename":"2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm","candidate_name":"E2E Олег Тестов R01-0924_1a5","status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"storage_destination_required","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}]}}
+```
+
+</details>
+
+```text
+python3 scripts/recording_agent.py destinations --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
+```
+
+<details><summary>ответ</summary>
+
+```text
+{"ok":true,"message":"Доступные папки в Synology: 51.\n1. /home/Recruiting-NE/2. Interviews\n2. /home/Recruiting-NE/2. Interviews/BizDev\n3. /home/Recruiting-NE/2. Interviews/Delivery Manager\n4. /home/Recruiting-NE/2. Interviews/DevFest 2025 (оргсостав)\n5. /home/Recruiting-NE/2. Interviews/Labs 2025 (оргсостав)\n6. /home/Recruiting-NE/2. Interviews/Outreach Manager\n7. /home/Recruiting-NE/2. Interviews/Revenue Manager\n8. /home/Recruiting-NE/2. Interviews/Администратор Академии\n9. /home/Recruiting-NE/2. Interviews/Ассистент в отдел продаж\n10. /home/Recruiting-NE/2. Interviews/Бизнес ассистент\n11. /home/Recruiting-NE/2. Interviews/Бухгалтер в единственном лице\n12. /home/Recruiting-NE/2. Interviews/Волонтёры DevFest\n13. /home/Recruiting-NE/2. Interviews/Дизайнер\n14. /home/Recruiting-NE/2. Interviews/ИТ_рекрутер\n15. /home/Recruiting-NE/2. Interviews/ИТ_ресечер\n16. /home/Recruiting-NE/2. Interviews/Коммерский директор\n17. /home/Recruiting-NE/2. Interviews/Копирайтер\n18. /home/Recruiting-NE/2. Interviews/Менеджер по персоналу\n19. /home/Recruiting-NE/2. Interviews/Менеджер по продажам\n20. /home/Recruiting-NE/2. Interviews/Менеджер проектов\n21. /home/Recruiting-NE/2. Interviews/Офис-менеджер\n22. /home/Recruiting-NE/2. Interviews/Руководитель отдела продаж\n23. /home/Recruiting-NE/2. Interviews/СЕО Ventures\n24. /home/Recruiting-NE/2. Interviews/Системный Администратор\n25. /home/Recruiting-NE/2. Interviews/Специалист по договорам и оплатам\n26. /home/Recruiting-NE/2. Interviews/Специалист по кадрам\n27. /home/Recruiting-E/2. Interviews external\n28. /home/Recruiting-E/2. Interviews external/Aldo\n29. /home/Recruiting-E/2. Interviews external/Analyst\n30. /home/Recruiting-E/2. Interviews external/Android\n31. /home/Recruiting-E/2. Interviews external/Backend\n32. /home/Recruiting-E/2. Interviews external/Flutter\n33. /home/Recruiting-E/2. Interviews external/Frontend\n34. /home/Recruiting-E/2. Interviews external/Fullstack\n35. /home/Recruiting-E/2. Interviews external/IOS\n36. /home/Recruiting-E/2. Interviews external/Python\n37. /home/Recruiting-E/2. Interviews external/QA\n38. /home/Recruiting-E/2. Interviews external/Support Engineer\n39. /home/Recruiting-E/2. Interviews external/Обмен записями с Recruiting-NB\n40. /home/Recruiting-E/2. Interviews external/Aldo/2022\n41. /home/Recruiting-E/2. Interviews external/IOS/Veriflix + Heramed, iOS Dev, Sep '22\n42. /home/Recruiting-E/3. Interviews internal\n43. /home/Recruiting-E/3. Interviews internal/Analyst\n44. /home/Recruiting-E/3. Interviews internal/Android\n45. /home/Recruiting-E/3. Interviews internal/DevOps\n46. /home/Recruiting-E/3. Interviews internal/Flutter\n47. /home/Recruiting-E/3. Interviews internal/iOS\n48. /home/Recruiting-E/3. Interviews internal/QA manual\n49. /home/Recruiting-E/3. Interviews internal/Uncategorised\n50. /home/Recruiting-E/3. Interviews internal/Web\n51. /home/Recruiting-E/3. Interviews internal/Android/client","result":{"items":[{"id":"9ace2fdb-d1bc-4619
+```
+
+</details>
+
+```text
+python3 scripts/recording_agent.py route-interview --help
+```
+
+<details><summary>ответ</summary>
+
+```text
+usage: recording_agent.py route-interview [-h]
+                                          --recruiter-user-id RECRUITER_USER_ID
+                                          --mattermost-dm-channel-id MATTERMOST_DM_CHANNEL_ID
+                                          --recording-id RECORDING_ID
+                                          --destination-id DESTINATION_ID
+                                          --expected-version EXPECTED_VERSION
+                                          --idempotency-key IDEMPOTENCY_KEY
+
+options:
+  -h, --help            show this help message and exit
+  --recruiter-user-id RECRUITER_USER_ID
+  --mattermost-dm-channel-id MATTERMOST_DM_CHANNEL_ID
+  --recording-id RECORDING_ID
+  --destination-id DESTINATION_ID
+  --expected-version EXPECTED_VERSION
+  --idempotency-key IDEMPOTENCY_KEY
+```
+
+</details>
+
+```text
+python3 scripts/recording_agent.py status --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --recording-id 120a7334-54c0-4396-ade1-541862d9b6ac
+```
+
+<details><summary>ответ</summary>
+
+```text
+{"ok":true,"message":"Найдено записей: 1.\n- 2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm; кандидат: E2E Олег Тестов R01-0924_1a5; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","result":{"items":[{"id":"120a7334-54c0-4396-ade1-541862d9b6ac","filename":"2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm","candidate_name":"E2E Олег Тестов R01-0924_1a5","status":"manual_review_required","requires_review":true,"review_reason":"storage_destination_required","version":1,"found_at":"2026-09-24T01:53:41.446257+00:00","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}],"count":1}}
+```
+
+</details>
+
+```text
+python3 scripts/recording_agent.py route-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id 120a7334-54c0-4396-ade1-541862d9b6ac --destination-id ce009880-84e7-48b7-8bc4-5351f716ff25 --expected-version 1 --idempotency-key d935ee01-146e-338f-ccea-0ab813000002
+```
+
+<details><summary>ответ</summary>
+
+```text
+Command still running (session faint-cloud, pid 1133661). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.
+```
+
+</details>
+
+```text
+{"action": "poll", "sessionId": "faint-cloud", "data": "", "keys": [], "hex": [], "literal": "", "text": "", "bracketed": false, "eof": false, "offset": 0, "limit": 0, "timeout": 30000}
+```
+
+<details><summary>ответ</summary>
+
+```text
+{"ok":true,"message":"Готово: запись собеседования (E2E Олег Тестов R01-0924_1a5) сохранена.\nКарточка в Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1\nЗапись: https://gofile.me/7g8zN/cj9V8nkgh","result":{"recording_id":"120a7334-54c0-4396-ade1-541862d9b6ac","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/cj9V8nkgh","notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","candidate_name":"E2E Олег Тестов R01-0924_1a5","replayed":false}}
+
+
+Process exited with code 0.
 ```
 
 </details>
 
 **Мила:**
 
-> Проверка завершена: найдена **1 новая запись** — «Собеседование (E2E Олег Тестов)».
+> Проверка завершена: найдена и обработана 1 новая запись.
 > 
-> Она не обработалась из‑за ошибки соединения при запросе к Notion. Уточнений от вас сейчас не требуется; после восстановления доступа к Notion потребуется повторная проверка.
+> Собеседование с **E2E Олегом Тестовым R01-0924_1a5** для позиции Python-разработчика @Т-банк сохранено. Результат также виден в карточке Notion:
+> 
+> - [Карточка Notion](https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1)
+> - [Запись собеседования](https://gofile.me/7g8zN/cj9V8nkgh)
 
-**Судья:** 10/12 — Мила корректно отчиталась об ошибке бэкенда Notion и не нарушила safety, но не довела сценарий R01 до конца — не вызвала destinations/route-interview и не предложила повторный запуск.
+**Судья:** 12/12 — Мила корректно выполнила сценарий R01 за один ход: scan → destinations → route-interview в папку Python без вопросов рекрутеру, сообщила кандидата, ссылку на Notion и ссылку на запись. Дополнительные вызовы --help и status незначительны и не помешали завершению работы.
 
