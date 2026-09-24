@@ -316,3 +316,32 @@ def test_review_item_hides_raw_backend_error_text() -> None:
 
     assert "нужно выбрать папку в Synology" in message
     assert "allowed Synology inventory" not in message
+
+
+def test_reassignment_messages_are_russian_and_name_the_target() -> None:
+    empty = CLIENT._message_for("notion-reassignment-resolve", {"items": []})
+    found = CLIENT._message_for(
+        "notion-reassignment-resolve",
+        {
+            "items": [
+                {"title": "Zoya", "url": "https://app.notion.com/p/x", "recording_present": False}
+            ]
+        },
+    )
+    proposal = CLIENT._message_for(
+        "notion-reassignment-propose",
+        {"target": {"title": "Zoya", "url": "https://app.notion.com/p/x"}, "capability": "secret"},
+    )
+
+    assert "не найдена" in empty and "папок" not in empty
+    assert "Zoya — https://app.notion.com/p/x" in found
+    assert "нужно ваше подтверждение" in proposal and "secret" not in proposal
+
+
+def test_conflict_error_reports_backend_reason() -> None:
+    message = CLIENT._error_message(
+        "Backend rejected request (HTTP 409): Recording version is stale"
+    )
+
+    assert "Recording version is stale" in message
+    assert "review" not in message

@@ -846,16 +846,35 @@ def _message_for(command: str, result: Any) -> str:
     if command == "reroute-recording":
         return f"Запись перенесена. Новая ссылка: {result.get('safe_link') or 'пока недоступна'}."
     if command == "notion-reassignment-resolve":
-        return _destinations_message({"items": result.get("items", [])})
+        return _reassignment_targets_message(result)
     if command == "notion-reassignment-propose":
-        return "Confirm the displayed Notion reassignment before it changes either card."
+        target = result.get("target") if isinstance(result.get("target"), dict) else {}
+        return (
+            f"Запись будет привязана к карточке «{str(target.get('title') or '')[:200]}»: "
+            f"{target.get('url') or ''}\nПока ничего не изменено — нужно ваше подтверждение."
+        )
     if command == "notion-reassignment-confirm":
-        return "Notion recording link reassigned."
+        return (
+            "Готово: ссылка на запись перенесена в новую карточку Notion, из старой карточки "
+            f"она убрана. Запись: {result.get('safe_link') or 'ссылка без изменений'}."
+        )
     if command == "cleanup-preview":
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":
         return _cleanup_confirm_message(result)
     return _mutation_message(command, result)
+
+
+def _reassignment_targets_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return "Карточка по этой ссылке или имени не найдена в базе кандидатов."
+    lines = [f"Найдено карточек: {len(items)}."]
+    for number, item in enumerate(items[:10], start=1):
+        busy = " (в карточке уже есть запись)" if item.get("recording_present") else ""
+        title = str(item.get("title") or "")[:200]
+        lines.append(f"{number}. {title} — {item.get('url') or ''}{busy}")
+    return "\n".join(lines)
 
 
 def _error_message(error: str) -> str:
@@ -864,9 +883,10 @@ def _error_message(error: str) -> str:
     if "HTTP 404" in error:
         return "Запрошенная запись или review недоступны либо уже не существуют."
     if "HTTP 409" in error:
+        detail = error.split(":", 1)[1].strip() if ":" in error else ""
         return (
-            "Данные review уже изменились или запрос был повторён с другим контекстом. "
-            "Обновите статус."
+            f"Backend отклонил операцию: {detail[:300] or 'данные изменились'}. "
+            "Обновите статус и повторите."
         )
     if "HTTP 410" in error:
         return "Срок действия review истёк. Запросите актуальный статус записи."
