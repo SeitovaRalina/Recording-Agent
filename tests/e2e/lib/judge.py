@@ -112,7 +112,7 @@ def _judge_once(
     scenario: str, expectation: str, turn: Turn, history: list[Turn], checks: list[Check]
 ) -> Verdict:
     calls = [
-        {"command": c.command[:600], "backend_result": c.result[:2500]} for c in turn.tool_calls
+        {"command": c.command[:600], "backend_result": c.result[:12000]} for c in turn.tool_calls
     ]
     context = [{"recruiter": t.user, "mila": t.reply[:1500]} for t in history]
     user = json.dumps(

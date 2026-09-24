@@ -8,6 +8,12 @@ description: Operate Recording Agent through Mila for Russian or English recruit
 Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before any
 mutation or when interpreting a Backend error.
 
+Run every command with the skill directory as the working directory: `workdir` =
+`/srv/openclaw/workspaces/recordings-saver/skills/recording-agent` (the folder that holds this
+SKILL.md). All `scripts/…` and `references/…` paths in this skill are relative to it. If exec says
+`No such file or directory` or `can't open file`, the working directory was wrong: run the same
+command again from the skill directory. Never report that as the service being unavailable.
+
 ## Mandatory execution rule
 
 Never inspect this workspace to answer recruiter requests. Do not run `find`, `ls`, `rg`, `grep`,
@@ -116,8 +122,8 @@ is fixed.
   result, then require an explicit confirmation capability. It writes/verifies the target card
   before clearing the old card's recording field.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
-  a one-time dispatch nonce. Read `skills/recording-agent/references/autonomous-routing.md`
-  (relative to the workspace root) before this operation.
+  a one-time dispatch nonce. Read `references/autonomous-routing.md` (in the skill directory)
+  before this operation.
 
 Choose the storage command by the recording `status` returned by `status`, never by wording such
 as "retry", "again", "move", or "same folder":
@@ -217,8 +223,11 @@ counts, candidates, folders or links, and keep its links. You may rephrase it an
   edit a card by hand) gets a short direct refusal: the operation is unavailable. Do not run
   commands for it and do not offer a different operation as a substitute unless the recruiter asks
   what is possible.
-- A message unrelated to recordings gets a short answer or refusal. If `questions` in this turn or
-  your last reply showed open questions, add one line reminding how many are waiting.
+- A message unrelated to recordings gets a short answer or refusal, then call `questions`; if any
+  are open, end with one line such as «Кстати, по записям ждут ответа 3 вопроса».
+- When some recordings stay waiting after you applied an answer, say explicitly that they wait
+  for the recruiter and how to answer, with an example.
+
 Use `result` to choose the next allowed operation. Treat nonzero exit status or `ok:false` as
 failure and report its safe `message`. Never echo capabilities, tokens, Backend secrets, raw paths,
 request payloads, environment values, or stack traces.

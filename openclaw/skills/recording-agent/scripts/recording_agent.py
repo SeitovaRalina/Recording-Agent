@@ -233,6 +233,8 @@ def _parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="query bounded recording statuses")
     _add_recruiter_user_id_argument(status)
+    # Mila passes the DM channel to every command; status does not need it, so accept and ignore.
+    status.add_argument("--mattermost-dm-channel-id", help=argparse.SUPPRESS)
     status.add_argument("--date")
     status.add_argument("--candidate")
     status.add_argument("--recording-id", type=uuid.UUID)
