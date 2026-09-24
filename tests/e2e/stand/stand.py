@@ -593,9 +593,15 @@ async def cmd_observe(ctx: Ctx, p: dict[str, Any]) -> Any:
     cards = {}
     for rec in recs:
         if rec.get("notion_page_id") and p.get("notion", True):
-            cards[rec["notion_page_id"]] = await cmd_notion_card_get(
-                ctx, {"id": rec["notion_page_id"]}
-            )
+            for attempt in range(3):
+                try:
+                    cards[rec["notion_page_id"]] = await cmd_notion_card_get(
+                        ctx, {"id": rec["notion_page_id"]}
+                    )
+                    break
+                except httpx.HTTPError as error:  # lossy Notion proxy: retry, then report
+                    if attempt == 2:
+                        cards[rec["notion_page_id"]] = {"error": type(error).__name__}
     routing = (
         await ctx.sql(
             "select * from routing_jobs where recording_id = any(:ids) order by created_at", ids=ids

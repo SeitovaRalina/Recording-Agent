@@ -2,12 +2,309 @@
  "R01": [
   {
    "kind": "Notion-карточка",
-   "ref": "https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1",
+   "ref": "https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4",
    "action": "в корзину Notion"
   },
   {
    "kind": "Файл на Диске",
-   "ref": "disk:/Записи Телемоста/2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm",
+   "ref": "disk:/Записи Телемоста/2026-09-24_044747_Собеседование (E2E Олег Тестов R01-0924_1a7).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/.2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R02": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R02-0924_1a3-3e5c8889e4c881ee94c9e7da2ef30b98",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_060503_Собеседование (E2E Марина Аналитикова R02-0924_1a3).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/2026-09-24_E2E_Марина_Аналитикова_R02-0924_1a3_Бизнес-аналитик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/.2026-09-24_E2E_Марина_Аналитикова_R02-0924_1a3_Бизнес-аналитик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R03": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R03-0924_1a3-3e5c8889e4c881db81b2d8492d1747c7",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_060805_Собеседование (E2E Денис Дизайнов R03-0924_1a3).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Папка Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/E2E Discovery R03-0924_1a3",
+   "action": "удалить (после файлов)"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/E2E Discovery R03-0924_1a3/2026-09-24_E2E_Денис_Дизайнов_R03-0924_1a3_Discovery_@Дизайн_машина_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/E2E Discovery R03-0924_1a3/.2026-09-24_E2E_Денис_Дизайнов_R03-0924_1a3_Discovery_@Дизайн_машина_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R04": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R04-0924_1a2-3e5c8889e4c8817ca31ef1ee73a596d9",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_051938_Собеседование (E2E Ирина Лебедева R04-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R04-0924_1a2-3e5c8889e4c881c5b91ed6b2df454b06",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Backend/2026-09-24_E2E_Ирина_Лебедева_R04-0924_1a2_Java-разработчик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Backend/.2026-09-24_E2E_Ирина_Лебедева_R04-0924_1a2_Java-разработчик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R05": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Backend/2026-09-24_E2E_Павел_Двуспотов_R05-0924_1a3_Java-разработчик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Backend/.2026-09-24_E2E_Павел_Двуспотов_R05-0924_1a3_Java-разработчик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R06": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R06-0924_1a2-3e5c8889e4c881fea8d8f4c6ca43f0f8",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_061517_Собеседование (E2E Анна Безссылкина R06-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_061849_Собеседование (E2E Борис Бессобытийный R06-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R06-0924_1a2-3e5c8889e4c881b3a07cef024feadac1",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_062155_Собеседование (E2E Вера Двойная R06-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/2026-09-24_E2E_Анна_Безссылкина_R06-0924_1a2_Python-разработчик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/.2026-09-24_E2E_Анна_Безссылкина_R06-0924_1a2_Python-разработчик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/2026-09-24_E2E_Вера_Двойная_R06-0924_1a2_Python-разработчик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Python/.2026-09-24_E2E_Вера_Двойная_R06-0924_1a2_Python-разработчик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R07": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R07-0924_1a2-3e5c8889e4c8817b939fe3a116a95e21",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_062008_Собеседование (E2E Глеб Первый R07-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R07-0924_1a2-3e5c8889e4c881ca8cb4ecb8def3b0e0",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_062349_Собеседование (E2E Дарья Вторая R07-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R07-0924_1a2-3e5c8889e4c881b6abecf116ba40c173",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_062704_Собеседование (E2E Егор Третий R07-0924_1a2).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/2026-09-24_E2E_Глеб_Первый_R07-0924_1a2_Бизнес-аналитик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/.2026-09-24_E2E_Глеб_Первый_R07-0924_1a2_Бизнес-аналитик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R08": [
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063112_Личный созвон R08-0924_1a2.webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-NE/2. Interviews/BizDev/2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm",
+   "action": "удалить (с маркером)"
+  }
+ ],
+ "R09": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R09-0924_1a1-3e5c8889e4c881408fe5c57653be1225",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_054427_Собеседование (E2E Жанна Повторова R09-0924_1a1).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Файл Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/2026-09-24_E2E_Жанна_Повторова_R09-0924_1a1_Бизнес-аналитик_@Т-банк_general_interview.webm",
+   "action": "удалить (с маркером)"
+  },
+  {
+   "kind": "Маркер Synology",
+   "ref": "/home/Recruiting-E/2. Interviews external/Analyst/.2026-09-24_E2E_Жанна_Повторова_R09-0924_1a1_Бизнес-аналитик_@Т-банк_general_interview.webm.recording-agent-owner.json",
+   "action": "удалить"
+  }
+ ],
+ "R10": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R10-0924_1a2-3e5c8889e4c8816782c9f131a2e3f2c9",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063027_Собеседование (E2E Зоя Переносова R10-0924_1a2).webm",
+   "action": "в корзину Диска"
+  }
+ ],
+ "R11": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R11-0924_1a1-3e5c8889e4c881a3b66bed1ce8788827",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063204_Собеседование (E2E Кирилл Автопитонов R11-0924_1a1).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R11-0924_1a1-3e5c8889e4c881109fe4e5f1bc394449",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063517_Собеседование (E2E Лидия Автоаналитик R11-0924_1a1).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R11-0924_1a1-3e5c8889e4c881fc8e22e33bd86b7101",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063831_Собеседование (E2E Максим Автодискавери R11-0924_1a1).webm",
+   "action": "в корзину Диска"
+  },
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R11-0924_1a1-3e5c8889e4c881718909de2b2fa701ce",
+   "action": "в корзину Notion"
+  }
+ ],
+ "R12": [
+  {
+   "kind": "Notion-карточка",
+   "ref": "https://app.notion.com/p/E2E-R12-0924_1a1-3e5c8889e4c881d2a004d289b9ffd116",
+   "action": "в корзину Notion"
+  },
+  {
+   "kind": "Файл на Диске",
+   "ref": "disk:/Записи Телемоста/2026-09-24_063328_Собеседование (E2E Ольга Очисткина R12-0924_1a1).webm",
    "action": "в корзину Диска"
   }
  ]

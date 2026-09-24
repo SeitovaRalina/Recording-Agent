@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 684, in run_route
+    body(ctx)
+    ~~~~^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r07.py", line 79, in body
+    state = ctx.wait_for(lambda s: terminal_sent(s, 3), timeout=300)
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 259, in wait_for
+    return self.observe()
+           ~~~~~~~~~~~~^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 241, in observe
+    return remote.stand(
+           ~~~~~~~~~~~~^
+        "observe",
+        ^^^^^^^^^^
+    ...<5 lines>...
+        },
+        ^^
+    )
+    ^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\remote.py", line 69, in stand
+    raise RemoteError(f"stand {command}: {result['error']}")
+tests.e2e.lib.remote.RemoteError: stand observe: ReadTimeout: 

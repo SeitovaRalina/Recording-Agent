@@ -1,6 +1,6 @@
 # R01 — стенограмма
 
-## Ход 1 (64 с)
+## Ход 1 (100 с)
 
 **Рекрутер:**
 
@@ -9,7 +9,7 @@
 **Команды:**
 
 ```text
-{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 240}
+{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 200}
 ```
 
 <details><summary>ответ</summary>
@@ -81,13 +81,13 @@ After `scan` (and whenever the recruiter asks what is pending):
 </details>
 
 ```text
-python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key 9f9dc9c2-93e1-4f1c-8c09-5e1af1b69c7a
+python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key d935ee01-146e-338f-ccea-0ab813000001
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 1.\n- 2026-09-24_044747_Собеседование (E2E Олег Тестов R01-0924_1a7).webm; кандидат: E2E Олег Тестов R01-0924_1a7; новая запись; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":1,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"95be6fb9-2337-4dbe-91cb-f0cdcbebba3d","filename":"2026-09-24_044747_Собеседование (E2E Олег Тестов R01-0924_1a7).webm","candidate_name":"E2E Олег Тестов R01-0924_1a7","status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"storage_destination_required","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}]}}
+{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 1.\n- 2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm; кандидат: E2E Олег Тестов R01-0924_1a5; новая запись; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":1,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"120a7334-54c0-4396-ade1-541862d9b6ac","filename":"2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm","candidate_name":"E2E Олег Тестов R01-0924_1a5","status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"storage_destination_required","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}]}}
 ```
 
 </details>
@@ -132,38 +132,52 @@ options:
 </details>
 
 ```text
-python3 scripts/recording_agent.py status --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --recording-id 95be6fb9-2337-4dbe-91cb-f0cdcbebba3d
+python3 scripts/recording_agent.py status --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --recording-id 120a7334-54c0-4396-ade1-541862d9b6ac
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Найдено записей: 1.\n- 2026-09-24_044747_Собеседование (E2E Олег Тестов R01-0924_1a7).webm; кандидат: E2E Олег Тестов R01-0924_1a7; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4","result":{"items":[{"id":"95be6fb9-2337-4dbe-91cb-f0cdcbebba3d","filename":"2026-09-24_044747_Собеседование (E2E Олег Тестов R01-0924_1a7).webm","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a7_Python-разработчик_@Т-банк_general_interview.webm","candidate_name":"E2E Олег Тестов R01-0924_1a7","status":"manual_review_required","requires_review":true,"review_reason":"storage_destination_required","version":1,"found_at":"2026-09-24T02:07:40.459369+00:00","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}],"count":1}}
+{"ok":true,"message":"Найдено записей: 1.\n- 2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm; кандидат: E2E Олег Тестов R01-0924_1a5; проект: Python-разработчик @Т-банк; нужно уточнение: нужно выбрать папку в Synology; имя в хранилище: 2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm; карточка Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","result":{"items":[{"id":"120a7334-54c0-4396-ade1-541862d9b6ac","filename":"2026-09-24_043359_Собеседование (E2E Олег Тестов R01-0924_1a5).webm","generated_filename":"2026-09-24_E2E_Олег_Тестов_R01-0924_1a5_Python-разработчик_@Т-банк_general_interview.webm","candidate_name":"E2E Олег Тестов R01-0924_1a5","status":"manual_review_required","requires_review":true,"review_reason":"storage_destination_required","version":1,"found_at":"2026-09-24T01:53:41.446257+00:00","safe_link":null,"notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","spot":"Python-разработчик @Т-банк","error":"Interview destination must be selected from allowed Synology inventory"}],"count":1}}
 ```
 
 </details>
 
 ```text
-python3 scripts/recording_agent.py route-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id 95be6fb9-2337-4dbe-91cb-f0cdcbebba3d --destination-id ce009880-84e7-48b7-8bc4-5351f716ff25 --expected-version 1 --idempotency-key 00f31e94-bd28-4cdb-8f42-1278dd920a85
+python3 scripts/recording_agent.py route-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id 120a7334-54c0-4396-ade1-541862d9b6ac --destination-id ce009880-84e7-48b7-8bc4-5351f716ff25 --expected-version 1 --idempotency-key d935ee01-146e-338f-ccea-0ab813000002
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Готово: запись собеседования (E2E Олег Тестов R01-0924_1a7) сохранена.\nКарточка в Notion: https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4\nЗапись: https://gofile.me/7g8zN/bBzj5cipZ","result":{"recording_id":"95be6fb9-2337-4dbe-91cb-f0cdcbebba3d","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/bBzj5cipZ","notion_url":"https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4","candidate_name":"E2E Олег Тестов R01-0924_1a7","replayed":false}}
+Command still running (session faint-cloud, pid 1133661). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.
+```
+
+</details>
+
+```text
+{"action": "poll", "sessionId": "faint-cloud", "data": "", "keys": [], "hex": [], "literal": "", "text": "", "bracketed": false, "eof": false, "offset": 0, "limit": 0, "timeout": 30000}
+```
+
+<details><summary>ответ</summary>
+
+```text
+{"ok":true,"message":"Готово: запись собеседования (E2E Олег Тестов R01-0924_1a5) сохранена.\nКарточка в Notion: https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1\nЗапись: https://gofile.me/7g8zN/cj9V8nkgh","result":{"recording_id":"120a7334-54c0-4396-ade1-541862d9b6ac","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/cj9V8nkgh","notion_url":"https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1","candidate_name":"E2E Олег Тестов R01-0924_1a5","replayed":false}}
+
+
+Process exited with code 0.
 ```
 
 </details>
 
 **Мила:**
 
-> Проверка завершена: найдена 1 новая запись — собеседование с **E2E Олегом Тестовым R01-0924_1a7** на позицию Python-разработчика @Т-банк.
+> Проверка завершена: найдена и обработана 1 новая запись.
 > 
-> Я сохранила её в папку Python, запись и карточка обновлены:
-> - Notion: https://app.notion.com/p/E2E-R01-0924_1a7-3e5c8889e4c88153b402ec3336f7cae4
-> - Запись: https://gofile.me/7g8zN/bBzj5cipZ
+> Собеседование с **E2E Олегом Тестовым R01-0924_1a5** для позиции Python-разработчика @Т-банк сохранено. Результат также виден в карточке Notion:
 > 
-> Также просмотрено 15 файлов: 14 старых записей пропущены, ошибок нет.
+> - [Карточка Notion](https://app.notion.com/p/E2E-R01-0924_1a5-3e5c8889e4c8818b9dfbf06aafb503e1)
+> - [Запись собеседования](https://gofile.me/7g8zN/cj9V8nkgh)
 
-**Судья:** 12/12 — Идеальный ход: scan → destinations → route-interview в однозначную папку Python без вопросов рекрутеру, корректный итог с кандидатом и обеими ссылками, без утечек внутренних идентификаторов.
+**Судья:** 12/12 — Мила корректно выполнила сценарий R01 за один ход: scan → destinations → route-interview в папку Python без вопросов рекрутеру, сообщила кандидата, ссылку на Notion и ссылку на запись. Дополнительные вызовы --help и status незначительны и не помешали завершению работы.
 
