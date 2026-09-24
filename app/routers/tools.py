@@ -465,15 +465,10 @@ async def route_interview(
         await session.execute(
             update(ManualReview)
             .where(
+                # Candidate identity is already resolved here, so every open question for this
+                # recording (destination, collision, autonomous defer) is answered by this route.
                 ManualReview.recording_id == recording.id,
                 ManualReview.status == ManualReviewStatus.PENDING,
-                ManualReview.question_type.in_(
-                    [
-                        "autonomous_routing_ambiguous",
-                        "autonomous_routing_no_match",
-                        "autonomous_routing_model_error",
-                    ]
-                ),
             )
             .values(
                 status=ManualReviewStatus.COMPLETED,

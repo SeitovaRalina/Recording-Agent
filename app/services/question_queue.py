@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -26,6 +26,8 @@ from app.services.reviews import (
 from app.tools.mattermost import MattermostClient, MattermostError
 
 QuestionAction = Literal["resolve", "ignore"]
+# A question about a recording in one of these states can no longer change its outcome.
+SETTLED_RECORDING_STATUSES = (RecordingStatus.COMPLETED, RecordingStatus.IGNORED)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,10 @@ class QuestionQueueService:
         self._mattermost = mattermost
         self._settings = settings
 
+    @staticmethod
+    def _settled_recording_ids() -> Select[tuple[uuid.UUID]]:
+        return select(Recording.id).where(Recording.status.in_(SETTLED_RECORDING_STATUSES))
+
     def capability_token(self, question: ManualReview) -> str:
         return self._reviews.capability_token(question)
 
@@ -73,6 +79,7 @@ class QuestionQueueService:
                 ManualReview.recruiter_user_id == recruiter_user_id,
                 ManualReview.mattermost_channel_id == dm_channel_id,
                 ManualReview.status == ManualReviewStatus.PENDING,
+                ManualReview.recording_id.not_in(self._settled_recording_ids()),
             )
             .options(joinedload(ManualReview.recording))
             .order_by(ManualReview.created_at.asc(), ManualReview.id.asc())
@@ -176,6 +183,21 @@ class QuestionQueueService:
         ):
             return existing
         now = datetime.now(UTC)
+        await session.execute(
+            update(ManualReview)
+            .where(
+                ManualReview.recruiter_user_id == recruiter_user_id,
+                ManualReview.mattermost_channel_id == dm_channel_id,
+                ManualReview.status == ManualReviewStatus.PENDING,
+                ManualReview.recording_id.in_(self._settled_recording_ids()),
+            )
+            .values(
+                status=ManualReviewStatus.COMPLETED,
+                completed_at=now,
+                result={"closed_by": "recording_settled"},
+            )
+            .execution_options(synchronize_session=False)
+        )
         await session.execute(
             update(ManualReview)
             .where(

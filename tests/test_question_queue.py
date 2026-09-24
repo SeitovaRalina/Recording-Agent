@@ -625,3 +625,46 @@ async def test_routing_defer_notification_renders_bounded_labels_and_dedupes(
             NotificationOutbox.dedupe_key == f"routing-defer:{job_id}:3"
         )
     ) == first
+
+
+@pytest.mark.anyio
+async def test_questions_of_settled_recordings_are_hidden_and_closed(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    settled = _question("settled", "unused-1")
+    settled.recording.status = RecordingStatus.COMPLETED
+    open_question = _question("open", "unused-2")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            settled,
+            open_question,
+        ]
+    )
+    await session.commit()
+
+    active = await service.list_active(session, recruiter_user_id="recruiter", dm_channel_id="dm")
+    assert [item.id for item in active] == [open_question.id]
+
+    assert await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 9, 24)
+    )
+    await session.commit()
+    await session.refresh(settled)
+    summary = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "summary")
+    )
+    assert summary is not None
+    assert "settled.webm" not in summary.payload["message"]
+    assert settled.status == ManualReviewStatus.COMPLETED
+    assert settled.result == {"closed_by": "recording_settled"}
+    assert open_question.status == ManualReviewStatus.PENDING
