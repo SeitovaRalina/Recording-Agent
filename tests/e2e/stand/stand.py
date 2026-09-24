@@ -136,7 +136,9 @@ def prop_text(prop: dict[str, Any] | None) -> Any:
     if kind == "email":
         return value
     if kind == "files":
-        return [f.get("name") for f in value]
+        # The recording link is stored as an external file: {"name": ..., "external": {"url": ...}}.
+        urls = [(f.get("external") or f.get("file") or {}).get("url") for f in value]
+        return urls[0] if len(urls) == 1 else (urls or None)
     return f"<{kind}>"
 
 
@@ -658,7 +660,37 @@ async def cmd_settle(ctx: Ctx, p: dict[str, Any]) -> Any:
     return {"ignored": len(ids)}
 
 
+async def cmd_backfill_durable(ctx: Ctx, p: dict[str, Any]) -> Any:
+    """One-off repair for recordings stored before adec628: durable flag + active artifact.
+
+    Mirrors cron._ensure_active_storage_artifact. Requires confirm.
+    """
+    if p.get("confirm") is not True:
+        raise RuntimeError("backfill_durable requires confirm")
+    from app.db.models.recording import Recording
+    from app.scheduler.cron import _ensure_active_storage_artifact
+
+    async with ctx.sf() as session:
+        from sqlalchemy import select
+
+        rows = (
+            await session.scalars(
+                select(Recording).where(
+                    Recording.status == "completed",
+                    Recording.synology_share_url.is_not(None),
+                    Recording.storage_is_durable.is_(False),
+                )
+            )
+        ).all()
+        for recording in rows:
+            recording.storage_is_durable = True
+            await _ensure_active_storage_artifact(session, recording)
+        await session.commit()
+        return {"repaired": [r.disk_filename for r in rows]}
+
+
 COMMANDS = {
+    "backfill_durable": cmd_backfill_durable,
     "settle": cmd_settle,
     "inventory": cmd_inventory,
     "notion_cards": cmd_notion_cards,
