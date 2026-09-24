@@ -20,7 +20,8 @@ DEFAULT_CACHE_SIZE = 128
 MAX_SPOT_CHOICES = 10
 # The VPN sidecar upstream drops a share of TCP handshakes; connect failures never reach Notion,
 # so retrying them is safe for reads and writes alike.
-NOTION_CONNECT_RETRIES = 3
+NOTION_CONNECT_RETRIES = 6
+NOTION_CONNECT_BACKOFF_CAP_SECONDS = 8.0
 _TRACE_BODY_LIMIT = 500
 _EMAIL_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
@@ -29,6 +30,10 @@ _EMAIL_CANDIDATE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)"
     r"(?![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
 )
+
+
+def _transient_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
 
 
 class ConnectRetryTransport(httpx.AsyncBaseTransport):
@@ -58,7 +63,9 @@ class ConnectRetryTransport(httpx.AsyncBaseTransport):
             except self.RETRYABLE:
                 if attempt == self._attempts:
                     raise
-                await asyncio.sleep(self._backoff * attempt)
+                await asyncio.sleep(
+                    min(self._backoff * 2 ** (attempt - 1), NOTION_CONNECT_BACKOFF_CAP_SECONDS)
+                )
         raise AssertionError("unreachable")
 
     async def aclose(self) -> None:
@@ -77,7 +84,15 @@ def build_notion_http_client(settings: Settings, timeout: httpx.Timeout) -> http
 
 
 class NotionAPIError(RuntimeError):
-    """Sanitized base error for Notion integration failures."""
+    """Sanitized base error for Notion integration failures.
+
+    `transient` marks failures that say nothing about the data: the request did not reach Notion
+    (network, proxy tunnel) or Notion answered 429/5xx. Callers may retry them later.
+    """
+
+    def __init__(self, message: str = "", *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 class NotionAuthError(NotionAPIError):
@@ -362,7 +377,9 @@ class NotionClient:
                 f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion page retrieval transport failed") from None
+            raise NotionQueryError(
+                "Notion page retrieval transport failed", transient=True
+            ) from None
         self._raise_query_error(response)
         payload = self._json_object(response, "reassignment page")
         parent = payload.get("parent")
@@ -426,7 +443,7 @@ class NotionClient:
                 recording_property=recording_prop,
                 error_type="transport",
             )
-            raise NotionUpdateError("Notion page update transport failed") from None
+            raise NotionUpdateError("Notion page update transport failed", transient=True) from None
         self._raise_common(response)
         if response.is_error:
             self._trace(
@@ -452,7 +469,9 @@ class NotionClient:
                 f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion page retrieval transport failed") from None
+            raise NotionQueryError(
+                "Notion page retrieval transport failed", transient=True
+            ) from None
         self._raise_common(response)
         if response.is_error:
             raise NotionQueryError(f"Notion page retrieval failed with HTTP {response.status_code}")
@@ -490,7 +509,9 @@ class NotionClient:
                 json={"properties": {recording_prop: {"files": files}}},
             )
         except httpx.RequestError:
-            raise NotionUpdateError("Notion recording update transport failed") from None
+            raise NotionUpdateError(
+                "Notion recording update transport failed", transient=True
+            ) from None
         self._raise_common(response)
         if response.is_error:
             raise NotionUpdateError(
@@ -606,7 +627,9 @@ class NotionClient:
                 json={"page_size": 100},
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion synthetic-row query transport failed") from None
+            raise NotionQueryError(
+                "Notion synthetic-row query transport failed", transient=True
+            ) from None
         self._raise_query_error(response)
         payload = self._json_object(response, "synthetic-row query")
         results = payload.get("results")
@@ -640,7 +663,7 @@ class NotionClient:
             )
         except httpx.RequestError:
             raise NotionDatabaseUnavailableError(
-                "Notion database discovery transport failed"
+                "Notion database discovery transport failed", transient=True
             ) from None
         self._raise_common(response)
         if response.status_code == 404:
@@ -700,7 +723,7 @@ class NotionClient:
             )
         except httpx.RequestError:
             raise NotionDataSourceUnavailableError(
-                "Notion data-source schema transport failed"
+                "Notion data-source schema transport failed", transient=True
             ) from None
         self._raise_common(response)
         if response.status_code == 404:
@@ -731,7 +754,9 @@ class NotionClient:
                 f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion related page retrieval failed") from None
+            raise NotionQueryError(
+                "Notion related page retrieval transport failed", transient=True
+            ) from None
         self._raise_common(response)
         if response.is_error:
             raise NotionQueryError(
@@ -778,7 +803,7 @@ class NotionClient:
                 },
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion query transport failed") from None
+            raise NotionQueryError("Notion query transport failed", transient=True) from None
 
     async def _query_source_any_recording(
         self, source_id: str, candidate_name: str, name_prop: str
@@ -793,7 +818,9 @@ class NotionClient:
                 },
             )
         except httpx.RequestError:
-            raise NotionQueryError("Notion reassignment query transport failed") from None
+            raise NotionQueryError(
+                "Notion reassignment query transport failed", transient=True
+            ) from None
 
     @staticmethod
     def _parse_sources(payload: dict[str, Any]) -> list[NotionDataSource]:
@@ -844,7 +871,10 @@ class NotionClient:
         if response.status_code == 404:
             raise NotionDataSourceNotFoundError("Notion data source is unavailable")
         if response.is_error:
-            raise NotionQueryError(f"Notion query failed with HTTP {response.status_code}")
+            raise NotionQueryError(
+                f"Notion query failed with HTTP {response.status_code}",
+                transient=_transient_status(response.status_code),
+            )
 
     def _cache_get(self, key: SourceCacheKey) -> str | None:
         source_id = self._source_cache.get(key)

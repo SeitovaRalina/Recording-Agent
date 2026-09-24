@@ -44,13 +44,14 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
-from app.tools.notion import NotionClient, NotionPage, NotionRelationChoice
+from app.tools.notion import NotionAPIError, NotionClient, NotionPage, NotionRelationChoice
 
 logger = logging.getLogger(__name__)
 
 SUMMARY_LOCAL_HOUR = 18
 SUMMARY_LOCAL_MINUTE = 0
 SUMMARY_CLAIM_TTL = timedelta(minutes=15)
+NOTION_TEMPORARILY_UNAVAILABLE = "notion_temporarily_unavailable"
 _SCAN_LOCKS: WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
 ] = WeakKeyDictionary()
@@ -551,6 +552,28 @@ async def _run_transfer_recording(
             )
             try:
                 match = await candidate_service.find_and_match(recording, recruiter, session)
+            except NotionAPIError as error:
+                if not error.transient:
+                    await status.advance(
+                        session,
+                        recording,
+                        RecordingStatus.FAILED,
+                        error_step="candidate_matching",
+                        error_message=str(error),
+                    )
+                    await session.commit()
+                    return
+                # Notion was not reached (proxy/network) or answered 429/5xx: the data is fine.
+                # Keep the recording resumable; the next scan retries the lookup.
+                recording.error_step = "candidate_matching"
+                recording.error_message = NOTION_TEMPORARILY_UNAVAILABLE
+                recording.last_attempted_at = datetime.now(UTC)
+                await session.commit()
+                logger.warning(
+                    "Notion temporarily unavailable for recording %s; left resumable",
+                    recording.id,
+                )
+                return
             except Exception as error:
                 await status.advance(
                     session,

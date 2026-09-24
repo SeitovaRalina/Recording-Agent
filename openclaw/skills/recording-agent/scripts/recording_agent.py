@@ -61,6 +61,13 @@ REVIEW_REASON_LABELS = {
     "autonomous_routing_model_error": "не удалось автоматически выбрать папку",
 }
 
+ERROR_LABELS = {
+    "notion_temporarily_unavailable": (
+        "Notion временно недоступен; запись сохранена в очереди и будет обработана "
+        "при следующей проверке"
+    ),
+}
+
 
 class ClientError(Exception):
     """Represent a safe client-facing failure."""
@@ -623,7 +630,7 @@ def _item_line(item: dict[str, Any], *, review: bool = False) -> str:
     if generated_filename:
         parts.append(f"имя в хранилище: {generated_filename}")
     if item.get("error"):
-        parts.append(f"ошибка: {item['error']}")
+        parts.append(f"ошибка: {ERROR_LABELS.get(item['error'], item['error'])}")
     if item.get("notion_url"):
         parts.append(f"карточка Notion: {item['notion_url']}")
     if item.get("safe_link"):

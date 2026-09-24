@@ -45,7 +45,7 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 from app.tools.mattermost import MattermostError, MattermostPost
-from app.tools.notion import NotionPage, NotionRelationChoice
+from app.tools.notion import NotionPage, NotionQueryError, NotionRelationChoice
 
 
 def found(file_id: str) -> Recording:
@@ -1546,6 +1546,56 @@ async def test_scan_resumes_calendar_match_and_routes_missing_candidate_to_revie
     assert loaded.manual_review_candidates == []
     candidate.find_and_match.assert_awaited_once()
     transfer.transfer.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("transient", "expected_status"),
+    [(True, RecordingStatus.CALENDAR_EVENT_FOUND), (False, RecordingStatus.FAILED)],
+)
+async def test_scan_keeps_recording_resumable_when_notion_is_temporarily_unreachable(
+    transient: bool, expected_status: RecordingStatus
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    item = found("notion-down")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    candidate = AsyncMock()
+    candidate.find_and_match.side_effect = NotionQueryError(
+        "Notion query transport failed", transient=transient
+    )
+
+    await scan_recruiter(
+        recruiter(),
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        candidate_service=candidate,
+        transfer_service=AsyncMock(),
+        status_service=StatusService(),
+        notion=AsyncMock(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == expected_status
+    assert loaded.error_step == "candidate_matching"
+    if transient:
+        assert loaded.error_message == "notion_temporarily_unavailable"
 
 
 @pytest.mark.anyio

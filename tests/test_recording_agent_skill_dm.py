@@ -266,3 +266,26 @@ def test_mutating_requests_use_long_timeout(
 
     assert captured["timeout"] == expected
     assert CLIENT.LONG_TIMEOUT_SECONDS >= 300
+
+
+def test_temporary_notion_outage_is_explained_not_reported_as_code() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "accepted": True,
+            "discovered": 1,
+            "inserted": 1,
+            "items": [
+                {
+                    "filename": "interview.webm",
+                    "status": "calendar_event_found",
+                    "is_new": True,
+                    "requires_review": False,
+                    "error": "notion_temporarily_unavailable",
+                }
+            ],
+        },
+    )
+
+    assert "Notion временно недоступен" in message
+    assert "notion_temporarily_unavailable" not in message

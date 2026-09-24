@@ -823,3 +823,35 @@ async def test_connect_retry_transport_gives_up_and_never_retries_read_errors() 
         with pytest.raises(httpx.ReadTimeout):
             await client.patch(f"{BASE}/pages/x", json={})
     assert inner.calls == 1
+
+
+@pytest.mark.anyio
+async def test_connect_retry_transport_backs_off_exponentially_with_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("app.tools.notion.asyncio.sleep", fake_sleep)
+    inner = _FlakyTransport([httpx.ConnectTimeout("dial")] * 5)
+    async with httpx.AsyncClient(
+        transport=ConnectRetryTransport(inner, attempts=6, backoff_seconds=1)
+    ) as client:
+        response = await client.get(f"{BASE}/users/me")
+
+    assert response.status_code == 200
+    assert inner.calls == 6
+    assert sleeps == [1, 2, 4, 8, 8]
+
+
+def test_transport_and_server_errors_are_transient() -> None:
+    assert NotionQueryError("x", transient=True).transient
+    assert not NotionQueryError("x").transient
+    with pytest.raises(NotionQueryError) as error:
+        NotionClient._raise_query_error(httpx.Response(503))
+    assert error.value.transient
+    with pytest.raises(NotionQueryError) as error:
+        NotionClient._raise_query_error(httpx.Response(400))
+    assert not error.value.transient

@@ -47,9 +47,8 @@ fails, report its JSON `message`.
 `scan`, `answer`, `route-interview`, `non-interview`, `reroute-recording`,
 `notion-reassignment-confirm` and `cleanup-confirm` can take several minutes (Disk, calendar,
 Notion and Synology are called synchronously). Run them with an exec timeout of at least 320
-seconds. If exec reports that the
-command is still running, poll it until it exits; never tell the recruiter that something failed
-while the command is still running.
+seconds. If exec reports that the command is still running, poll it until it exits; never tell the
+recruiter that something failed while the command is still running.
 
 ## Finish the job in one turn
 
@@ -66,6 +65,9 @@ After `scan` (and whenever the recruiter asks what is pending):
    - Several folders fit (for example `Flutter` exists in both external and internal) or none fits:
      do not stop; include the question in the same reply (see step 3).
 2. For every other review reason (calendar, candidate card, multiple Spots), call `questions`.
+   If a recording's error says Notion is temporarily unavailable, run `scan` once more in the same
+   turn with a new idempotency key. If it is still unavailable, tell the recruiter the recording is
+   safe and will be processed by the next check; do not call it a failure.
 3. Send one reply that contains, in this order:
    - what was found (how many recordings, candidates, projects);
    - what you already completed, with links (step 4);
