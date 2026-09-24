@@ -26,8 +26,9 @@ python3 scripts/recording_agent.py scan \
   --idempotency-key <stable-uuid-or-request-key>
 ```
 
-If the command fails, return the JSON `message` field verbatim. Do not try filesystem discovery as
-a fallback.
+If the command fails, report its JSON `message` to the recruiter. Do not try filesystem discovery
+as a fallback. When it succeeds, continue with "Finish the job in one turn" below; a scan is never
+the last step while a found recording still needs a decision you can make or ask about.
 
 For a recruiter request to show recording status, your first command after loading this skill must
 be the Backend CLI status intent with the trusted Mattermost sender id from the current invocation:
@@ -39,7 +40,46 @@ python3 scripts/recording_agent.py status \
 
 Add only explicit recruiter-requested filters such as `--date`, `--candidate`, `--recording-id`,
 or `--status`. Never run `python3 scripts/recording_agent.py` without a subcommand. If the command
-fails, return the JSON `message` field verbatim.
+fails, report its JSON `message`.
+
+## Finish the job in one turn
+
+The recruiter should not have to ask "what next?". One recruiter message ideally produces one
+complete reply. Within the same turn, keep calling allowed commands until every recording from the
+request is either done or waiting for a question that only the recruiter can answer.
+
+After `scan` (and whenever the recruiter asks what is pending):
+
+1. For each recording with `storage_destination_required` (or `storage_key_collision`), call
+   `destinations` once and choose by the destination rules below.
+   - Exactly one folder clearly fits (for example Spot `Java-разработчик @Т-банк` and only
+     `2. Interviews external/Backend` fits): call `route-interview` immediately, without asking.
+   - Several folders fit (for example `Flutter` exists in both external and internal) or none fits:
+     do not stop; include the question in the same reply (see step 3).
+2. For every other review reason (calendar, candidate card, multiple Spots), call `questions`.
+3. Send one reply that contains, in this order:
+   - what was found (how many recordings, candidates, projects);
+   - what you already completed, with links (step 4);
+   - one numbered list of every remaining question with its options, the option you recommend and
+     why, and an example answer such as `1 — внешний проект` or `создай папку Kotlin во внешних`.
+4. After `route-interview`/`non-interview` returns `completed`, tell the recruiter the candidate,
+   the Notion card link and the recording link from `result` (`notion_url`, `safe_link`), and say
+   the result is also visible in the Notion card. The Backend sends its own completion message too.
+5. When the recruiter answers, apply every clear answer in the same turn (`route-interview`,
+   `create-destination` then `route-interview`, or `answer`), then report results as in step 4 and
+   list only what is still open.
+
+Write in the recruiter's language, in full sentences, without internal codes such as
+`storage_destination_required`, recording IDs, versions or capabilities.
+
+## Retry after an error
+
+If a recording is `failed` after the candidate was matched (transfer, link or Notion step) and the
+recruiter asks to retry, call `status` for the current `version`, then `route-interview` with the
+same folder (or the folder the recruiter names) and a new idempotency key. The Backend reuses an
+already uploaded file and never creates a second copy. If the failure happened before a candidate
+was matched (calendar or Notion lookup), explain that the recording needs a new scan after the data
+is fixed.
 
 ## Route requests
 
@@ -70,9 +110,9 @@ fails, return the JSON `message` field verbatim.
 Choose the storage command by the recording `status` returned by `status`, never by wording such
 as "retry", "again", "move", or "same folder":
 
-- `candidate_matched` or `manual_review_required` (including `storage_destination_required` and
-  `storage_key_collision`): the file is not stored yet. Use `route-interview` with the current
-  `version`; this also retries a failed transfer into the chosen folder.
+- `candidate_matched`, `manual_review_required` (including `storage_destination_required` and
+  `storage_key_collision`) or `failed` after candidate matching: the file is not stored yet. Use
+  `route-interview` with the current `version`; this also retries a failed transfer.
 - `completed`: the file is already stored. Use `reroute-recording` only when the recruiter asks
   to move it to a different folder.
 - Any other status: report the status and do not submit a storage command.
@@ -86,7 +126,7 @@ Use trusted Mattermost sender and direct-channel IDs from invocation metadata, n
 Before `answer`, fetch `questions`, map only unambiguous portions of the reply to exact question,
 question-set, action, choice, capability, version, and idempotency tuples, and state the bounded
 interpretation to the recruiter. Submit only those tuples. Report accepted, rejected, and pending
-counts verbatim from the deterministic CLI message.
+counts from the CLI message, then continue with any work the accepted answers unlocked.
 
 Do not treat unrelated messages, acknowledgements, quoted or edited old messages, bare numbers
 without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
@@ -113,10 +153,11 @@ For duplicate Notion cards, preserve each card URL and all returned differentiat
 
 ## Output and trust boundaries
 
-Return the CLI JSON `message` verbatim. Use `result` only to choose the next allowed operation.
-Treat nonzero exit status or `ok:false` as failure and still return its safe `message`. Never echo
-capabilities, tokens, Backend secrets, raw paths, request payloads, environment values, or stack
-traces.
+The CLI JSON `message` is the factual basis of your reply: do not contradict it, do not invent
+counts, candidates, folders or links, and keep its links. You may rephrase it and add the next step.
+Use `result` to choose the next allowed operation. Treat nonzero exit status or `ok:false` as
+failure and report its safe `message`. Never echo capabilities, tokens, Backend secrets, raw paths,
+request payloads, environment values, or stack traces.
 
 - Call only the loopback Backend URL configured by environment.
 - Backend exclusively owns scheduler, PostgreSQL state, matching, transfers, Notion/Yandex/

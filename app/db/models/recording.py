@@ -109,7 +109,8 @@ class Recording(Base):
         RecordingStatus.SOURCE_DELETED: {RecordingStatus.COMPLETED},
         RecordingStatus.COMPLETED: set(),
         RecordingStatus.IGNORED: set(),
-        RecordingStatus.FAILED: set(),
+        # Only an explicit recruiter retry (route-interview / non-interview) leaves `failed`.
+        RecordingStatus.FAILED: {RecordingStatus.TRANSFER_STARTED},
     }
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -198,6 +199,22 @@ class Recording(Base):
         back_populates="recording", cascade="all, delete-orphan"
     )
     matched_calendar: Mapped[RecruiterCalendar | None] = relationship(back_populates="recordings")
+
+    def reset_for_retry(self) -> None:
+        """Clear a failed attempt so an explicit retry re-runs transfer, link and Notion steps.
+
+        The stored file is reused through its ownership marker; nothing is deleted.
+        """
+        self.error_step = None
+        self.error_message = None
+        self.synology_folder_path = None
+        self.synology_file_path = None
+        self.synology_share_url = None
+        self.storage_is_durable = False
+        self.completed_at = None
+        self.terminal_notified_at = None
+        self.terminal_notification_claim = None
+        self.terminal_notification_claimed_at = None
 
     def transition_to(self, new_status: RecordingStatus | str) -> None:
         try:

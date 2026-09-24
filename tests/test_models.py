@@ -86,3 +86,29 @@ async def test_yandex_token_upsert(session: AsyncSession) -> None:
 async def test_yandex_token_missing(session: AsyncSession) -> None:
     with pytest.raises(KeyError):
         await YandexTokenManager(session).get_token("missing@effective.band")
+
+
+def test_failed_recording_can_only_be_retried_into_transfer() -> None:
+    recording = Recording(
+        disk_file_id="f",
+        disk_path="disk:/f.webm",
+        disk_filename="f.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.FAILED,
+        error_step="share_link",
+        error_message="boom",
+        synology_share_url="https://old",
+        terminal_notified_at=datetime.now(UTC),
+    )
+    for target in (RecordingStatus.COMPLETED, RecordingStatus.MANUAL_REVIEW_REQUIRED):
+        with pytest.raises(ValueError, match="Invalid transition"):
+            recording.transition_to(target)
+
+    recording.reset_for_retry()
+    recording.transition_to(RecordingStatus.TRANSFER_STARTED)
+
+    assert recording.status == RecordingStatus.TRANSFER_STARTED
+    assert recording.error_step is None
+    assert recording.error_message is None
+    assert recording.synology_share_url is None
+    assert recording.terminal_notified_at is None

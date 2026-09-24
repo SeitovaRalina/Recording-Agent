@@ -21,7 +21,7 @@ STATUS_LABELS = {
     "found": "найдена, ожидает сопоставления с календарём",
     "calendar_event_found": "событие календаря найдено",
     "candidate_matched": "кандидат найден в Notion",
-    "manual_review_required": "требуется review",
+    "manual_review_required": "нужно ваше уточнение",
     "transfer_started": "перенос начат",
     "uploaded_to_synology": "файл загружен в хранилище",
     "synology_link_created": "ссылка на файл создана",
@@ -37,10 +37,25 @@ REVIEW_REASON_LABELS = {
     "low_confidence": "недостаточно уверенное совпадение с событием календаря",
     "no_compatible_event": "подходящее событие календаря не найдено",
     "multiple_compatible_events": "найдено несколько подходящих событий календаря",
+    "multiple_eligible_events": "найдено несколько подходящих событий календаря",
+    "unmonitored_only": "событие найдено только в неотслеживаемом календаре",
+    "unmonitored_collision": "похожее событие есть и в неотслеживаемом календаре",
+    "calendar_configuration_incomplete": "не настроены календари рекрутера",
+    "filename_invalid": "имя файла не похоже на запись Телемоста",
+    "filename_timestamp_inconsistent": "время в имени файла не совпадает с датой создания",
     "no_candidate_name_in_event": "в названии события не указано имя кандидата",
-    "no_candidate_found": "кандидат с нужным именем и датой не найден в Notion",
-    "multiple_candidates": "в Notion найдено несколько подходящих кандидатов",
-    "storage_key_collision": "путь в хранилище уже занят другой записью",
+    "no_candidate_found": "кандидат с таким именем не найден в Notion",
+    "multiple_candidates": "в Notion найдено несколько подходящих карточек",
+    "candidate_choices_exceed_limit": "в Notion слишком много подходящих карточек",
+    "multiple_spots": "у карточки несколько проектов (📍 Spots), нужно выбрать один",
+    "invalid_selected_spot_identity": "не удалось определить выбранный проект",
+    "invalid_storage_identity": "не удалось собрать имя файла для хранилища",
+    "stale_storage_identity": "данные для имени файла изменились, нужно подтвердить выбор",
+    "storage_destination_required": "нужно выбрать папку в Synology",
+    "storage_key_collision": "в выбранной папке уже есть другой файл с таким именем",
+    "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
+    "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
+    "autonomous_routing_model_error": "не удалось автоматически выбрать папку",
 }
 
 
@@ -594,20 +609,21 @@ def _item_line(item: dict[str, Any], *, review: bool = False) -> str:
         parts.append(f"кандидат: {candidate}")
     if "is_new" in item:
         parts.append("новая запись" if item.get("is_new") else "повторная обработка")
+    if item.get("spot"):
+        parts.append(f"проект: {item['spot']}")
     if review:
-        parts.append(f"review: {_review_reason(item.get('review_reason'))}")
+        parts.append(f"нужно уточнение: {_review_reason(item.get('review_reason'))}")
     else:
         parts.append(f"статус: {_status_label(item.get('status'))}")
-    recording_id = item.get("id") or item.get("recording_id")
-    if recording_id:
-        parts.append(f"recording ID: {recording_id}")
     generated_filename = item.get("generated_filename")
     if generated_filename:
         parts.append(f"имя в хранилище: {generated_filename}")
     if item.get("error"):
         parts.append(f"ошибка: {item['error']}")
+    if item.get("notion_url"):
+        parts.append(f"карточка Notion: {item['notion_url']}")
     if item.get("safe_link"):
-        parts.append(f"ссылка: {item['safe_link']}")
+        parts.append(f"запись: {item['safe_link']}")
     return "- " + "; ".join(parts)
 
 
@@ -637,13 +653,15 @@ def _scan_message(result: dict[str, Any]) -> str:
     ]
     skipped = int(result.get("skipped_legacy", 0))
     if skipped:
-        lines.append(f"Старых записей пропущено по правилу canary: {skipped}.")
+        lines.append(f"Старых записей пропущено (созданы до начала работы агента): {skipped}.")
     lines.append(f"Обработано в этом запуске: {int(result.get('processed', len(items)))}.")
-    lines.append(f"Требуют review: {int(result.get('manual_review', len(review_items)))}.")
+    lines.append(
+        f"Требуют вашего уточнения: {int(result.get('manual_review', len(review_items)))}."
+    )
     lines.extend(_item_line(item, review=True) for item in review_items)
     lines.append(f"Ожидают повторной обработки: {int(result.get('pending', len(pending_items)))}.")
     lines.extend(_item_line(item) for item in pending_items)
-    lines.append(f"Не требуют review: {int(result.get('without_review', len(clear_items)))}.")
+    lines.append(f"Обработаны без вопросов: {int(result.get('without_review', len(clear_items)))}.")
     lines.extend(_item_line(item) for item in clear_items)
     failed_recordings = int(result.get("failed_recordings", len(failed_items)))
     lines.append(f"С ошибкой: {failed_recordings}.")
@@ -652,8 +670,8 @@ def _scan_message(result: dict[str, Any]) -> str:
         lines.append(
             f"Показано результатов: {len(items)} из "
             f"{int(result.get('processed', len(items)))}. "
-            "Остальные не включены в ответ; сузьте status-запрос по дате, кандидату, "
-            "recording ID или статусу."
+            "Остальные не включены в ответ; уточните запрос статуса по дате, кандидату "
+            "или статусу."
         )
     backend_failures = int(result.get("failed", 0))
     additional_failures = max(0, backend_failures - failed_recordings)
@@ -713,12 +731,12 @@ def _mutation_message(command: str, result: dict[str, Any]) -> str:
 def _questions_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
-        return "No active Recording Agent questions."
-    lines = [f"Active Recording Agent questions: {len(items)}."]
+        return "Открытых вопросов по записям нет."
+    lines = [f"Открытых вопросов по записям: {len(items)}."]
     for number, item in enumerate(items, start=1):
         lines.append(
             f"{number}. {str(item.get('filename') or 'recording')[:240]} — "
-            f"{str(item.get('reason') or 'clarification required')[:240]}"
+            f"{_review_reason(item.get('reason'))[:240]}"
         )
         choices = [choice for choice in item.get("choices", []) if isinstance(choice, dict)]
         for choice_number, choice in enumerate(choices[:10], start=1):
@@ -736,22 +754,22 @@ def _answer_message(result: dict[str, Any]) -> str:
     rejected = [item for item in result.get("rejected", []) if isinstance(item, dict)]
     pending = [item for item in result.get("pending", []) if item]
     lines = [
-        f"Answers accepted: {len(accepted)}; rejected: {len(rejected)}; "
-        f"still pending: {len(pending)}."
+        f"Принято ответов: {len(accepted)}; отклонено: {len(rejected)}; "
+        f"ещё ждут ответа: {len(pending)}."
     ]
     for item in rejected:
         reason = str(item.get("reason") or "rejected")[:300]
-        lines.append(f"- Question {item.get('question_id', '')}: {reason}")
+        lines.append(f"- Ответ не принят: {reason}")
     if accepted:
-        lines.append("Processing started for the accepted answers.")
+        lines.append("Обработка по принятым ответам запущена.")
     return "\n".join(lines)
 
 
 def _destinations_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
-        return "No writable storage destinations are available."
-    lines = [f"Writable storage destinations: {len(items)}."]
+        return "Нет доступных папок для записи в Synology."
+    lines = [f"Доступные папки в Synology: {len(items)}."]
     for number, item in enumerate(items, start=1):
         label = str(item.get("path_label") or item.get("display_name") or "folder")
         lines.append(f"{number}. {label[:240]}")
@@ -760,13 +778,12 @@ def _destinations_message(result: dict[str, Any]) -> str:
 
 def _cleanup_preview_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
-    lines = [f"Cleanup preview contains {len(items)} completed recordings."]
+    lines = [f"Готовы к очистке (уже сохранены в Synology): {len(items)}."]
     for number, item in enumerate(items, start=1):
-        lines.append(
-            f"{number}. {str(item.get('filename') or 'recording')[:240]} "
-            f"(recording ID: {item.get('recording_id', '')})"
-        )
-    lines.append("Nothing has been moved. Explicit confirmation is required.")
+        lines.append(f"{number}. {str(item.get('filename') or 'запись')[:240]}")
+    lines.append(
+        "Пока ничего не перемещено. Для переноса в корзину Диска нужно ваше подтверждение."
+    )
     return "\n".join(lines)
 
 
@@ -777,7 +794,20 @@ def _cleanup_confirm_message(result: dict[str, Any]) -> str:
         state = str(item.get("state") or "unknown")
         states[state] = states.get(state, 0) + 1
     summary = ", ".join(f"{state}: {count}" for state, count in sorted(states.items()))
-    return f"Cleanup confirmation completed. {summary or 'No eligible recordings.'}"
+    return f"Очистка выполнена. {summary or 'Подходящих записей нет.'}"
+
+
+def _stored_message(subject: str, result: dict[str, Any]) -> str:
+    candidate = str(result.get("candidate_name") or "")
+    who = f" ({candidate})" if candidate else ""
+    if result.get("status") != "completed":
+        return f"{subject}{who}: {_status_label(result.get('status'))}."
+    lines = [f"Готово: {subject.lower()}{who} сохранена."]
+    if result.get("notion_url"):
+        lines.append(f"Карточка в Notion: {result['notion_url']}")
+    if result.get("safe_link"):
+        lines.append(f"Запись: {result['safe_link']}")
+    return "\n".join(lines)
 
 
 def _message_for(command: str, result: Any) -> str:
@@ -796,19 +826,13 @@ def _message_for(command: str, result: Any) -> str:
     if command == "destinations":
         return _destinations_message(result)
     if command == "create-destination":
-        return f"Storage destination created: {str(result.get('display_name') or 'folder')[:200]}."
+        return f"Папка создана: {str(result.get('display_name') or 'папка')[:200]}."
     if command == "non-interview":
-        return (
-            f"Working-meeting recording processed; status: {_status_label(result.get('status'))}; "
-            f"link: {result.get('safe_link') or 'unavailable'}."
-        )
+        return _stored_message("Запись рабочей встречи", result)
     if command == "route-interview":
-        return (
-            f"Interview recording processed; status: {_status_label(result.get('status'))}; "
-            f"link: {result.get('safe_link') or 'unavailable'}."
-        )
+        return _stored_message("Запись собеседования", result)
     if command == "reroute-recording":
-        return f"Recording moved; link: {result.get('safe_link') or 'unavailable'}."
+        return f"Запись перенесена. Новая ссылка: {result.get('safe_link') or 'пока недоступна'}."
     if command == "notion-reassignment-resolve":
         return _destinations_message({"items": result.get("items", [])})
     if command == "notion-reassignment-propose":

@@ -360,9 +360,9 @@ def test_scan_message_reports_counts_and_every_category() -> None:
     )
 
     assert "Новых записей добавлено: 3." in message
-    assert "Старых записей пропущено по правилу canary: 6." in message
-    assert "Требуют review: 1." in message
-    assert "Не требуют review: 1." in message
+    assert "Старых записей пропущено (созданы до начала работы агента): 6." in message
+    assert "Требуют вашего уточнения: 1." in message
+    assert "Обработаны без вопросов: 1." in message
     assert "С ошибкой: 1." in message
     assert "review.webm" in message
     assert "complete.webm" in message
@@ -386,7 +386,7 @@ def test_empty_scan_message_is_explicit_without_claiming_disk_is_empty() -> None
 
     assert "Новых записей добавлено: 0." in message
     assert "Обнаружено файлов для проверки: 7." in message
-    assert "Старых записей пропущено по правилу canary: 7." in message
+    assert "Старых записей пропущено (созданы до начала работы агента): 7." in message
 
 
 def test_scan_message_explains_calendar_discovery_abort() -> None:
@@ -431,7 +431,7 @@ def test_scan_message_lists_found_as_pending_not_without_review() -> None:
 
     assert "Ожидают повторной обработки: 1." in message
     assert message.count("pending.webm") == 1
-    assert "Не требуют review: 0." in message
+    assert "Обработаны без вопросов: 0." in message
 
 
 def test_scan_message_explains_truncation_without_double_counting_failures() -> None:
@@ -458,7 +458,7 @@ def test_scan_message_explains_truncation_without_double_counting_failures() -> 
     )
 
     assert "Показано результатов: 1 из 51." in message
-    assert "сузьте status-запрос по дате, кандидату, recording ID или статусу" in message
+    assert "уточните запрос статуса по дате, кандидату или статусу" in message
     assert "Полный список доступен через status" not in message
     assert "Дополнительных ошибок" not in message
 
@@ -484,7 +484,7 @@ def test_status_message_lists_identity_status_and_error() -> None:
     assert "Найдено записей: 1." in message
     assert "interview.webm" in message
     assert "Иван Иванов" in message
-    assert "кандидат с нужным именем и датой не найден в Notion" in message
+    assert "кандидат с таким именем не найден в Notion" in message
     assert "имя в хранилище: stored-interview.webm" in message
 
 

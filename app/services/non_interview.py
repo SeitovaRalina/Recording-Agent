@@ -43,8 +43,14 @@ class NonInterviewService:
                 raise NonInterviewRejectedError("Recording not found")
             if recording.version != expected_version:
                 raise NonInterviewRejectedError("Recording version is stale")
-            if recording.status != RecordingStatus.MANUAL_REVIEW_REQUIRED:
+            retry = (
+                recording.status == RecordingStatus.FAILED
+                and recording.route_type == "non_interview"
+            )
+            if recording.status != RecordingStatus.MANUAL_REVIEW_REQUIRED and not retry:
                 raise NonInterviewRejectedError("Recording is not awaiting a route decision")
+            if retry:
+                recording.reset_for_retry()
             destination = await self._destinations.resolve(session, recruiter, destination_id)
             filename = recording.generated_filename or recording.disk_filename
             recording.route_type = "non_interview"

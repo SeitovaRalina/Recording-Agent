@@ -209,6 +209,26 @@ def test_cleanup_preview_message_requires_explicit_confirmation() -> None:
         },
     )
 
-    assert "Nothing has been moved" in message
-    assert "Explicit confirmation is required" in message
+    assert "Пока ничего не перемещено" in message
+    assert "нужно ваше подтверждение" in message
     assert "must-not-render" not in message
+    assert "11111111-1111" not in message
+
+
+def test_route_interview_message_reports_notion_card_and_recording_links() -> None:
+    message = CLIENT._message_for(
+        "route-interview",
+        {
+            "recording_id": "11111111-1111-1111-1111-111111111111",
+            "status": "completed",
+            "version": 6,
+            "safe_link": "https://gofile.me/x",
+            "notion_url": "https://app.notion.com/p/card",
+            "candidate_name": "Dmitry",
+        },
+    )
+
+    assert message.startswith("Готово: запись собеседования (Dmitry) сохранена.")
+    assert "https://app.notion.com/p/card" in message
+    assert "https://gofile.me/x" in message
+    assert "11111111-1111" not in message

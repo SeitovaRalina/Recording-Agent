@@ -71,6 +71,8 @@ class ScanItem(BaseModel):
     review_reason: str | None
     generated_filename: str | None
     safe_link: str | None
+    notion_url: str | None = None
+    spot: str | None = None
     error: str | None
 
 
@@ -111,6 +113,8 @@ class RecordingStatusItem(BaseModel):
     version: int
     found_at: str
     safe_link: str | None
+    notion_url: str | None = None
+    spot: str | None = None
     error: str | None
 
 
@@ -261,6 +265,8 @@ class InterviewRouteResponse(BaseModel):
     status: RecordingStatus
     version: int
     safe_link: str
+    notion_url: str = ""
+    candidate_name: str = ""
     replayed: bool = False
 
 
@@ -444,6 +450,7 @@ async def route_interview(
         if recording.status not in {
             RecordingStatus.CANDIDATE_MATCHED,
             RecordingStatus.MANUAL_REVIEW_REQUIRED,
+            RecordingStatus.FAILED,
         }:
             raise DestinationRejectedError("Recording is not awaiting interview destination")
         if (
@@ -452,6 +459,8 @@ async def route_interview(
             or not recording.notion_page_id
         ):
             raise DestinationRejectedError("Recording candidate state is incomplete")
+        if recording.status == RecordingStatus.FAILED:
+            recording.reset_for_retry()
         destination = await _destination_service(request).resolve(
             session, recruiter, body.destination_id
         )
@@ -500,6 +509,8 @@ async def route_interview(
             status=refreshed.status,
             version=refreshed.version,
             safe_link=refreshed.synology_share_url or "",
+            notion_url=refreshed.notion_page_url or "",
+            candidate_name=refreshed.candidate_name or "",
         )
     if not resumed:
         raise HTTPException(
@@ -890,6 +901,8 @@ async def recording_status(
             version=row.version,
             found_at=row.found_at.isoformat(),
             safe_link=row.synology_share_url,
+            notion_url=row.notion_page_url,
+            spot=row.project_or_spot,
             error=row.error_message,
         )
         for row in rows
@@ -1311,6 +1324,8 @@ def _scan_response(
             review_reason=row.manual_review_reason,
             generated_filename=row.generated_filename,
             safe_link=row.synology_share_url,
+            notion_url=row.notion_page_url,
+            spot=row.project_or_spot,
             error=row.error_message,
         )
         for row in (rows or [])
