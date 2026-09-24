@@ -1030,8 +1030,20 @@ def _hint_matches_page(hint: str, page: NotionPage) -> bool:
     }
 
 
+_PAGE_ID = re.compile(
+    r"(?<![0-9a-f])([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})(?![0-9a-f])"
+)
+
+
 def _canonical_notion_page_id(value: str) -> str | None:
-    compact = re.sub(r"[^0-9a-f]", "", value.casefold())
-    if len(compact) != 32:
+    """Page id from a raw id or a Notion URL (`https://app.notion.com/p/Title-<32 hex>?v=...`).
+
+    Only the path is searched, and the last id wins (the page id ends the slug).
+    """
+    text = value.strip().casefold()
+    if "://" in text:
+        text = text.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0]
+    matches = _PAGE_ID.findall(text)
+    if not matches:
         return None
-    return f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-{compact[16:20]}-{compact[20:]}"
+    return "-".join(matches[-1])
