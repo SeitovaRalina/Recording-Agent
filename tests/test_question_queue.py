@@ -205,13 +205,18 @@ async def test_reconcile_processing_marks_terminal_and_queues_completion(
     await session.commit()
 
     await service.reconcile_processing(session, recruiter=recruiter)
-
     assert question.status == ManualReviewStatus.COMPLETED
+    assert await session.scalar(select(NotificationOutbox)) is None
+
+    assert await service.queue_terminal_notifications(session) == 1
+    assert await service.queue_terminal_notifications(session) == 0
     completion = await session.scalar(
         select(NotificationOutbox).where(NotificationOutbox.kind == "completion")
     )
     assert completion is not None
-    assert "https://storage.example/file" in str(completion.payload["message"])
+    rendered = str(completion.payload["message"])
+    assert rendered.startswith("✅ Запись собеседования обработана")
+    assert "https://storage.example/file" in rendered
 
 
 @pytest.mark.anyio
@@ -238,15 +243,17 @@ async def test_reconcile_processing_recovers_failed_work_with_actionable_error(
     await session.commit()
 
     await service.reconcile_processing(session, recruiter=recruiter)
-
     assert question.status == ManualReviewStatus.FAILED
+
+    await service.queue_terminal_notifications(session)
     failure = await session.scalar(
         select(NotificationOutbox).where(NotificationOutbox.kind == "error")
     )
     assert failure is not None
     rendered = str(failure.payload["message"])
-    assert "notion_update" in rendered
-    assert "retry" in rendered.casefold()
+    assert "запись ссылки в Notion" in rendered
+    assert "Повтори обработку" in rendered
+    assert "schema changed" not in rendered
 
 
 @pytest.mark.anyio
@@ -668,3 +675,43 @@ async def test_questions_of_settled_recordings_are_hidden_and_closed(
     assert settled.status == ManualReviewStatus.COMPLETED
     assert settled.result == {"closed_by": "recording_settled"}
     assert open_question.status == ManualReviewStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_terminal_sweep_renders_routes_and_skips_already_notified(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    meeting = _question("meeting", "unused-1").recording
+    meeting.status = RecordingStatus.COMPLETED
+    meeting.route_type = "non_interview"
+    meeting.synology_share_url = "https://gofile.me/x"
+    meeting.synology_folder_path = "/home/Recruiting-NE/2. Interviews/BizDev"
+    notified = _question("notified", "unused-2").recording
+    notified.status = RecordingStatus.COMPLETED
+    notified.terminal_notified_at = datetime.now(UTC)
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                active=True,
+            ),
+            meeting,
+            notified,
+        ]
+    )
+    await session.commit()
+
+    assert await service.queue_terminal_notifications(session) == 1
+    item = await session.scalar(select(NotificationOutbox))
+    assert item is not None
+    message = str(item.payload["message"])
+    assert message.startswith("✅ Запись рабочей встречи сохранена")
+    assert "Папка: Recruiting-NE / 2. Interviews / BizDev" in message
+    assert item.mattermost_channel_id == "dm"

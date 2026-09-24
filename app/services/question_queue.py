@@ -30,6 +30,56 @@ QuestionAction = Literal["resolve", "ignore"]
 SETTLED_RECORDING_STATUSES = (RecordingStatus.COMPLETED, RecordingStatus.IGNORED)
 
 
+_FAILED_STEP_LABELS = {
+    "calendar_matching": "сопоставление с календарём",
+    "candidate_matching": "поиск карточки в Notion",
+    "destination": "выбор папки в Synology",
+    "download": "скачивание с Яндекс.Диска",
+    "ensure_folder": "подготовка папки в Synology",
+    "upload": "загрузка в Synology",
+    "share_link": "создание ссылки в Synology",
+    "notion_preflight": "проверка базы Notion",
+    "notion_update": "запись ссылки в Notion",
+    "mark_processed": "отметка файла на Яндекс.Диске",
+}
+
+
+def _folder_label(path: str | None) -> str:
+    parts = [part for part in (path or "").split("/") if part]
+    if parts and parts[0] == "home":
+        parts = parts[1:]
+    return " / ".join(parts)
+
+
+def render_terminal_message(recording: Recording) -> str:
+    """Recruiter-facing result; contains links and a folder label, never tokens or errors."""
+    if recording.status == RecordingStatus.COMPLETED:
+        if recording.route_type == "non_interview":
+            lines = ["✅ Запись рабочей встречи сохранена", f"Файл: {recording.disk_filename}"]
+        else:
+            lines = [
+                "✅ Запись собеседования обработана",
+                f"Кандидат: {recording.candidate_name or '—'}",
+            ]
+            if recording.notion_page_url:
+                lines.append(f"Карточка в Notion: {recording.notion_page_url}")
+        if recording.synology_share_url:
+            lines.append(f"Запись: {recording.synology_share_url}")
+        if folder := _folder_label(recording.synology_folder_path):
+            lines.append(f"Папка: {folder}")
+        return "\n".join(lines)
+    step = _FAILED_STEP_LABELS.get(recording.error_step or "", "обработка записи")
+    subject = recording.candidate_name or recording.disk_filename
+    return "\n".join(
+        [
+            f"⚠️ Не удалось обработать запись «{recording.disk_filename}»",
+            f"Этап: {step}",
+            f"Исходный файл на Яндекс.Диске не тронут. Чтобы повторить, напишите Миле: "
+            f"«Повтори обработку записи {subject}».",
+        ]
+    )
+
+
 @dataclass(frozen=True)
 class QuestionAnswer:
     question_id: uuid.UUID
@@ -281,6 +331,49 @@ class QuestionQueueService:
             lines.append(f"   {choice_number}. " + " — ".join(details))
         return lines
 
+    async def queue_terminal_notifications(self, session: AsyncSession, *, limit: int = 20) -> int:
+        """Queue one completion/error DM per settled recording through the durable outbox.
+
+        Every route (Mila, autonomous worker, scheduled scan, restart recovery) ends in
+        `completed` or `failed`; sweeping those states keeps the recruiter notification
+        independent of which path finished the work.
+        """
+        if self._offline_test_mode:
+            return 0
+        rows = (
+            await session.execute(
+                select(Recording, RecruiterConfig)
+                .join(RecruiterConfig, RecruiterConfig.email == Recording.disk_owner_email)
+                .where(
+                    Recording.status.in_([RecordingStatus.COMPLETED, RecordingStatus.FAILED]),
+                    Recording.terminal_notified_at.is_(None),
+                    Recording.terminal_notification_claim.is_(None),
+                    RecruiterConfig.active.is_(True),
+                    RecruiterConfig.mattermost_user_id.is_not(None),
+                    RecruiterConfig.mattermost_dm_channel.is_not(None),
+                )
+                .order_by(Recording.found_at.asc())
+                .limit(limit)
+                .with_for_update(of=Recording, skip_locked=True)
+            )
+        ).all()
+        now = datetime.now(UTC)
+        for recording, recruiter in rows:
+            status = RecordingStatus(recording.status)
+            succeeded = status == RecordingStatus.COMPLETED
+            await self.queue_notification(
+                session,
+                dedupe_key=f"terminal:{recording.id}:{status.value}:{recording.version}",
+                kind="completion" if succeeded else "error",
+                recruiter_user_id=recruiter.mattermost_user_id or "",
+                dm_channel_id=recruiter.mattermost_dm_channel or "",
+                message=render_terminal_message(recording),
+                entity_id=recording.id,
+            )
+            recording.terminal_notified_at = now
+        await session.flush()
+        return len(rows)
+
     async def queue_notification(
         self,
         session: AsyncSession,
@@ -364,6 +457,7 @@ class QuestionQueueService:
         question_id: uuid.UUID,
         succeeded: bool,
         safe_message: str,
+        notify: bool = True,
     ) -> NotificationOutbox | None:
         question = await session.get(ManualReview, question_id)
         if question is None:
@@ -385,7 +479,7 @@ class QuestionQueueService:
             question.failed_at = now
             kind = "error"
         question.result = {"succeeded": succeeded, "message": safe_message[:300]}
-        if self._offline_test_mode:
+        if self._offline_test_mode or not notify:
             await session.flush()
             return None
         return await self.queue_notification(
@@ -438,28 +532,21 @@ class QuestionQueueService:
         for question in questions:
             recording = question.recording
             filename = recording.generated_filename or recording.disk_filename
-            if recording.status in {RecordingStatus.COMPLETED, RecordingStatus.IGNORED}:
-                detail = (
-                    f" Storage: {recording.synology_share_url}."
-                    if recording.synology_share_url
-                    else ""
+            if recording.status in {RecordingStatus.COMPLETED, RecordingStatus.FAILED}:
+                # The recording-level terminal sweep sends the single recruiter result.
+                await self.mark_terminal(
+                    session,
+                    question_id=question.id,
+                    succeeded=recording.status == RecordingStatus.COMPLETED,
+                    safe_message=f"recording {RecordingStatus(recording.status).value}",
+                    notify=False,
                 )
+            elif recording.status == RecordingStatus.IGNORED:
                 await self.mark_terminal(
                     session,
                     question_id=question.id,
                     succeeded=True,
-                    safe_message=f"Finished processing {filename}.{detail}",
-                )
-            elif recording.status == RecordingStatus.FAILED:
-                await self.mark_terminal(
-                    session,
-                    question_id=question.id,
-                    succeeded=False,
-                    safe_message=(
-                        f"Could not finish {filename}: step={recording.error_step or 'unknown'}; "
-                        f"error={(recording.error_message or 'unknown')[:300]}. "
-                        "Check the integration and retry the recording."
-                    ),
+                    safe_message=f"Запись «{filename}» пропущена по вашему ответу.",
                 )
             elif recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED:
                 await self.mark_terminal(
@@ -467,7 +554,8 @@ class QuestionQueueService:
                     question_id=question.id,
                     succeeded=True,
                     safe_message=(
-                        f"Processed the answer for {filename}; another decision is required."
+                        f"Ответ по записи «{filename}» принят. Нужно ещё одно уточнение, "
+                        "вопрос придёт следующим сообщением."
                     ),
                 )
                 await self._reviews.enqueue_review(

@@ -1626,6 +1626,12 @@ async def drain_notification_outbox(
 ) -> None:
     worker_id = str(uuid.uuid4())
     async with session_factory() as session:
+        try:
+            await service.queue_terminal_notifications(session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("Queueing terminal recording notifications failed")
         items = await service.claim_outbox(session, worker_id=worker_id)
         await session.commit()
         for item in items:
