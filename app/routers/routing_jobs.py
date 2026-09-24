@@ -52,6 +52,7 @@ class ActivateResponse(BaseModel):
     snapshot_hash: str
     candidate_name: str
     interview_date: str
+    role: str
     destinations: list[RoutingDestination]
 
 
@@ -63,6 +64,7 @@ class ResolveRequest(WorkerLeaseRequest):
 class DeferRequest(WorkerLeaseRequest):
     snapshot_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     reason: Literal["ambiguous", "no_match", "model_error"]
+    candidate_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
 
 
 class WorkerActionResponse(BaseModel):
@@ -171,6 +173,7 @@ async def defer_job(
             dispatch_nonce=body.dispatch_nonce.get_secret_value(),
             snapshot_hash=body.snapshot_hash,
             reason=body.reason,
+            candidate_ids=body.candidate_ids,
         )
         review = await request.app.state.review_service.enqueue_review(
             session, recording, recruiter
@@ -199,6 +202,7 @@ def _activate_response(payload: WorkerRoutingPayload) -> ActivateResponse:
         snapshot_hash=payload.snapshot_hash,
         candidate_name=payload.candidate_name,
         interview_date=payload.interview_date,
+        role=payload.role,
         destinations=[
             RoutingDestination(id=item[0], label=item[1]) for item in payload.destinations
         ],

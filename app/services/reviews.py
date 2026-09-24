@@ -236,7 +236,8 @@ class ReviewService:
         choices = (recording.manual_review_candidates or [])[:10]
         rendered_choices: list[str] = []
         for index, choice in enumerate(choices, start=1):
-            details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
+            label = choice.get("name") or choice.get("event_summary") or "вариант без названия"
+            details = [str(label)[:160]]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
             if choice.get("spot_url"):

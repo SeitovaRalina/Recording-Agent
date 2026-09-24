@@ -297,6 +297,10 @@ def test_autonomous_routing_defer_sends_nonce_and_snapshot_only(
             "a" * 64,
             "--reason",
             "ambiguous",
+            "--candidate-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--candidate-id",
+            "33333333-3333-3333-3333-333333333333",
         ]
     )
 
@@ -310,6 +314,10 @@ def test_autonomous_routing_defer_sends_nonce_and_snapshot_only(
             "dispatch_nonce": "nonce_value_123456",
             "snapshot_hash": "a" * 64,
             "reason": "ambiguous",
+            "candidate_ids": [
+                "22222222-2222-2222-2222-222222222222",
+                "33333333-3333-3333-3333-333333333333",
+            ],
         },
         "authenticate": False,
     }

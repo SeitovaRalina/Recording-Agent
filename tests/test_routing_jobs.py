@@ -80,7 +80,7 @@ async def test_dispatch_is_idempotent_and_worker_payload_is_bounded(session: Asy
 
     assert payload.job_id == job.id
     assert payload.recording_version == 4
-    assert payload.destinations == ((destination_id, "Android"),)
+    assert payload.destinations == ((destination_id, "Recruiting-E/Android"),)
     assert "canonical_path" not in str(payload)
     stored = await session.get(RoutingJob, job.id)
     assert stored is not None
@@ -152,14 +152,52 @@ async def test_defer_creates_single_recruiter_review_state(session: AsyncSession
         dispatch_nonce=nonce,
         snapshot_hash=payload.snapshot_hash,
         reason="ambiguous",
+        candidate_ids=[payload.destinations[0][0]],
     )
 
     assert recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
     assert recruiter.email == "recruiter@example.com"
     assert recording.manual_review_reason == "autonomous_routing_ambiguous"
     assert recording.manual_review_candidates == [
-        {"destination_id": str(payload.destinations[0][0]), "name": "Android"}
+        {"destination_id": str(payload.destinations[0][0]), "name": "Recruiting-E/Android"}
     ]
+
+
+@pytest.mark.anyio
+async def test_defer_without_candidates_offers_no_catalog_options(session: AsyncSession) -> None:
+    service, job, nonce, _ = await _ready_job(session)
+    payload = await service.activate(
+        session, job_id=job.id, worker_id="recordings-saver", dispatch_nonce=nonce
+    )
+    recording, _ = await service.defer(
+        session,
+        job_id=job.id,
+        worker_id="recordings-saver",
+        dispatch_nonce=nonce,
+        snapshot_hash=payload.snapshot_hash,
+        reason="no_match",
+    )
+
+    assert recording.manual_review_reason == "autonomous_routing_no_match"
+    assert recording.manual_review_candidates == []
+
+
+@pytest.mark.anyio
+async def test_defer_rejects_candidate_outside_snapshot(session: AsyncSession) -> None:
+    service, job, nonce, _ = await _ready_job(session)
+    payload = await service.activate(
+        session, job_id=job.id, worker_id="recordings-saver", dispatch_nonce=nonce
+    )
+    with pytest.raises(RoutingJobRejectedError, match="not in the job snapshot"):
+        await service.defer(
+            session,
+            job_id=job.id,
+            worker_id="recordings-saver",
+            dispatch_nonce=nonce,
+            snapshot_hash=payload.snapshot_hash,
+            reason="ambiguous",
+            candidate_ids=[uuid.uuid4()],
+        )
 
 
 @pytest.mark.anyio

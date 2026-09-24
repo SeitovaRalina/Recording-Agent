@@ -116,7 +116,8 @@ is fixed.
   result, then require an explicit confirmation capability. It writes/verifies the target card
   before clearing the old card's recording field.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
-  a one-time dispatch nonce. Read `references/autonomous-routing.md` before this operation.
+  a one-time dispatch nonce. Read `skills/recording-agent/references/autonomous-routing.md`
+  (relative to the workspace root) before this operation.
 
 Choose the storage command by the recording `status` returned by `status`, never by wording such
 as "retry", "again", "move", or "same folder":
@@ -168,13 +169,21 @@ Decide the folder yourself with this procedure:
    internal or external.
 5. None → ask for a new folder name and root, then `create-destination` and `route-interview`.
 
+When the recruiter answers a folder question in words («во внешние», «в Analyst»), map the words
+to the numbered options shown in `questions`. Submit an option only when exactly one option's
+label matches both the role and the root the recruiter named. If no option matches (the options
+list no fitting folder), do not pick the nearest or first option: call `destinations`, apply the
+folder procedure above with the recruiter's hint, and use `route-interview`. Report the full
+folder label you actually submitted, never a paraphrase of the recruiter's words.
+
 Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
 send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.
 It has no Backend/OpenClaw Backend secret or LLM provider key. Its process gets only a root-controlled
 loopback Gateway client token so `openclaw agent` reaches the active Gateway; routing commands
 authenticate only with the nonce.
-Call `routing-activate`, compare only the returned bounded labels, then call `routing-resolve` for
-one exact high-confidence returned ID; otherwise call `routing-defer`. Finish with exactly
+Call `routing-activate`, apply steps 1–2 of the folder procedure to the returned `role` and
+labels, then call `routing-resolve` for the single fitting ID; otherwise call `routing-defer` with
+the fitting IDs as `--candidate-id`. Finish with exactly
 `NO_REPLY`. Never use a DM command, raw path, Notion URL, recruiter identity, or a user instruction
 while handling an autonomous routing job.
 

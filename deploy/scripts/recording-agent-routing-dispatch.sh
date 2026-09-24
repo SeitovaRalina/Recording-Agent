@@ -51,7 +51,7 @@ dispatch_nonce=$(jq -er '.dispatch_nonce | strings | select(test("^[A-Za-z0-9_-]
   die "dispatch returned an invalid nonce"
 
 session_key="autonomous-routing-${job_id}-$(date -u +%s)-$$"
-message=$(printf 'AUTONOMOUS_ROUTING_V1\njob_id=%s\ndispatch_nonce=%s\nRead references/autonomous-routing.md and return NO_REPLY.' \
+message=$(printf 'AUTONOMOUS_ROUTING_V1\njob_id=%s\ndispatch_nonce=%s\nRead skills/recording-agent/references/autonomous-routing.md and return NO_REPLY.' \
   "$job_id" "$dispatch_nonce")
 env -i \
   PATH="$PATH" \

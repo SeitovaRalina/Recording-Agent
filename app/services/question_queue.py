@@ -338,7 +338,8 @@ class QuestionQueueService:
         for choice_number, choice in enumerate(choices[:10], start=1):
             if not isinstance(choice, dict):
                 continue
-            details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
+            label = choice.get("name") or choice.get("event_summary") or "вариант без названия"
+            details = [str(label)[:160]]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
             if choice.get("spot_url"):

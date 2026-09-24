@@ -111,10 +111,17 @@ def body(ctx: RouteCtx) -> None:
             "вопрос в личку. Рекрутер отвечает."
         ),
         expected=(
-            "Мила вызывает route-interview с папкой 2. Interviews external/Analyst из вариантов "
-            "вопроса и сообщает итог со ссылками."
+            "Мила выбирает вариант Recruiting-E/2. Interviews external/Analyst из вопроса "
+            "(answer или route-interview), называет именно эту папку и сообщает итог со ссылками."
         ),
     )
-    ctx.check_cli(turn, must=("route-interview",))
+    ran = ctx.cli(turn)
+    ctx.check(
+        "E3: Мила отправила выбор папки",
+        "answer или route-interview",
+        " → ".join(ran) or "—",
+        ok="answer" in ran or "route-interview" in ran,
+    )
+    ctx.check_cli(turn)
     state = ctx.wait_for(lambda s: terminal_sent(s, 2), timeout=240)
     ctx.check_completed(state, ambiguous)

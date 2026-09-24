@@ -338,6 +338,13 @@ def _parser() -> argparse.ArgumentParser:
             routing.add_argument(
                 "--reason", required=True, choices=("ambiguous", "no_match", "model_error")
             )
+            routing.add_argument(
+                "--candidate-id",
+                action="append",
+                default=[],
+                type=uuid.UUID,
+                help="plausible destination ID from the snapshot; repeat for each option",
+            )
     return parser
 
 
@@ -423,6 +430,7 @@ def _execute(args: argparse.Namespace) -> Any:
                 "dispatch_nonce": args.dispatch_nonce,
                 "snapshot_hash": args.snapshot_hash,
                 "reason": args.reason,
+                "candidate_ids": [str(candidate_id) for candidate_id in args.candidate_id],
             },
             authenticate=False,
         )
@@ -713,7 +721,7 @@ def _review_message(result: dict[str, Any]) -> str:
     if choices:
         lines.append("Доступные варианты:")
         for index, choice in enumerate(choices, start=1):
-            label = str(choice.get("name") or choice.get("summary") or choice.get("id") or index)
+            label = _choice_label(choice)
             project = choice.get("project_or_spot")
             url = choice.get("url")
             details = [label]
@@ -726,6 +734,15 @@ def _review_message(result: dict[str, Any]) -> str:
     else:
         lines.append("Автоматических вариантов нет; требуется ручная проверка данных.")
     return "\n".join(lines)
+
+
+def _choice_label(choice: dict[str, Any]) -> str:
+    label = choice.get("name") or choice.get("summary") or choice.get("event_summary")
+    if not label:
+        return "вариант без названия"
+    start = choice.get("event_start_utc")
+    suffix = f" ({str(start)[:16].replace('T', ' ')} UTC)" if start else ""
+    return f"{str(label)[:160]}{suffix}"
 
 
 def _mutation_message(command: str, result: dict[str, Any]) -> str:
@@ -752,7 +769,7 @@ def _questions_message(result: dict[str, Any]) -> str:
         )
         choices = [choice for choice in item.get("choices", []) if isinstance(choice, dict)]
         for choice_number, choice in enumerate(choices[:10], start=1):
-            details = [str(choice.get("name") or choice.get("summary") or "option")[:160]]
+            details = [_choice_label(choice)]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
             if choice.get("url"):
@@ -862,6 +879,12 @@ def _message_for(command: str, result: Any) -> str:
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":
         return _cleanup_confirm_message(result)
+    if command == "routing-activate":
+        return "Задание автомаршрутизации получено."
+    if command == "routing-resolve":
+        return "Папка выбрана, перенос запущен."
+    if command == "routing-defer":
+        return "Решение отложено: рекрутеру отправлен вопрос."
     return _mutation_message(command, result)
 
 
