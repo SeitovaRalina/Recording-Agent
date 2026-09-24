@@ -917,7 +917,7 @@ async def _run_transfer_recording(
             source_processed=True,
             disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
         )
-        await session.commit()
+        await _complete_marked_source(session, recording, status)
         trace(
             settings,
             "pipeline.completed_source_marked",
@@ -1140,6 +1140,18 @@ async def _resume_committed_transfer_steps(
         RecordingStatus.SOURCE_MARKED_PROCESSED,
         source_processed=True,
         disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
+    )
+    await _complete_marked_source(session, recording, status)
+
+
+async def _complete_marked_source(
+    session: AsyncSession, recording: Recording, status: StatusService
+) -> None:
+    # Marking the Disk source is the last pipeline step: no retention job advances this state,
+    # and the terminal DM and Disk cleanup both wait for `completed`.
+    await session.commit()
+    await status.advance(
+        session, recording, RecordingStatus.COMPLETED, completed_at=datetime.now(UTC)
     )
     await session.commit()
 

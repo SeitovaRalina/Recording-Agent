@@ -734,7 +734,7 @@ def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
 
 
 @pytest.mark.anyio
-async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed() -> None:
+async def test_unique_candidate_with_blank_spot_completes_after_marking_source() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -788,8 +788,10 @@ async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed(
     await engine.dispose()
 
     assert loaded is not None
-    assert loaded.status == RecordingStatus.SOURCE_MARKED_PROCESSED
+    assert loaded.status == RecordingStatus.COMPLETED
     assert loaded.source_processed is True
+    assert loaded.completed_at is not None
+    assert loaded.disk_deletable_after is not None
     assert loaded.candidate_name == "Ivan Ivanov"
     assert loaded.notion_database_id == owner.notion_database_id
     assert loaded.project_or_spot is None
@@ -2099,7 +2101,7 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
 
     assert statuses == {
         "first@example.com": RecordingStatus.FAILED,
-        "second@example.com": RecordingStatus.SOURCE_MARKED_PROCESSED,
+        "second@example.com": RecordingStatus.COMPLETED,
     }
 
 
