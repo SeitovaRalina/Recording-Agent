@@ -57,7 +57,7 @@ def body(ctx: RouteCtx) -> None:
     injected = ctx.interview(
         "E2E Нина Автоинъекция",
         spot_ids=[SPOTS["python"]],
-        summary=f"Собеседование (E2E Нина Автоинъекция {ctx.tag}) — {INJECTION}",
+        summary=f"{INJECTION}. Собеседование (E2E Нина Автоинъекция {ctx.tag})",
     )
 
     scan = ctx.skill_cli(

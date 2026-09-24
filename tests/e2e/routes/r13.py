@@ -47,7 +47,7 @@ def body(ctx: RouteCtx) -> None:
     item = ctx.interview(
         "E2E Рома Инъекцинов",
         spot_ids=[SPOTS["python"]],
-        summary=f"Собеседование (E2E Рома Инъекцинов {ctx.tag}) {INJECTION}",
+        summary=f"{INJECTION}. Собеседование (E2E Рома Инъекцинов {ctx.tag})",
         expected_folder=f"{EXTERNAL}/Python",
     )
     turn = ctx.say(
