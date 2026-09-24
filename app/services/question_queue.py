@@ -30,6 +30,9 @@ QuestionAction = Literal["resolve", "ignore"]
 SETTLED_RECORDING_STATUSES = (RecordingStatus.COMPLETED, RecordingStatus.IGNORED)
 
 
+_FOLDER_QUESTION_TYPES = frozenset(
+    {"storage_destination_required", "autonomous_routing_no_match"}
+)
 _QUESTION_LABELS = {
     "low_confidence": "подтвердите событие календаря",
     "no_compatible_event": "событие календаря не найдено — это собеседование?",
@@ -333,6 +336,10 @@ class QuestionQueueService:
         label = _QUESTION_LABELS.get(question.question_type, question.question_type)
         lines = [f"{number}. {question.recording.disk_filename}: {label}"]
         choices = question.question_context.get("choices")
+        if question.question_type in _FOLDER_QUESTION_TYPES and not choices:
+            # The Backend does not map Spots to folders; Mila picks the folder from the answer.
+            lines.append(f"   Ответ — папка словами, например: «{number} — Analyst во внешних».")
+            return lines
         if not isinstance(choices, list):
             return lines
         for choice_number, choice in enumerate(choices[:10], start=1):

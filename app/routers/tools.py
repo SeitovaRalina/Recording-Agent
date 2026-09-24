@@ -117,11 +117,13 @@ class RecordingStatusItem(BaseModel):
     notion_url: str | None = None
     spot: str | None = None
     error: str | None
+    error_step: str | None = None
 
 
 class RecordingStatusResponse(BaseModel):
     items: list[RecordingStatusItem]
     count: int
+    total: int | None = None
 
 
 class ReviewContext(BaseModel):
@@ -908,6 +910,11 @@ async def recording_status(
     rows = list(
         (await session.scalars(statement.order_by(Recording.found_at.desc()).limit(limit))).all()
     )
+    total = len(rows)
+    if total == limit:
+        total = int(
+            await session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        )
     items = [
         RecordingStatusItem(
             id=row.id,
@@ -923,10 +930,11 @@ async def recording_status(
             notion_url=row.notion_page_url,
             spot=row.project_or_spot,
             error=row.error_message,
+            error_step=row.error_step,
         )
         for row in rows
     ]
-    return RecordingStatusResponse(items=items, count=len(items))
+    return RecordingStatusResponse(items=items, count=len(items), total=total)
 
 
 @router.get("/reviews/{review_id}", response_model=ReviewContext)

@@ -749,4 +749,7 @@ def test_digest_question_uses_recruiter_label_not_internal_code() -> None:
 
     lines = QuestionQueueService._render_question(1, question)
 
-    assert lines == ["1. interview.webm: выберите папку в Synology"]
+    assert lines == [
+        "1. interview.webm: выберите папку в Synology",
+        "   Ответ — папка словами, например: «1 — Analyst во внешних».",
+    ]

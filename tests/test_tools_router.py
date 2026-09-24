@@ -834,6 +834,45 @@ async def test_status_query_is_recruiter_scoped(
     assert payload["items"][0]["filename"] == "one.webm"
     assert payload["items"][0]["requires_review"] is False
     assert payload["items"][0]["review_reason"] is None
+    assert payload["total"] == 1
+
+
+@pytest.mark.anyio
+async def test_status_reports_total_beyond_the_limit(
+    async_client: AsyncClient, session: AsyncSession
+) -> None:
+    session.add(
+        RecruiterConfig(
+            email="r@example.com",
+            notion_database_id="db",
+            synology_base_folder="test",
+            mattermost_user_id="mm-user",
+        )
+    )
+    session.add_all(
+        Recording(
+            disk_file_id=f"file-{index}",
+            disk_path=f"disk:/{index}.webm",
+            disk_filename=f"{index}.webm",
+            disk_owner_email="r@example.com",
+        )
+        for index in range(3)
+    )
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    response = await async_client.get(
+        "/tools/recordings/status",
+        params={"recruiter_user_id": "mm-user", "limit": 2},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert response.json()["total"] == 3
 
 
 @pytest.mark.anyio

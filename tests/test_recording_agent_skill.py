@@ -496,6 +496,41 @@ def test_status_message_lists_identity_status_and_error() -> None:
     assert "имя в хранилище: stored-interview.webm" in message
 
 
+def test_status_message_counts_statuses_and_hides_errors_of_settled_recordings() -> None:
+    message = CLIENT._message_for(
+        "status",
+        {
+            "total": 42,
+            "items": [
+                {
+                    "filename": "done.webm",
+                    "status": "completed",
+                    "error": "Notion page update transport failed",
+                    "error_step": "notion_update",
+                },
+                {
+                    "filename": "skipped.webm",
+                    "status": "ignored",
+                    "error": "Interview destination must be selected",
+                },
+                {
+                    "filename": "broken.webm",
+                    "status": "failed",
+                    "error": "Notion page update failed with HTTP 400",
+                    "error_step": "notion_update",
+                },
+            ],
+        },
+    )
+
+    assert "Найдено записей: 42; показаны последние 3." in message
+    assert "обработка завершена — 1" in message
+    assert "запись проигнорирована — 1" in message
+    assert "transport failed" not in message
+    assert "must be selected" not in message
+    assert "ошибка (шаг: запись ссылки в карточку Notion): Notion page update failed" in message
+
+
 def test_review_message_lists_only_returned_choices() -> None:
     message = CLIENT._message_for(
         "review",

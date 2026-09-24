@@ -69,6 +69,23 @@ ERROR_LABELS = {
 }
 
 
+SETTLED_STATUSES = frozenset({"completed", "ignored", "source_deleted"})
+ERROR_STEP_LABELS = {
+    "calendar_matching": "поиск события в календаре",
+    "candidate_matching": "поиск карточки в Notion",
+    "destination": "выбор папки в Synology",
+    "ensure_folder": "создание папки в Synology",
+    "download": "скачивание с Диска",
+    "upload": "загрузка в Synology",
+    "share_link": "создание ссылки на запись",
+    "notion_preflight": "проверка доступа к Notion",
+    "notion_update": "запись ссылки в карточку Notion",
+    "mark_processed": "отметка исходника на Диске",
+    "restart_recovery": "восстановление после перезапуска",
+    "review_resolution": "применение ответа на вопрос",
+}
+
+
 class ClientError(Exception):
     """Represent a safe client-facing failure."""
 
@@ -638,8 +655,16 @@ def _item_line(item: dict[str, Any], *, review: bool = False) -> str:
     if generated_filename:
         parts.append(f"имя в хранилище: {generated_filename}")
     # A parked recording's review reason already explains it; its raw Backend error text does not.
-    if item.get("error") and (not review or item["error"] in ERROR_LABELS):
-        parts.append(f"ошибка: {ERROR_LABELS.get(item['error'], item['error'])}")
+    # A settled recording keeps its last error in the database, but it no longer applies.
+    status = item.get("status")
+    if (
+        item.get("error")
+        and status not in SETTLED_STATUSES
+        and (not review or item["error"] in ERROR_LABELS)
+    ):
+        step = ERROR_STEP_LABELS.get(str(item.get("error_step") or ""))
+        where = f" (шаг: {step})" if step else ""
+        parts.append(f"ошибка{where}: {ERROR_LABELS.get(item['error'], item['error'])}")
     if item.get("notion_url"):
         parts.append(f"карточка Notion: {item['notion_url']}")
     if item.get("safe_link"):
@@ -704,7 +729,21 @@ def _status_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
         return "По заданным фильтрам записей не найдено."
-    lines = [f"Найдено записей: {len(items)}."]
+    total = result.get("total")
+    header = f"Найдено записей: {len(items)}."
+    if isinstance(total, int) and total > len(items):
+        header = (
+            f"Найдено записей: {total}; показаны последние {len(items)}. "
+            "Уточните дату или кандидата, чтобы увидеть остальные."
+        )
+    counts: dict[str, int] = {}
+    for item in items:
+        label = _status_label(item.get("status"))
+        counts[label] = counts.get(label, 0) + 1
+    lines = [
+        header,
+        "По статусам: " + "; ".join(f"{label} — {n}" for label, n in counts.items()) + ".",
+    ]
     lines.extend(
         _item_line(item, review=item.get("status") == "manual_review_required") for item in items
     )
