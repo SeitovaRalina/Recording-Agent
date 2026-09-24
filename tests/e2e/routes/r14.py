@@ -27,7 +27,7 @@ def _digests(local_date: str) -> list[dict]:
         "sql",
         {
             "query": "select status, created_at from question_digests where local_date = "
-            "cast(:d as date)",
+            "cast(cast(:d as text) as date)",
             "params": {"d": local_date},
         },
     )
@@ -38,7 +38,8 @@ def _summaries(since: datetime) -> list[dict]:
         "sql",
         {
             "query": "select status, payload, created_at, sent_at from notification_outbox "
-            "where kind = 'summary' and created_at >= :since order by created_at",
+            "where kind = 'summary' and created_at >= cast(cast(:since as text) as timestamptz) "
+            "order by created_at",
             "params": {"since": since.isoformat()},
         },
     )
