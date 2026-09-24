@@ -624,11 +624,17 @@ class SynologyBackend:
         root: str,
         expected_size: int | None,
         expected_owner: dict[str, object],
+        target_root: str | None = None,
     ) -> SynologyMoveResult:
-        """Move a proven owned file without overwrite and prove the result before returning."""
+        """Move a proven owned file without overwrite and prove the result before returning.
+
+        The source is confined to `root` and the target to `target_root` (default: `root`), so a
+        move between two allowed interview roots is validated on both ends.
+        """
+        destination_root = target_root or root
         source = self.canonical_under_root(root, source_path)
-        folder = self.canonical_under_root(root, target_folder)
-        target = self.canonical_under_root(root, f"{folder.rstrip('/')}/{filename}")
+        folder = self.canonical_under_root(destination_root, target_folder)
+        target = self.canonical_under_root(destination_root, f"{folder.rstrip('/')}/{filename}")
         if await self._file_size(target) is not None:
             raise StorageCollisionError(
                 "Synology reroute target already exists; overwrite is forbidden"
@@ -652,7 +658,9 @@ class SynologyBackend:
         source_marker = self.canonical_under_root(
             root, f"{PurePosixPath(source).parent}/{marker_name}"
         )
-        target_marker = self.canonical_under_root(root, f"{folder.rstrip('/')}/{marker_name}")
+        target_marker = self.canonical_under_root(
+            destination_root, f"{folder.rstrip('/')}/{marker_name}"
+        )
         if await self._file_size(target_marker) is not None:
             raise StorageCollisionError("Synology reroute owner-marker target already exists")
         await self._start_copy_move(source_marker, folder)

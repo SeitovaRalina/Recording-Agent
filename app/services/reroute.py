@@ -118,14 +118,12 @@ class RerouteService:
         session.add(operation)
         await session.commit()
         try:
-            root = _shared_allowed_root(
-                self._settings.synology_interview_roots,
-                artifact.file_path,
-                destination.canonical_path,
-            )
+            roots = self._settings.synology_interview_roots
+            root = _allowed_root(roots, artifact.file_path)
+            target_root = _allowed_root(roots, destination.canonical_path)
             if operation.status == RerouteStatus.PENDING:
                 intended_target = self._synology.canonical_under_root(
-                    root, f"{destination.canonical_path.rstrip('/')}/{filename}"
+                    target_root, f"{destination.canonical_path.rstrip('/')}/{filename}"
                 )
                 # Intent is durable before NAS mutation. Retry may reconcile this exact target only.
                 if operation.target_file_path is None:
@@ -140,7 +138,7 @@ class RerouteService:
                         await self._synology.verify_moved_target(
                             target_path=intended_target,
                             filename=filename,
-                            root=root,
+                            root=target_root,
                             expected_size=recording.disk_size_bytes,
                             expected_owner=owner,
                         )
@@ -156,6 +154,7 @@ class RerouteService:
                     target_folder=destination.canonical_path,
                     filename=filename,
                     root=root,
+                    target_root=target_root,
                     expected_size=recording.disk_size_bytes,
                     expected_owner=owner,
                 )
@@ -252,12 +251,12 @@ def capability_hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _shared_allowed_root(roots: tuple[str, ...], source: str, destination: str) -> str:
+def _allowed_root(roots: tuple[str, ...], path: str) -> str:
+    """The configured interview root that contains `path` (source and target may differ)."""
     for root in roots:
         try:
-            SynologyBackend.canonical_under_root(root, source)
-            SynologyBackend.canonical_under_root(root, destination)
+            SynologyBackend.canonical_under_root(root, path)
             return root
         except ValueError:
             continue
-    raise RerouteRejectedError("Source and target do not share an allowed Synology root")
+    raise RerouteRejectedError("Path is outside the allowed Synology interview roots")
