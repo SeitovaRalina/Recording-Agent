@@ -381,6 +381,43 @@ async def cmd_disk_list(ctx: Ctx, p: dict[str, Any]) -> Any:
     ]
 
 
+async def cmd_disk_park(ctx: Ctx, p: dict[str, Any]) -> Any:
+    """Move runner-seeded Telemost files that no scan has picked up into disk:/E2E/aborted/.
+
+    A route that aborts before its scan would otherwise leave "new" recordings for later routes.
+    This is a move inside the recruiter's Disk (nothing is deleted).
+    """
+    names = p["disk_names"]
+    known = {
+        r["disk_filename"]
+        for r in await ctx.sql(
+            "select disk_filename from recordings where disk_filename = any(:names)", names=names
+        )
+    }
+    h = await ctx.disk_headers()
+    await ctx.http.put(
+        f"{DISK_API_BASE}/resources", headers=h, params={"path": "disk:/E2E/aborted"}
+    )
+    moved = []
+    for name in names:
+        if name in known:
+            continue
+        r = await ctx.http.post(
+            f"{DISK_API_BASE}/resources/move",
+            headers=h,
+            params={
+                "from": TELEMOST_ROOT + name,
+                "path": f"disk:/E2E/aborted/{name}",
+                "overwrite": "false",
+            },
+        )
+        if r.status_code == 202:
+            await disk_wait(ctx, r.json()["href"])
+        if r.status_code in (201, 202):
+            moved.append(name)
+    return {"parked": moved}
+
+
 async def cmd_disk_trash(ctx: Ctx, p: dict[str, Any]) -> Any:
     """Move runner-created Disk files to trash (recoverable). Paths must be e2e-seeded."""
     results = []
@@ -706,6 +743,7 @@ async def cmd_backfill_durable(ctx: Ctx, p: dict[str, Any]) -> Any:
 
 
 COMMANDS = {
+    "disk_park": cmd_disk_park,
     "backfill_durable": cmd_backfill_durable,
     "settle": cmd_settle,
     "inventory": cmd_inventory,

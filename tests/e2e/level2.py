@@ -188,7 +188,7 @@ def matching_batch(ctx: RouteCtx) -> None:
         "no_compatible_event",
         create_card=False,
         start_utc=base + timedelta(minutes=4),
-        file_offset_s=40 * 60,
+        file_offset_s=50 * 60,  # window is [start-15m, end+15m]; event is 30 min
     )
     add(
         "E2E Б9 Имяфайла",

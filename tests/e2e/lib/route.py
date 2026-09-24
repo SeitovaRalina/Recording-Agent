@@ -475,6 +475,15 @@ class RouteCtx:
             remote.stand(
                 "settle", {"disk_names": names, "reason": f"e2e {self.run_id} {self.route_id}"}
             )
+            parked = remote.stand("disk_park", {"disk_names": names}).get("parked", [])
+            if parked:
+                self.cleanup_rows.append(
+                    (
+                        "Файлы на Диске (маршрут прерван до скана)",
+                        ", ".join(parked)[:200],
+                        "перенесены в disk:/E2E/aborted",
+                    )
+                )
 
     # ------------------------------------------------------------ report
 
