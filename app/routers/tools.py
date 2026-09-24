@@ -41,6 +41,7 @@ from app.services.reviews import (
     ReviewRejectedError,
     ReviewService,
 )
+from app.tools.synology import SynologyAPIError
 
 router = APIRouter(
     prefix="/tools",
@@ -406,6 +407,10 @@ async def create_storage_destination(
         )
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except SynologyAPIError as error:
+        raise HTTPException(
+            status_code=502, detail="Synology could not create the folder; retry later"
+        ) from error
     return _destination_item(row)
 
 

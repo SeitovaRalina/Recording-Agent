@@ -599,3 +599,29 @@ async def test_file_size_reads_dsm_additional_size(item: dict, expected: int | N
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         backend = SynologyBackend("https://nas.test", SecretStr("token"), client)
         assert await backend._file_size("/base/v.webm") == expected
+
+
+@pytest.mark.anyio
+async def test_create_folder_is_retry_safe_when_folder_already_exists() -> None:
+    root = "/home/Recruiting-E/2. Interviews external"
+    home = "/volume1/homes/saver/Recruiting-E/2. Interviews external"
+
+    def info(request: httpx.Request) -> httpx.Response:
+        path = parse_qs(request.url.query.decode())["path"][0]
+        target = f"{root}/E2E Discovery"
+        folder = _dsm7_folder(root, home) if root + '"' in path else _dsm7_folder(
+            target, f"{home}/E2E Discovery"
+        )
+        return httpx.Response(200, json={"success": True, "data": {"files": [folder]}})
+
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL, params={"method": "getinfo"}).mock(side_effect=info)
+            router.post(URL).mock(
+                return_value=httpx.Response(200, json={"success": False, "error": {"code": 1100}})
+            )
+            created = await backend.create_folder_under_root(root, root, "E2E Discovery")
+
+    assert created.path == f"{root}/E2E Discovery"
+    assert created.directory and created.writable

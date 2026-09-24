@@ -263,7 +263,17 @@ class SynologyBackend:
             params={"api": "SYNO.FileStation.CreateFolder", "method": "create", "version": "2"},
             data={"folder_path": canonical_parent, "name": name, "force_parent": "false"},
         )
-        self._validate(response)
+        try:
+            self._validate(response)
+        except SynologyAPIError:
+            # DSM rejects creating a folder that already exists; an existing writable real folder
+            # at exactly the requested path is the desired end state (retry-safe create).
+            try:
+                existing = await self._get_info(target)
+            except (SynologyAPIError, SynologyPathError):
+                raise
+            if existing.path != target or not existing.directory:
+                raise
         created = await self._get_info(target)
         if not created.directory or created.symlink or not created.writable:
             raise PermissionError("Created destination is not a writable real folder")
