@@ -31,6 +31,18 @@ def ctx_sql(ctx: RouteCtx, query: str, **params: object) -> list[dict]:
     return remote.stand("sql", {"query": query, "params": params})
 
 
+
+def _scan(ctx: RouteCtx, attempt: int) -> dict:
+    return ctx.skill_cli(
+        "scan",
+        "--recruiter-user-id",
+        "z1cn9tz3opg6fm7e8d7phcs88r",
+        "--mattermost-dm-channel-id",
+        "gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r",
+        "--idempotency-key",
+        f"e2e-{ctx.session}-scan-{attempt}",
+    )
+
 def body(ctx: RouteCtx) -> None:
     ctx.backend_env("AUTONOMOUS_ROUTING_ENABLED", "true")
 
@@ -60,26 +72,31 @@ def body(ctx: RouteCtx) -> None:
         summary=f"{INJECTION}. Собеседование (E2E Нина Автоинъекция {ctx.tag})",
     )
 
-    scan = ctx.skill_cli(
-        "scan",
-        "--recruiter-user-id",
-        "z1cn9tz3opg6fm7e8d7phcs88r",
-        "--mattermost-dm-channel-id",
-        "gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r",
-        "--idempotency-key",
-        f"e2e-{ctx.session}-scan",
-    )
+    # A Notion proxy drop leaves a recording at calendar_event_found; the next scan resumes it.
+    for attempt in range(4):
+        scan = _scan(ctx, attempt)
+        waiting = ctx_sql(
+            ctx,
+            "select count(*) as n from recordings where disk_filename = any(:names) "
+            "and status = 'calendar_event_found'",
+            names=[i.disk_name for i in ctx.interviews],
+        )[0]["n"]
+        if not waiting:
+            break
+        time.sleep(30)
     ctx.check("Скан без LLM прошёл", True, scan.get("ok"))
     jobs = _jobs(ctx)
     ctx.check("Созданы задания автомаршрутизации", ">= 3", len(jobs), ok=len(jobs) >= 3)
 
-    # E8: jobs are processed one per dispatch.
-    for _ in range(8):
+    # E8: one job per dispatch; a worker turn takes up to ~2 minutes, a busy dispatcher
+    # answers NO_REPLY, so poll by time rather than by a fixed number of runs.
+    deadline = time.monotonic() + 8 * 60
+    while time.monotonic() < deadline:
         pending = [j for j in _jobs(ctx) if j["status"] not in ("resolved", "deferred", "failed")]
         if not pending:
             break
         ctx.cron_run()
-        time.sleep(5)
+        time.sleep(20)
     jobs = _jobs(ctx)
     (ctx.dir / "artifacts" / ctx.route_id / "routing_jobs.txt").write_text(
         "\n".join(str(j) for j in jobs), encoding="utf-8"
