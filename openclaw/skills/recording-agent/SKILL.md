@@ -59,11 +59,11 @@ request is either done or waiting for a question that only the recruiter can ans
 After `scan` (and whenever the recruiter asks what is pending):
 
 1. For each recording with `storage_destination_required` (or `storage_key_collision`), call
-   `destinations` once and choose by the destination rules below.
-   - Exactly one folder clearly fits (for example Spot `Java-разработчик @Т-банк` and only
-     `2. Interviews external/Backend` fits): call `route-interview` immediately, without asking.
-   - Several folders fit (for example `Flutter` exists in both external and internal) or none fits:
-     do not stop; include the question in the same reply (see step 3).
+   `destinations` once and decide by the folder procedure in "Interpret DM answers safely".
+   - Exactly one folder fits (for example Spot `Python-разработчик @Т-банк` and only
+     `2. Interviews external/Python` exists): call `route-interview` immediately, without asking.
+   - Several folders fit or none fits: do not stop; include the question in the same reply
+     (see step 3).
 2. For every other review reason (calendar, candidate card, multiple Spots), call `questions`.
    If a recording's error says Notion is temporarily unavailable, run `scan` once more in the same
    turn with a new idempotency key. If it is still unavailable, tell the recruiter the recording is
@@ -145,9 +145,26 @@ questions stay pending. Never infer a candidate, Spot, or cleanup confirmation.
 
 Interview destination selection is the only allowed LLM classification step. The Backend does not
 map Spots or meeting names to folders. Always call `destinations` first, compare only returned
-folder labels, and submit only the returned destination id. Never submit a raw path. Ambiguous roots
-such as duplicated `Flutter` folders across internal and external projects require a recruiter
-question unless the recruiter has already given the internal/external choice.
+folder labels, and submit only the returned destination id. Never submit a raw path.
+
+```bash
+python3 scripts/recording_agent.py destinations \
+  --recruiter-user-id <metadata.sender_id> \
+  --mattermost-dm-channel-id <metadata.group_channel_without_leading_hash>
+```
+
+Decide the folder yourself with this procedure:
+
+1. Take the role or technology from the Spot (`Python-разработчик @Т-банк` → Python;
+   `Java-разработчик` → Backend; `Бизнес-аналитик` → Analyst; `iOS-разработчик` → iOS/IOS).
+2. Count the returned folders, across all three roots, whose last path segment names that role or
+   technology. Root folders themselves (`2. Interviews external`) never count.
+3. Exactly one folder → call `route-interview` with its id now. Asking the recruiter to confirm a
+   single fitting folder is a mistake: it costs them an extra message.
+4. Two or more (for example `Analyst` or `Flutter` in both external and internal) → ask one
+   question with the numbered options and your recommendation, unless the recruiter already said
+   internal or external.
+5. None → ask for a new folder name and root, then `create-destination` and `route-interview`.
 
 Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
 send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.

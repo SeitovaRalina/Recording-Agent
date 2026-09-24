@@ -289,3 +289,28 @@ def test_temporary_notion_outage_is_explained_not_reported_as_code() -> None:
 
     assert "Notion временно недоступен" in message
     assert "notion_temporarily_unavailable" not in message
+
+
+def test_review_item_hides_raw_backend_error_text() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "accepted": True,
+            "discovered": 1,
+            "inserted": 1,
+            "manual_review": 1,
+            "items": [
+                {
+                    "filename": "interview.webm",
+                    "status": "manual_review_required",
+                    "is_new": True,
+                    "requires_review": True,
+                    "review_reason": "storage_destination_required",
+                    "error": "Interview destination must be selected from allowed Synology inventory",
+                }
+            ],
+        },
+    )
+
+    assert "нужно выбрать папку в Synology" in message
+    assert "allowed Synology inventory" not in message

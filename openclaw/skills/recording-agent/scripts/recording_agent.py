@@ -629,7 +629,8 @@ def _item_line(item: dict[str, Any], *, review: bool = False) -> str:
     generated_filename = item.get("generated_filename")
     if generated_filename:
         parts.append(f"имя в хранилище: {generated_filename}")
-    if item.get("error"):
+    # A parked recording's review reason already explains it; its raw Backend error text does not.
+    if item.get("error") and (not review or item["error"] in ERROR_LABELS):
         parts.append(f"ошибка: {ERROR_LABELS.get(item['error'], item['error'])}")
     if item.get("notion_url"):
         parts.append(f"карточка Notion: {item['notion_url']}")
