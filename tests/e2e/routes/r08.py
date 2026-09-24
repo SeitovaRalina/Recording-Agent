@@ -36,7 +36,8 @@ def body(ctx: RouteCtx) -> None:
     ctx.check_cli(turn, must=("scan",), must_not=("route-interview", "non-interview"))
 
     turn = ctx.say(
-        "Первая — рабочая встреча, положи в BizDev. Вторую пропусти, это не собеседование.",
+        "Планёрка BizDev — рабочая встреча, положи в папку BizDev. "
+        "Личный созвон пропусти, это не собеседование.",
         scenario="R08. Рекрутер классифицирует обе записи.",
         expected=(
             "Мила вызывает destinations и non-interview в Recruiting-NE/2. Interviews/BizDev для "

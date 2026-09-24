@@ -487,8 +487,18 @@ async def cmd_calendar_delete(ctx: Ctx, p: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------- synology
 
 
-async def syno_exists(ctx: Ctx, path: str) -> bool:
-    return await ctx.syno()._file_size(path) is not None  # noqa: SLF001
+async def syno_exists(ctx: Ctx, path: str) -> bool | str:
+    """True/False, or the DSM error text after one retry with a fresh session."""
+    from app.tools.synology import SynologyAPIError
+
+    for attempt in range(2):
+        try:
+            return await ctx.syno()._file_size(path) is not None  # noqa: SLF001
+        except SynologyAPIError as error:
+            if attempt:
+                return f"DSM error: {getattr(error, 'payload', error)}"[:200]
+            ctx._syno = None  # noqa: SLF001 - re-login on the second attempt
+    return False
 
 
 async def cmd_syno_exists(ctx: Ctx, p: dict[str, Any]) -> Any:
