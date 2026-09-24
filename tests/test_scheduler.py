@@ -15,6 +15,7 @@ from app.db.base import Base
 from app.db.models.manual_review import ManualReview
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
+from app.db.models.recording_storage_artifact import RecordingStorageArtifact
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
 from app.scheduler.cron import (
@@ -1120,6 +1121,78 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     assert transfer.create_share_link.await_count == share_calls
     assert notion.update_page_interview.await_count == notion_calls
     candidate.find_and_match.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_resumed_synology_transfer_is_durable_and_reroutable() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(
+        notion_writes_enabled=True,
+        yandex_source_mutation_enabled=False,
+        storage_provider="synology",
+        synology_base_url="https://nas.test",
+        synology_api_key="token",  # pragma: allowlist secret
+        synology_interview_roots=("/folder",),
+    )
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
+    item = found("route-interview-resume")
+    item.status = RecordingStatus.UPLOADED_TO_SYNOLOGY
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.project_or_spot = "Project"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.content_identity = item.disk_file_id
+    item.synology_folder_path = "/folder"
+    item.synology_file_path = f"/folder/{item.generated_filename}"
+    item.storage_destination_id = uuid.uuid4()
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    transfer = AsyncMock()
+    transfer.create_share_link.return_value = "https://share/video"
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        artifacts = (
+            await session.scalars(
+                select(RecordingStorageArtifact).where(
+                    RecordingStorageArtifact.recording_id == recording_id
+                )
+            )
+        ).all()
+    await engine.dispose()
+
+    assert loaded is not None
+    assert (loaded.status, loaded.error_step, loaded.error_message) == (
+        RecordingStatus.COMPLETED,
+        None,
+        None,
+    )
+    assert loaded.storage_is_durable is True
+    assert [a.file_path for a in artifacts if a.is_active] == [item.synology_file_path]
 
 
 @pytest.mark.anyio

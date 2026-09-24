@@ -1020,7 +1020,11 @@ async def _resume_committed_transfer_steps(
             recording,
             RecordingStatus.SYNOLOGY_LINK_CREATED,
             synology_share_url=share_url,
+            storage_is_durable=settings.storage_provider == "synology",
         )
+        if settings.storage_provider == "synology":
+            # Same durable identity as the scan path: reroute and Disk cleanup rely on it.
+            await _ensure_active_storage_artifact(session, recording)
         await session.commit()
 
     if recording.status == RecordingStatus.SYNOLOGY_LINK_CREATED:
