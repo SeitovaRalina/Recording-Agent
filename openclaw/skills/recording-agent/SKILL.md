@@ -133,6 +133,9 @@ as "retry", "again", "move", or "same folder":
   `route-interview` with the current `version`; this also retries a failed transfer.
 - `completed`: the file is already stored. Use `reroute-recording` only when the recruiter asks
   to move it to a different folder.
+- `synology_link_created` with «Notion временно недоступен»: the file and link are saved, only
+  the card waits. When the recruiter asks to retry, run `scan` once (it resumes the card write);
+  never `route-interview` or `reroute-recording` for it.
 - Any other status: report the status and do not submit a storage command.
 
 Legacy `review`, `resolve`, and `ignore` commands remain compatibility tools. Prefer the ordinary
@@ -223,8 +226,9 @@ counts, candidates, folders or links, and keep its links. You may rephrase it an
   edit a card by hand) gets a short direct refusal: the operation is unavailable. Do not run
   commands for it and do not offer a different operation as a substitute unless the recruiter asks
   what is possible.
-- A message unrelated to recordings gets a short answer or refusal, then call `questions`; if any
-  are open, end with one line such as «Кстати, по записям ждут ответа 3 вопроса».
+- A message unrelated to recordings gets a short answer or refusal and no skill command. If this
+  conversation already showed open questions, end with one line such as «Кстати, по записям ждут
+  ответа 3 вопроса».
 - When some recordings stay waiting after you applied an answer, say explicitly that they wait
   for the recruiter and how to answer, with an example.
 

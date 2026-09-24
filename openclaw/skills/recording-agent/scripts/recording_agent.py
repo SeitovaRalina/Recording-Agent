@@ -871,7 +871,19 @@ def _stored_message(subject: str, result: dict[str, Any]) -> str:
     candidate = str(result.get("candidate_name") or "")
     who = f" ({candidate})" if candidate else ""
     if result.get("status") != "completed":
-        return f"{subject}{who}: {_status_label(result.get('status'))}."
+        if result.get("error") == "notion_temporarily_unavailable":
+            # The file and its public link are durable; only the card write waits for Notion.
+            lines = [
+                f"{subject}{who}: файл сохранён в Synology, ссылка создана. Карточку Notion "
+                "обновить пока не удалось: Notion временно недоступен. Ссылка в карточку "
+                "будет записана при следующей проверке, повторять сохранение не нужно."
+            ]
+            if result.get("safe_link"):
+                lines.append(f"Запись: {result['safe_link']}")
+            return "\n".join(lines)
+        step = ERROR_STEP_LABELS.get(str(result.get("error_step") or ""))
+        where = f" Сбой на шаге: {step}." if step and result.get("status") == "failed" else ""
+        return f"{subject}{who}: {_status_label(result.get('status'))}.{where}"
     lines = [f"Готово: {subject.lower()}{who} сохранена."]
     if result.get("notion_url"):
         lines.append(f"Карточка в Notion: {result['notion_url']}")

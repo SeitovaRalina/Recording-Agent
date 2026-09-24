@@ -531,6 +531,24 @@ def test_status_message_counts_statuses_and_hides_errors_of_settled_recordings()
     assert "ошибка (шаг: запись ссылки в карточку Notion): Notion page update failed" in message
 
 
+def test_route_message_says_the_notion_card_still_waits() -> None:
+    message = CLIENT._message_for(
+        "route-interview",
+        {
+            "status": "synology_link_created",
+            "candidate_name": "Иван Иванов",
+            "safe_link": "https://gofile.me/x",
+            "error": "notion_temporarily_unavailable",
+            "error_step": "notion_update",
+        },
+    )
+
+    assert "файл сохранён в Synology" in message
+    assert "Карточку Notion обновить пока не удалось" in message
+    assert "https://gofile.me/x" in message
+    assert "Готово" not in message
+
+
 def test_review_message_lists_only_returned_choices() -> None:
     message = CLIENT._message_for(
         "review",

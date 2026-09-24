@@ -271,6 +271,8 @@ class InterviewRouteResponse(BaseModel):
     notion_url: str = ""
     candidate_name: str = ""
     replayed: bool = False
+    error: str | None = None
+    error_step: str | None = None
 
 
 class RecordingRerouteRequest(BaseModel):
@@ -518,6 +520,8 @@ async def route_interview(
             safe_link=refreshed.synology_share_url or "",
             notion_url=refreshed.notion_page_url or "",
             candidate_name=refreshed.candidate_name or "",
+            error=refreshed.error_message,
+            error_step=refreshed.error_step,
         )
     if not resumed:
         raise HTTPException(

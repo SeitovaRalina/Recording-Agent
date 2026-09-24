@@ -1,4 +1,4 @@
-"""R09 — Notion goes down mid-transfer; the recording fails cleanly and is retried via Mila."""
+"""R09 — Notion goes down mid-transfer; the stored recording waits for Notion and resumes."""
 
 from __future__ import annotations
 
@@ -31,32 +31,43 @@ def body(ctx: RouteCtx) -> None:
                 "Synology, а запись в карточку Notion не пройдёт."
             ),
             expected=(
-                "Мила вызывает route-interview; получив ошибку, честно и понятно сообщает, что "
-                "запись сохранена не до конца из-за временной ошибки Notion, без технических "
-                "деталей, и предлагает повторить позже."
+                "Мила вызывает route-interview и честно сообщает: файл сохранён в Synology, "
+                "ссылка есть, а карточку Notion обновить пока не удалось (Notion временно "
+                "недоступен), это будет сделано при следующей проверке. Не утверждает, что "
+                "ссылка уже в карточке."
             ),
         )
     finally:
         ctx.container("start")
-    state = ctx.wait_for(
-        lambda s: any(str(o["dedupe_key"]).startswith("terminal:") for o in s["outbox"]),
-        timeout=120,
-    )
+    # Since the R12-D1 fix a transient Notion failure is not terminal: the stored recording stays
+    # at synology_link_created and the next scan writes the card; no error DM is sent.
+    state = ctx.observe(notion=False)
     rec = ctx.recording(state, item) or {}
-    ctx.check("После сбоя: статус", "failed", rec.get("status"))
+    ctx.check("После сбоя: запись ждёт Notion", "synology_link_created", rec.get("status"))
+    ctx.check(
+        "После сбоя: причина", "notion_temporarily_unavailable", rec.get("error_message")
+    )
     failed_dm = [o for o in state["outbox"] if ":failed:" in str(o["dedupe_key"])]
-    ctx.check("Одно уведомление об ошибке (H3)", 1, len(failed_dm))
+    ctx.check("Нет уведомления об ошибке", 0, len(failed_dm))
     uploaded = rec.get("synology_file_path")
 
     turn = ctx.say(
         "Notion снова работает, повтори сохранение",
         scenario="R09 (D3). Рекрутер просит повторить после ошибки.",
         expected=(
-            "Мила вызывает status, затем route-interview с той же папкой и новым ключом; сообщает "
-            "итог со ссылками. Второй копии файла нет."
+            "Мила вызывает status, видит, что запись ждёт Notion, и запускает scan (или "
+            "route-interview) — бэкенд дописывает карточку; сообщает итог со ссылками. Второй "
+            "копии файла нет, ссылка та же."
         ),
     )
-    ctx.check_cli(turn, must=("route-interview",), must_not=("reroute-recording",))
+    ran = ctx.cli(turn)
+    ctx.check(
+        "Мила возобновила запись",
+        "scan или route-interview",
+        " → ".join(ran) or "—",
+        ok="scan" in ran or "route-interview" in ran,
+    )
+    ctx.check_cli(turn, must_not=("reroute-recording",))
     state = ctx.wait_for(
         lambda s: any(":completed:" in str(o["dedupe_key"]) for o in s["outbox"]), timeout=180
     )
