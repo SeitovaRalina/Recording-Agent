@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 693, in run_route
+    body(ctx)
+    ~~~~^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r14.py", line 49, in body
+    already = _digests(today)
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r14.py", line 26, in _digests
+    return remote.stand(
+           ~~~~~~~~~~~~^
+        "sql",
+        ^^^^^^
+    ...<4 lines>...
+        },
+        ^^
+    )
+    ^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\remote.py", line 69, in stand
+    raise RemoteError(f"stand {command}: {result['error']}")
+tests.e2e.lib.remote.RemoteError: stand sql: DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) <class 'asyncpg.exceptions.DataError'>: invalid input for query argument $1: '2026-09-24' ('str' object has no attribute 'toordinal')
+[SQL: select status, created_at from question_digests where local_date = cast($1 as date)]
+[parameters: ('2026-09-24',)]
+(Background on this error at: https://sqlalche.me/e/20/dbapi)

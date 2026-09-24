@@ -1,6 +1,6 @@
 # R08 — стенограмма
 
-## Ход 1 (38 с)
+## Ход 1 (44 с)
 
 **Рекрутер:**
 
@@ -81,13 +81,28 @@ After `scan` (and whenever the recruiter asks what is pending):
 </details>
 
 ```text
-python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key 587bbf76-b798-49ba-a1c3-64f4ea6d1eb1
+python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key 4f1ffb78-d0ea-4d79-a454-508e42689c14
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 2.\nОбнаружено файлов для проверки: 16.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 2.\nТребуют вашего уточнения: 2.\n- 2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm; новая запись; нужно уточнение: подходящее событие календаря не найдено\n- 2026-09-24_063112_Личный созвон R08-0924_1a2.webm; новая запись; нужно уточнение: подходящее событие календаря не найдено\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":16,"inserted":2,"skipped_legacy":14,"matched":0,"manual_review":2,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":2,"items_truncated":false,"items":[{"id":"f09c6cce-bccf-4eca-b755-e142a66ea52f","filename":"2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"no_compatible_event","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null},{"id":"2271558a-85a1-45e1-b86b-77f6d23b2bc9","filename":"2026-09-24_063112_Личный созвон R08-0924_1a2.webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"no_compatible_event","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null}]}}
+Command still running (session wild-breeze, pid 1349675). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.
+```
+
+</details>
+
+```text
+{"action": "poll", "sessionId": "wild-breeze", "data": "", "keys": [], "hex": [], "literal": "", "text": "", "bracketed": false, "eof": false, "offset": 0, "limit": 2000, "timeout": 30000}
+```
+
+<details><summary>ответ</summary>
+
+```text
+{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 2.\nОбнаружено файлов для проверки: 16.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 2.\nТребуют вашего уточнения: 2.\n- 2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm; новая запись; нужно уточнение: подходящее событие календаря не найдено\n- 2026-09-24_091338_Личный созвон R08-0924_1a3.webm; новая запись; нужно уточнение: подходящее событие календаря не найдено\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":16,"inserted":2,"skipped_legacy":14,"matched":0,"manual_review":2,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":2,"items_truncated":false,"items":[{"id":"f64d94c3-2db0-4f60-b05f-dec84b85163e","filename":"2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"no_compatible_event","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null},{"id":"00732672-418f-4cf8-ba72-cb9bac1631d5","filename":"2026-09-24_091338_Личный созвон R08-0924_1a3.webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"no_compatible_event","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null}]}}
+
+
+Process exited with code 0.
 ```
 
 </details>
@@ -99,23 +114,23 @@ python3 scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Открытых вопросов по записям: 2.\n1. 2026-09-24_063112_Личный созвон R08-0924_1a2.webm — подходящее событие календаря не найдено\n2. 2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm — подходящее событие календаря не найдено","result":{"items":[{"question_id":"97b5bba5-edef-4f41-8b36-f2ab235f5e26","question_set_id":"8412c2b2-845a-47d2-8db7-40ddb9dda985","recording_id":"2271558a-85a1-45e1-b86b-77f6d23b2bc9","recording_version":0,"filename":"2026-09-24_063112_Личный созвон R08-0924_1a2.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T04:02:48.321851+00:00"},{"question_id":"b08af14b-fdc2-42f0-8982-ae3a98119e08","question_set_id":"2e5156ad-545d-482d-a5c8-1977e8c6e7a9","recording_id":"f09c6cce-bccf-4eca-b755-e142a66ea52f","recording_version":0,"filename":"2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T04:02:48.354508+00:00"}],"count":2}}
+{"ok":true,"message":"Открытых вопросов по записям: 2.\n1. 2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm — подходящее событие календаря не найдено\n2. 2026-09-24_091338_Личный созвон R08-0924_1a3.webm — подходящее событие календаря не найдено","result":{"items":[{"question_id":"3eec0d94-f6a4-4946-9e6d-db90c5665b24","question_set_id":"1a386e76-48e0-4fa8-b153-4d269d2224bc","recording_id":"f64d94c3-2db0-4f60-b05f-dec84b85163e","recording_version":0,"filename":"2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T06:45:18.588671+00:00"},{"question_id":"c8cbf9aa-9066-4bc3-891e-5dd2da3a15ac","question_set_id":"6a15feed-d14c-4b7f-b8af-a79ac9280fb7","recording_id":"00732672-418f-4cf8-ba72-cb9bac1631d5","recording_version":0,"filename":"2026-09-24_091338_Личный созвон R08-0924_1a3.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T06:45:18.556202+00:00"}],"count":2}}
 ```
 
 </details>
 
 **Мила:**
 
-> Нашла 2 новые записи. Обе не удалось сопоставить с событием в календаре:
+> Найдено 2 новые записи — обе без подходящего события в календаре:
 > 
-> 1. **Личный созвон** — 24.09, 06:31  
-> 2. **Планёрка BizDev** — 24.09, 06:28  
+> 1. **Планёрка BizDev** — это интервью (укажите кандидата), рабочая встреча (укажите папку) или пропустить?  
+> 2. **Личный созвон** — это интервью (укажите кандидата), рабочая встреча (укажите папку) или пропустить?
 > 
-> Подскажите, пожалуйста, к каким встречам или кандидатам их отнести — либо подтвердите, что это рабочие созвоны, а не интервью.
+> Например: `1 — рабочая встреча, в BizDev; 2 — пропусти`.
 
-**Судья:** 10/12 — Корректный скан и факты верны, но Милa не дала структурированные варианты выбора и пример ответа, которых ждёт сценарий.
+**Судья:** 12/12 — Корректный ход: scan → questions, рекрутеру одним сообщением сообщено о двух записях без событий с предложением вариантов (интервью / рабочая встреча / пропустить) и примером ответа; факты, безопасность и структура сообщения без замечаний.
 
-## Ход 2 (48 с)
+## Ход 2 (50 с)
 
 **Рекрутер:**
 
@@ -196,7 +211,7 @@ python3 scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Открытых вопросов по записям: 2.\n1. 2026-09-24_063112_Личный созвон R08-0924_1a2.webm — подходящее событие календаря не найдено\n2. 2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm — подходящее событие календаря не найдено","result":{"items":[{"question_id":"97b5bba5-edef-4f41-8b36-f2ab235f5e26","question_set_id":"8412c2b2-845a-47d2-8db7-40ddb9dda985","recording_id":"2271558a-85a1-45e1-b86b-77f6d23b2bc9","recording_version":0,"filename":"2026-09-24_063112_Личный созвон R08-0924_1a2.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T04:02:48.321851+00:00"},{"question_id":"b08af14b-fdc2-42f0-8982-ae3a98119e08","question_set_id":"2e5156ad-545d-482d-a5c8-1977e8c6e7a9","recording_id":"f09c6cce-bccf-4eca-b755-e142a66ea52f","recording_version":0,"filename":"2026-09-24_062806_Планёрка BizDev R08-0924_1a2.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T04:02:48.354508+00:00"}],"count":2}}
+{"ok":true,"message":"Открытых вопросов по записям: 2.\n1. 2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm — подходящее событие календаря не найдено\n2. 2026-09-24_091338_Личный созвон R08-0924_1a3.webm — подходящее событие календаря не найдено","result":{"items":[{"question_id":"3eec0d94-f6a4-4946-9e6d-db90c5665b24","question_set_id":"1a386e76-48e0-4fa8-b153-4d269d2224bc","recording_id":"f64d94c3-2db0-4f60-b05f-dec84b85163e","recording_version":0,"filename":"2026-09-24_091031_Планёрка BizDev R08-0924_1a3.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T06:45:18.588671+00:00"},{"question_id":"c8cbf9aa-9066-4bc3-891e-5dd2da3a15ac","question_set_id":"6a15feed-d14c-4b7f-b8af-a79ac9280fb7","recording_id":"00732672-418f-4cf8-ba72-cb9bac1631d5","recording_version":0,"filename":"2026-09-24_091338_Личный созвон R08-0924_1a3.webm","reason":"no_compatible_event","choices":[],"capability":"<capability>","expires_at":"2026-09-24T06:45:18.556202+00:00"}],"count":2}}
 ```
 
 </details>
@@ -214,25 +229,25 @@ python3 scripts/recording_agent.py destinations --recruiter-user-id z1cn9tz3opg6
 </details>
 
 ```text
-python3 scripts/recording_agent.py non-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id f09c6cce-bccf-4eca-b755-e142a66ea52f --destination-id e48134fe-697d-4da4-aae5-edc63b9d7861 --expected-version 0 --idempotency-key 7c0369f3-00c3-4d71-9e9f-8984d1b07399
+python3 scripts/recording_agent.py non-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id f64d94c3-2db0-4f60-b05f-dec84b85163e --destination-id e48134fe-697d-4da4-aae5-edc63b9d7861 --expected-version 0 --idempotency-key 01ac4b2d-392a-49c6-92f6-a7f550a8572b
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Готово: запись рабочей встречи сохранена.\nЗапись: https://gofile.me/7g8zN/qlfc6FQO5","result":{"recording_id":"f09c6cce-bccf-4eca-b755-e142a66ea52f","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/qlfc6FQO5","replayed":false}}
+{"ok":true,"message":"Готово: запись рабочей встречи сохранена.\nЗапись: https://gofile.me/7g8zN/QMwbTKsKi","result":{"recording_id":"f64d94c3-2db0-4f60-b05f-dec84b85163e","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/QMwbTKsKi","replayed":false}}
 ```
 
 </details>
 
 ```text
-python3 scripts/recording_agent.py answer --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --actions-json '[{"question_id":"97b5bba5-edef-4f41-8b36-f2ab235f5e26","question_set_id":"8412c2b2-845a-47d2-8db7-40ddb9dda985","action":"ignore","capability":"<capability>","expected_version":0,"idempotency_key":"ba55fa54-a03d-45c4-ae74-87ad9fbc14c2"}]'
+python3 scripts/recording_agent.py answer --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --actions-json '[{"question_id":"c8cbf9aa-9066-4bc3-891e-5dd2da3a15ac","question_set_id":"6a15feed-d14c-4b7f-b8af-a79ac9280fb7","action":"ignore","capability":"<capability>","expected_version":0,"idempotency_key":"174e7548-0929-4aad-b3da-b0e5c131dd1f"}]'
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Принято ответов: 1; отклонено: 0; ещё ждут ответа: 0.\nОбработка по принятым ответам запущена.","result":{"accepted":[{"question_id":"97b5bba5-edef-4f41-8b36-f2ab235f5e26","recording_id":"2271558a-85a1-45e1-b86b-77f6d23b2bc9","status":"ignored","version":1,"replayed":false}],"rejected":[],"pending":[]}}
+{"ok":true,"message":"Принято ответов: 1; отклонено: 0; ещё ждут ответа: 0.\nОбработка по принятым ответам запущена.","result":{"accepted":[{"question_id":"c8cbf9aa-9066-4bc3-891e-5dd2da3a15ac","recording_id":"00732672-418f-4cf8-ba72-cb9bac1631d5","status":"ignored","version":1,"replayed":false}],"rejected":[],"pending":[]}}
 ```
 
 </details>
@@ -241,8 +256,8 @@ python3 scripts/recording_agent.py answer --recruiter-user-id z1cn9tz3opg6fm7e8d
 
 > Готово.
 > 
-> - Планёрка BizDev сохранена в папку **BizDev**: https://gofile.me/7g8zN/qlfc6FQO5  
-> - Личный созвон пропущен как не-собеседование.
+> - Планёрка BizDev сохранена как рабочая встреча в папке **BizDev**: https://gofile.me/7g8zN/QMwbTKsKi  
+> - Личный созвон пропущен — не будет обработан как собеседование.
 
-**Судья:** 12/12 — Корректный ход: Планёрка BizDev сохранена через non-interview в папку BizDev, Личный созвон пропущен через answer с action=ignore, итог сообщён со ссылкой. Все действия обоснованы и завершены в одном ходе.
+**Судья:** 12/12 — Мила за один ход корректно классифицировала обе записи: рабочую встречу сохранила в папку BizDev через non-interview (без Notion), личный созвон пропустила через answer/ignore, итог совпадает с проверками системы.
 

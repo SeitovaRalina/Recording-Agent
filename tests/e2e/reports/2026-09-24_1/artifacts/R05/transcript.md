@@ -1,6 +1,6 @@
 # R05 — стенограмма
 
-## Ход 1 (43 с)
+## Ход 1 (44 с)
 
 **Рекрутер:**
 
@@ -9,7 +9,7 @@
 **Команды:**
 
 ```text
-{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 200}
+{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 1, "limit": 240}
 ```
 
 <details><summary>ответ</summary>
@@ -24,6 +24,12 @@ description: Operate Recording Agent through Mila for Russian or English recruit
 
 Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before any
 mutation or when interpreting a Backend error.
+
+Run every command with the skill directory as the working directory: `workdir` =
+`/srv/openclaw/workspaces/recordings-saver/skills/recording-agent` (the folder that holds this
+SKILL.md). All `scripts/…` and `references/…` paths in this skill are relative to it. If exec says
+`No such file or directory` or `can't open file`, the working directory was wrong: run the same
+command again from the skill directory. Never report that as the service being unavailable.
 
 ## Mandatory execution rule
 
@@ -64,86 +70,47 @@ fails, report its JSON `message`.
 `scan`, `answer`, `route-interview`, `non-interview`, `reroute-recording`,
 `notion-reassignment-confirm` and `cleanup-confirm` can take several minutes (Disk, calendar,
 Notion and Synology are called synchronously). Run them with an exec timeout of at least 320
-seconds. If exec reports that the command is still running, poll it until it exits; never tell the
-recruiter that something failed while the command is still running.
-
-## Finish the job in one turn
-
-The recruiter should not have to ask "what next?". One recruiter message ideally produces one
-complete reply. Within the same turn, keep calling allowed commands until every recording from the
-request is either done or waiting for a question that only the recruiter can answer.
-
-After `scan` (and whenever the recruiter asks what is pending):
-
-1. For ea
+seconds. If exec reports that the command is still running, poll it until it exits; neve
 ```
 
 </details>
 
 ```text
-python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key ac0b6c40-8048-c338-cbbf-46c63e000000
+python3 scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key ba731c6e1b1c63946f0a227bb1
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-python3: can't open file '/srv/openclaw/workspaces/recordings-saver/scripts/recording_agent.py': [Errno 2] No such file or directory
-
-(Command exited with code 2)
+{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 1.\n- 2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm; новая запись; нужно уточнение: у карточки несколько проектов (📍 Spots), нужно выбрать один\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":1,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"788ac80a-aa3e-439f-beff-81bb45bc3d40","filename":"2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"multiple_spots","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null}]}}
 ```
 
 </details>
 
 ```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py scan --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --idempotency-key ac0b6c40-8048-c338-cbbf-46c63e000000
+python3 scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-Command still running (session young-reef, pid 1206954). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.
-```
-
-</details>
-
-```text
-{"action": "poll", "sessionId": "young-reef", "data": "", "keys": [], "hex": [], "literal": "", "text": "", "bracketed": false, "eof": false, "offset": 0, "limit": 2000, "timeout": 30000}
-```
-
-<details><summary>ответ</summary>
-
-```text
-{"ok":true,"message":"Проверка завершена.\nНовых записей добавлено: 1.\nОбнаружено файлов для проверки: 15.\nСтарых записей пропущено (созданы до начала работы агента): 14.\nОбработано в этом запуске: 1.\nТребуют вашего уточнения: 1.\n- 2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm; новая запись; нужно уточнение: у карточки несколько проектов (📍 Spots), нужно выбрать один\nОжидают повторной обработки: 0.\nОбработаны без вопросов: 0.\nС ошибкой: 0.","result":{"accepted":true,"recruiter_email":"ralina.seitova@effective.band","discovered":15,"inserted":1,"skipped_legacy":14,"matched":1,"manual_review":1,"without_review":0,"pending":0,"failed":0,"failed_recordings":0,"aborted":false,"errors":[],"processed":1,"items_truncated":false,"items":[{"id":"9a3e6488-2938-45a2-86ff-da1a852e0568","filename":"2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm","candidate_name":null,"status":"manual_review_required","is_new":true,"requires_review":true,"review_reason":"multiple_spots","generated_filename":null,"safe_link":null,"notion_url":null,"spot":null,"error":null}]}}
-
-Process exited with code 0.
-```
-
-</details>
-
-```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
-```
-
-<details><summary>ответ</summary>
-
-```text
-{"ok":true,"message":"Открытых вопросов по записям: 1.\n1. 2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm — у карточки несколько проектов (📍 Spots), нужно выбрать один\n   1) E2E Павел Двуспотов R05-0924_1a3 — 📍 Spots: Python-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94\n   2) E2E Павел Двуспотов R05-0924_1a3 — 📍 Spots: Java-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","result":{"items":[{"question_id":"3d63dde2-5c43-4fc4-98bf-30aae18f4e7e","question_set_id":"b2ae9f4b-c209-4323-ab73-00f9c860114c","recording_id":"9a3e6488-2938-45a2-86ff-da1a852e0568","recording_version":0,"filename":"2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm","reason":"multiple_spots","choices":[{"id":"3e5c8889-e4c8-81bd-b3e2-e61248274c94","url":"https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","name":"E2E Павел Двуспотов R05-0924_1a3","spot_id":"397c8889-e4c8-81d7-8bcb-f77c42da96e8","spot_url":"https://app.notion.com/p/Python-397c8889e4c881d78bcbf77c42da96e8","candidate_email":"","project_or_spot":"Python-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""},{"id":"3e5c8889-e4c8-81bd-b3e2-e61248274c94","url":"https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","name":"E2E Павел Двуспотов R05-0924_1a3","spot_id":"397c8889-e4c8-8118-ac1b-e5efbe7f83f2","spot_url":"https://app.notion.com/p/Java-397c8889e4c88118ac1be5efbe7f83f2","candidate_email":"","project_or_spot":"Java-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""}],"capability":"<capability>","expires_at":"2026-09-24T03:47:10.863954+00:00"}],"count":1}}
+{"ok":true,"message":"Открытых вопросов по записям: 1.\n1. 2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm — у карточки несколько проектов (📍 Spots), нужно выбрать один\n   1) E2E Павел Двуспотов R05-0924_1a5 — 📍 Spots: Python-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd\n   2) E2E Павел Двуспотов R05-0924_1a5 — 📍 Spots: Java-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","result":{"items":[{"question_id":"2a9a2ad4-36ec-4d82-b8f2-7165b39c85a1","question_set_id":"d7904e40-f14d-4973-9c21-f0738b60d10c","recording_id":"788ac80a-aa3e-439f-beff-81bb45bc3d40","recording_version":0,"filename":"2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm","reason":"multiple_spots","choices":[{"id":"3e5c8889-e4c8-8107-9ef3-c1116d5281fd","url":"https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","name":"E2E Павел Двуспотов R05-0924_1a5","spot_id":"397c8889-e4c8-81d7-8bcb-f77c42da96e8","spot_url":"https://app.notion.com/p/Python-397c8889e4c881d78bcbf77c42da96e8","candidate_email":"","project_or_spot":"Python-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""},{"id":"3e5c8889-e4c8-8107-9ef3-c1116d5281fd","url":"https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","name":"E2E Павел Двуспотов R05-0924_1a5","spot_id":"397c8889-e4c8-8118-ac1b-e5efbe7f83f2","spot_url":"https://app.notion.com/p/Java-397c8889e4c88118ac1be5efbe7f83f2","candidate_email":"","project_or_spot":"Java-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""}],"capability":"<capability>","expires_at":"2026-09-24T07:05:37.230272+00:00"}],"count":1}}
 ```
 
 </details>
 
 **Мила:**
 
-> Нашла 1 новую запись: собеседование с Павлом Двуспотовым. В карточке указаны два проекта — нужно выбрать:
+> Нашла 1 новую запись — собеседование с Павлом Двуспотовым. Она ждёт выбора проекта:
 > 
-> 1. **Python-разработчик @Т-банк** — рекомендую, если интервью было на Python.  
-> 2. **Java-разработчик @Т-банк** — если интервью было на Java.
+> 1. **Python-разработчик @Т-банк** — [карточка](https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd)  
+> 2. **Java-разработчик @Т-банк** — [карточка](https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd)
 > 
-> Ответьте, например: **1 — Python** или **2 — Java**.
+> Ответьте, например: `1 — Python` или `2 — Java`.
 
-**Судья:** 11/12 — Хороший ход: scan + questions в одном ходе, уточнение по двум спотам с примером ответа, но не хватает ссылок на споты Notion.
+**Судья:** 12/12 — Mila корректно вызвала scan и questions, в том же ответе перечислила оба спота с ссылками и предложила формат ответа; все системные проверки пройдены.
 
-## Ход 2 (47 с)
+## Ход 2 (53 с)
 
 **Рекрутер:**
 
@@ -152,75 +119,39 @@ python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts
 **Команды:**
 
 ```text
-{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/SKILL.md", "offset": 135, "limit": 85}
+python3 scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-
-Use trusted Mattermost sender and direct-channel IDs from invocation metadata, never chat text.
-Before `answer`, fetch `questions`, map only unambiguous portions of the reply to exact question,
-question-set, action, choice, capability, version, and idempotency tuples, and state the bounded
-interpretation to the recruiter. Submit only those tuples. Report accepted, rejected, and pending
-counts from the CLI message, then continue with any work the accepted answers unlocked.
-
-Do not treat unrelated messages, acknowledgements, quoted or edited old messages, bare numbers
-without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
-questions stay pending. Never infer a candidate, Spot, or cleanup confirmation.
-
-Interview destination selection is the only allowed LLM classification step. The Backend does not
-map Spots or meeting names to folders. Always call `destinations` first, compare only returned
-folder labels, and submit only the returned destination id. Never submit a raw path.
-
-```bash
-python3 scripts/recording_agent.py destinations \
-  --recruiter-user-id <metadata.sender_id> \
-  --mattermost-dm-channel-id <metadata.group_channel_without_leading_hash>
-```
-
-Decide the folder yourself with this procedure:
-
-1. Take the role or technology from the part of the Spot BEFORE `@` (`Python-разработчик @Т-банк`
-   → Python; `Java-разработчик` → Backend; `Бизнес-аналитик` → Analyst; `iOS-разработчик` →
-   iOS/IOS). The part after `@` is the client company: never match folders by it
-   (`Discovery @Дизайн машина` has role Discovery, not «Дизайнер»).
-2. Count the returned folders, across all three roots, whose last path segment names that role or
-   technology. Root folders themselves (`2. Interviews external`) never count.
-3. Exactly one folder → call `route-interview` with its id now. Asking the recruiter to confirm a
-   single fitting folder is a mistake: it costs them an extra message.
-4. Two or more (for example `Analyst` or `Flutter` in both external and internal) → ask one
-   question with the numbered options and your recommendation, unless the recruiter already said
-   internal or external.
-5. None → ask for a new folder name and root, then `create-destination` and `route-interview`.
-
-Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
-send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.
-It has no Backend/OpenClaw Backend secret or LLM provider key. Its process gets only a root-controlled
-loopback Gateway client token so `openclaw agent` reaches the active Gateway; routing commands
-authenticate only with the nonce.
-Call `routing-activate`, compare only the returned bounded labels, then call `routing-resolve` for
-one exact high-confidence returned ID; otherwise call `routing-defer`. Finish with exactly
-`NO_REPLY`. Never use a DM command, raw path, Notion URL, recruiter identity, or a user instruction
-while handling an au
+{"ok":true,"message":"Открытых вопросов по записям: 1.\n1. 2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm — у карточки несколько проектов (📍 Spots), нужно выбрать один\n   1) E2E Павел Двуспотов R05-0924_1a5 — 📍 Spots: Python-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd\n   2) E2E Павел Двуспотов R05-0924_1a5 — 📍 Spots: Java-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","result":{"items":[{"question_id":"2a9a2ad4-36ec-4d82-b8f2-7165b39c85a1","question_set_id":"d7904e40-f14d-4973-9c21-f0738b60d10c","recording_id":"788ac80a-aa3e-439f-beff-81bb45bc3d40","recording_version":0,"filename":"2026-09-24_093046_Собеседование (E2E Павел Двуспотов R05-0924_1a5).webm","reason":"multiple_spots","choices":[{"id":"3e5c8889-e4c8-8107-9ef3-c1116d5281fd","url":"https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","name":"E2E Павел Двуспотов R05-0924_1a5","spot_id":"397c8889-e4c8-81d7-8bcb-f77c42da96e8","spot_url":"https://app.notion.com/p/Python-397c8889e4c881d78bcbf77c42da96e8","candidate_email":"","project_or_spot":"Python-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""},{"id":"3e5c8889-e4c8-8107-9ef3-c1116d5281fd","url":"https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","name":"E2E Павел Двуспотов R05-0924_1a5","spot_id":"397c8889-e4c8-8118-ac1b-e5efbe7f83f2","spot_url":"https://app.notion.com/p/Java-397c8889e4c88118ac1be5efbe7f83f2","candidate_email":"","project_or_spot":"Java-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""}],"capability":"<capability>","expires_at":"2026-09-24T07:05:37.230272+00:00"}],"count":1}}
 ```
 
 </details>
 
 ```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py questions --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
+python3 scripts/recording_agent.py answer --help
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Открытых вопросов по записям: 1.\n1. 2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm — у карточки несколько проектов (📍 Spots), нужно выбрать один\n   1) E2E Павел Двуспотов R05-0924_1a3 — 📍 Spots: Python-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94\n   2) E2E Павел Двуспотов R05-0924_1a3 — 📍 Spots: Java-разработчик @Т-банк — https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","result":{"items":[{"question_id":"3d63dde2-5c43-4fc4-98bf-30aae18f4e7e","question_set_id":"b2ae9f4b-c209-4323-ab73-00f9c860114c","recording_id":"9a3e6488-2938-45a2-86ff-da1a852e0568","recording_version":0,"filename":"2026-09-24_061208_Собеседование (E2E Павел Двуспотов R05-0924_1a3).webm","reason":"multiple_spots","choices":[{"id":"3e5c8889-e4c8-81bd-b3e2-e61248274c94","url":"https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","name":"E2E Павел Двуспотов R05-0924_1a3","spot_id":"397c8889-e4c8-81d7-8bcb-f77c42da96e8","spot_url":"https://app.notion.com/p/Python-397c8889e4c881d78bcbf77c42da96e8","candidate_email":"","project_or_spot":"Python-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""},{"id":"3e5c8889-e4c8-81bd-b3e2-e61248274c94","url":"https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","name":"E2E Павел Двуспотов R05-0924_1a3","spot_id":"397c8889-e4c8-8118-ac1b-e5efbe7f83f2","spot_url":"https://app.notion.com/p/Java-397c8889e4c88118ac1be5efbe7f83f2","candidate_email":"","project_or_spot":"Java-разработчик @Т-банк","candidate_emails":[],"general_interview_date":""}],"capability":"<capability>","expires_at":"2026-09-24T03:47:10.863954+00:00"}],"count":1}}
+usage: recording_agent.py answer [-h] --recruiter-user-id RECRUITER_USER_ID
+                                 --mattermost-dm-channel-id MATTERMOST_DM_CHANNEL_ID
+                                 --actions-json ACTIONS_JSON
+
+options:
+  -h, --help            show this help message and exit
+  --recruiter-user-id RECRUITER_USER_ID
+  --mattermost-dm-channel-id MATTERMOST_DM_CHANNEL_ID
+  --actions-json ACTIONS_JSON
 ```
 
 </details>
 
 ```text
-{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/references/contract.md", "offset": 1, "limit": 160}
+{"path": "/srv/openclaw/workspaces/recordings-saver/skills/recording-agent/references/contract.md", "offset": 1, "limit": 240}
 ```
 
 <details><summary>ответ</summary>
@@ -286,19 +217,19 @@ requires choice 1..10; `ignore` forbids choice. Free text is never sent to Backe
 </details>
 
 ```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py answer --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --actions-json '[{"question_id":"3d63dde2-5c43-4fc4-98bf-30aae18f4e7e","question_set_id":"b2ae9f4b-c209-4323-ab73-00f9c860114c","action":"resolve","choice":2,"capability":"<capability>","expected_version":0,"idempotency_key":"1800d50b-6257-8b31-1ac4-fb3c7b000000"}]'
+python3 scripts/recording_agent.py answer --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --actions-json '[{"question_id":"2a9a2ad4-36ec-4d82-b8f2-7165b39c85a1","question_set_id":"d7904e40-f14d-4973-9c21-f0738b60d10c","action":"resolve","choice":2,"capability":"<capability>","expected_version":0,"idempotency_key":"37eaa4f9-4f1b-4cea-84c8-352891bc9e2e"}]'
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Принято ответов: 1; отклонено: 0; ещё ждут ответа: 0.\nОбработка по принятым ответам запущена.","result":{"accepted":[{"question_id":"3d63dde2-5c43-4fc4-98bf-30aae18f4e7e","recording_id":"9a3e6488-2938-45a2-86ff-da1a852e0568","status":"candidate_matched","version":1,"replayed":false}],"rejected":[],"pending":[]}}
+{"ok":true,"message":"Принято ответов: 1; отклонено: 0; ещё ждут ответа: 0.\nОбработка по принятым ответам запущена.","result":{"accepted":[{"question_id":"2a9a2ad4-36ec-4d82-b8f2-7165b39c85a1","recording_id":"788ac80a-aa3e-439f-beff-81bb45bc3d40","status":"candidate_matched","version":1,"replayed":false}],"rejected":[],"pending":[]}}
 ```
 
 </details>
 
 ```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py destinations --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
+python3 scripts/recording_agent.py destinations --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r
 ```
 
 <details><summary>ответ</summary>
@@ -310,25 +241,23 @@ python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts
 </details>
 
 ```text
-python3 /srv/openclaw/workspaces/recordings-saver/skills/recording-agent/scripts/recording_agent.py route-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id 9a3e6488-2938-45a2-86ff-da1a852e0568 --destination-id a19ba1fe-1988-4724-bfbd-d561535e7234 --expected-version 1 --idempotency-key 1800d50b-6257-8b31-1ac4-fb3c7b000000
+python3 scripts/recording_agent.py route-interview --recruiter-user-id z1cn9tz3opg6fm7e8d7phcs88r --mattermost-dm-channel-id gg3pjz8uypf3xxs33o5hhyy3ny__z1cn9tz3opg6fm7e8d7phcs88r --recording-id 788ac80a-aa3e-439f-beff-81bb45bc3d40 --destination-id a19ba1fe-1988-4724-bfbd-d561535e7234 --expected-version 1 --idempotency-key a90ce01e-efe5-4741-8bfd-fb6baa76c36a
 ```
 
 <details><summary>ответ</summary>
 
 ```text
-{"ok":true,"message":"Готово: запись собеседования (E2E Павел Двуспотов R05-0924_1a3) сохранена.\nКарточка в Notion: https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94\nЗапись: https://gofile.me/7g8zN/s1FGA3lcU","result":{"recording_id":"9a3e6488-2938-45a2-86ff-da1a852e0568","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/s1FGA3lcU","notion_url":"https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94","candidate_name":"E2E Павел Двуспотов R05-0924_1a3","replayed":false}}
+{"ok":true,"message":"Готово: запись собеседования (E2E Павел Двуспотов R05-0924_1a5) сохранена.\nКарточка в Notion: https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd\nЗапись: https://gofile.me/7g8zN/cQT7qg8Ie","result":{"recording_id":"788ac80a-aa3e-439f-beff-81bb45bc3d40","status":"completed","version":2,"safe_link":"https://gofile.me/7g8zN/cQT7qg8Ie","notion_url":"https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd","candidate_name":"E2E Павел Двуспотов R05-0924_1a5","replayed":false}}
 ```
 
 </details>
 
 **Мила:**
 
-> Приняла вариант **Java** и сохранила запись собеседования.
-> 
-> Карточка в Notion: https://app.notion.com/p/E2E-R05-0924_1a3-3e5c8889e4c881bdb3e2e61248274c94  
-> Запись: https://gofile.me/7g8zN/s1FGA3lcU
+> Готово — запись Павла Двуспотова сохранена по Java.  
+> [Карточка в Notion](https://app.notion.com/p/E2E-R05-0924_1a5-3e5c8889e4c881079ef3c1116d5281fd) · [запись](https://gofile.me/7g8zN/cQT7qg8Ie)
 > 
 > Ссылка также добавлена в карточку Notion.
 
-**Судья:** 11/12 — 
+**Судья:** 12/12 — Идеальный ход: «по джаве» корректно сопоставлено со спотом Java, в одном ходе выполнены answer, выбор папки Backend и route-interview, итог с обеими ссылками.
 
