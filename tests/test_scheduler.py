@@ -25,6 +25,7 @@ from app.scheduler.cron import (
     _resume_found_recording,
     _resume_transfer_recording,
     _send_recruiter_notifications,
+    _summary_time,
     local_today_start_utc,
     register_jobs,
     run_due_recruiter_summaries,
@@ -1958,3 +1959,17 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
         "first@example.com": RecordingStatus.FAILED,
         "second@example.com": RecordingStatus.SOURCE_MARKED_PROCESSED,
     }
+
+
+def test_summary_local_time_is_configurable_and_validated() -> None:
+    owner = recruiter()
+    owner.timezone = "Asia/Omsk"
+    due = _summary_time(Settings(summary_local_time="11:35").summary_local_time)
+
+    assert _due_recruiter_local_date(owner, datetime(2026, 9, 24, 5, 34, tzinfo=UTC), due) is None
+    assert _due_recruiter_local_date(owner, datetime(2026, 9, 24, 5, 35, tzinfo=UTC), due) == date(
+        2026, 9, 24
+    )
+    assert Settings().summary_local_time == "18:00"
+    with pytest.raises(ValueError):
+        Settings(summary_local_time="25:00")

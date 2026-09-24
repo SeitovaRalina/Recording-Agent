@@ -1556,9 +1556,8 @@ def register_jobs(
         replace_existing=True,
     )
     logger.info(
-        "recruiter-local scan/summary dispatcher registered: local_time=%02d:%02d",
-        SUMMARY_LOCAL_HOUR,
-        SUMMARY_LOCAL_MINUTE,
+        "recruiter-local scan/summary dispatcher registered: local_time=%s",
+        settings.summary_local_time,
     )
 
 
@@ -1580,7 +1579,9 @@ async def run_due_recruiter_summaries(
 ) -> None:
     current = _utc(now or datetime.now(UTC))
     for recruiter in await _active_recruiters(session_factory):
-        local_date = _due_recruiter_local_date(recruiter, current)
+        local_date = _due_recruiter_local_date(
+            recruiter, current, _summary_time(settings.summary_local_time)
+        )
         if (
             local_date is None
             or not recruiter.mattermost_user_id
@@ -1666,13 +1667,21 @@ async def drain_notification_outbox(
                 logger.exception("Notification outbox delivery failed for item %s", item.id)
 
 
-def _due_recruiter_local_date(recruiter: RecruiterConfig, now: datetime) -> date | None:
+def _summary_time(value: str) -> time:
+    hour, minute = value.split(":")
+    return time(int(hour), int(minute))
+
+
+def _due_recruiter_local_date(
+    recruiter: RecruiterConfig,
+    now: datetime,
+    due: time = time(SUMMARY_LOCAL_HOUR, SUMMARY_LOCAL_MINUTE),
+) -> date | None:
     try:
         local = _utc(now).astimezone(ZoneInfo(recruiter.timezone))
     except Exception:
         logger.error("Recruiter %s has invalid timezone", recruiter.email)
         return None
-    due = time(SUMMARY_LOCAL_HOUR, SUMMARY_LOCAL_MINUTE)
     return local.date() if local.timetz().replace(tzinfo=None) >= due else None
 
 
