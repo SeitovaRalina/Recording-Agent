@@ -22,6 +22,11 @@ FILES = (
 )
 
 
+def _lf(path: Path) -> str:
+    """Base64 of the file with LF endings: the Windows checkout (autocrlf) has CRLF."""
+    return base64.b64encode(path.read_bytes().replace(b"\r\n", b"\n")).decode()
+
+
 def main() -> None:
     parts = [
         "set -e",
@@ -29,14 +34,14 @@ def main() -> None:
         f"mkdir -p /root/skill-backup-$TS && cp -a {TARGET}/. /root/skill-backup-$TS/",
     ]
     for rel in FILES:
-        data = base64.b64encode((REPO / rel).read_bytes()).decode()
+        data = _lf(REPO / rel)
         parts += [
             f"OWNER=$(stat -c %U:%G {TARGET}/{rel}); MODE=$(stat -c %a {TARGET}/{rel})",
             f"base64 -d > {TARGET}/{rel}.new <<'__B64__'\n{data}\n__B64__",
             f"chown $OWNER {TARGET}/{rel}.new && chmod $MODE {TARGET}/{rel}.new",
             f"mv {TARGET}/{rel}.new {TARGET}/{rel}",
         ]
-    data = base64.b64encode(DISPATCHER.read_bytes()).decode()
+    data = _lf(DISPATCHER)
     parts += [
         f"cp -a {DISPATCHER_TARGET} /root/skill-backup-$TS/routing-dispatch",
         f"base64 -d > {DISPATCHER_TARGET}.new <<'__B64__'\n{data}\n__B64__",
