@@ -439,8 +439,8 @@ class QuestionQueueService:
         if not review.recruiter_user_id or not review.mattermost_channel_id:
             raise ReviewRejectedError("Routing question has no exact Mattermost DM binding")
         choices = review.question_context.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ReviewRejectedError("Routing question has no destination choices")
+        if not isinstance(choices, list):
+            raise ReviewRejectedError("Routing question choices are malformed")
         labels: list[str] = []
         for choice in choices[:10]:
             if not isinstance(choice, dict):
@@ -456,13 +456,24 @@ class QuestionQueueService:
                     "Routing question destination identity is invalid"
                 ) from error
             labels.append(" ".join(raw_name.split())[:160])
-        message = "\n".join(
-            [
-                f"Recording {recording.disk_filename[:160]} needs a Synology destination:",
-                *(f"{number}. {label}" for number, label in enumerate(labels, start=1)),
-                "Reply with one number.",
+        subject = f"«{recording.disk_filename[:160]}»"
+        if recording.candidate_name:
+            subject += f", кандидат {recording.candidate_name[:160]}"
+        if recording.project_or_spot:
+            subject += f", 📍 {recording.project_or_spot[:160]}"
+        if labels:
+            lines = [
+                f"Запись {subject}: подходят несколько папок в Synology.",
+                *(f"{number}) {label}" for number, label in enumerate(labels, start=1)),
+                "Ответьте Миле номером, например «1».",
             ]
-        )
+        else:
+            lines = [
+                f"Запись {subject}: подходящей папки в Synology нет.",
+                "Напишите Миле, куда её положить или какую папку создать, например: "
+                "«создай папку Discovery во внешних».",
+            ]
+        message = "\n".join(lines)
         return await self.queue_notification(
             session,
             dedupe_key=f"routing-defer:{job_id}:{recording.version}",

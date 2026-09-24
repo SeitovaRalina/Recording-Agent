@@ -620,10 +620,10 @@ async def test_routing_defer_notification_renders_bounded_labels_and_dedupes(
     assert first.id == replay.id
     assert first.payload == {
         "message": (
-            "Recording routing-notification.webm needs a Synology destination:\n"
-            "1. Android Mobile\n"
-            "2. Backend\n"
-            "Reply with one number."
+            "Запись «routing-notification.webm»: подходят несколько папок в Synology.\n"
+            "1) Android Mobile\n"
+            "2) Backend\n"
+            "Ответьте Миле номером, например «1»."
         ),
         "entity_id": str(question.id),
     }
@@ -634,6 +634,28 @@ async def test_routing_defer_notification_renders_bounded_labels_and_dedupes(
             NotificationOutbox.dedupe_key == f"routing-defer:{job_id}:3"
         )
     ) == first
+
+
+@pytest.mark.anyio
+async def test_routing_no_match_notification_asks_for_a_folder_without_options(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")  # pragma: allowlist secret
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("routing-no-match", "valid-token")
+    question.question_type = "autonomous_routing_no_match"
+    question.question_context = {"choices": []}
+    session.add(question)
+    await session.commit()
+
+    queued = await service.queue_routing_defer_notification(
+        session, job_id=uuid.uuid4(), recording=question.recording, review=question
+    )
+
+    message = queued.payload["message"]
+    assert "подходящей папки в Synology нет" in message
+    assert "1)" not in message
 
 
 @pytest.mark.anyio
