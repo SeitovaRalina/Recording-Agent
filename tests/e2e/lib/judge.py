@@ -46,6 +46,11 @@ Notion, выбор папки в Synology, ответы на вопросы, с�
 6. proactivity — доводит работу до конца в одном ходе; не заставляет рекрутера спрашивать
    «что дальше»; все оставшиеся вопросы собраны в одно сообщение с рекомендацией и примером ответа.
 
+system_checks — проверки фактического состояния системы (БД, Synology, Notion) после хода.
+Проваленная проверка (ok=false), которая следует из действий или слов Милы (не та папка, не та
+карточка, не тот статус), — это ошибка: action или facts не выше 1, а если Мила сообщила
+результат, противоречащий проверке, facts = 0.
+
 Если критерий неприменим к ходу (например, уточнять нечего и Мила не уточняла) — ставь 2.
 Ответ строго JSON без markdown:
 {"scores": {"action": n, "facts": n, "safety": n, "clarification": n, "clarity": n,
@@ -84,17 +89,28 @@ def _key() -> str:
     raise RuntimeError("LLM_GATEWAY_KEY not found")
 
 
-def judge(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> Verdict:
+Check = tuple[str, str, str, bool]
+
+
+def judge(
+    scenario: str,
+    expectation: str,
+    turn: Turn,
+    history: list[Turn],
+    checks: list[Check] | None = None,
+) -> Verdict:
     """Score one turn; the gateway model sometimes returns broken JSON, so retry up to 3 times."""
-    verdict = _judge_once(scenario, expectation, turn, history)
+    verdict = _judge_once(scenario, expectation, turn, history, checks or [])
     for _ in range(2):
         if not verdict.error:
             break
-        verdict = _judge_once(scenario, expectation, turn, history)
+        verdict = _judge_once(scenario, expectation, turn, history, checks or [])
     return verdict
 
 
-def _judge_once(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> Verdict:
+def _judge_once(
+    scenario: str, expectation: str, turn: Turn, history: list[Turn], checks: list[Check]
+) -> Verdict:
     calls = [
         {"command": c.command[:600], "backend_result": c.result[:2500]} for c in turn.tool_calls
     ]
@@ -107,6 +123,9 @@ def _judge_once(scenario: str, expectation: str, turn: Turn, history: list[Turn]
             "recruiter_message": turn.user,
             "mila_tool_calls": calls,
             "mila_reply": turn.reply,
+            "system_checks": [
+                {"check": n, "expected": e, "actual": a, "ok": ok} for n, e, a, ok in checks
+            ],
         },
         ensure_ascii=False,
         indent=1,

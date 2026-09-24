@@ -51,6 +51,8 @@ class TurnRecord:
     turn: mila.Turn
     verdict: judge_mod.Verdict | None
     checks: list[Check] = field(default_factory=list)
+    # Judging waits until the route has attached its deterministic checks to this turn.
+    pending: tuple[str, str, list[mila.Turn]] | None = None
 
 
 @dataclass
@@ -221,8 +223,8 @@ class RouteCtx:
     def say(self, text: str, *, scenario: str, expected: str, judge: bool = True) -> mila.Turn:
         history = [r.turn for r in self.turns]
         turn = mila.turn(self.session, text)
-        verdict = judge_mod.judge(scenario, expected, turn, history) if judge else None
-        self.turns.append(TurnRecord(turn, verdict))
+        pending = (scenario, expected, history) if judge else None
+        self.turns.append(TurnRecord(turn, None, pending=pending))
         if not turn.ok:
             raise RouteBlocker(f"ход Милы не завершился: {turn.error[:300]}")
         return turn
@@ -491,6 +493,7 @@ class RouteCtx:
         return len(self.turns)
 
     def verdict(self) -> str:
+        self.judge_pending()
         if self.error or any(not c.ok for c in self.checks):
             return "❌ провален"
         if any(r.verdict and not r.verdict.passed for r in self.turns):
@@ -499,7 +502,18 @@ class RouteCtx:
             return "⚠️ пройден с дефектами"
         return "✅ пройден"
 
+    def judge_pending(self) -> None:
+        """Score every turn once, with the deterministic checks that ran after it."""
+        for record in self.turns:
+            if record.pending is None:
+                continue
+            scenario, expected, history = record.pending
+            checks = [(c.name, c.expected, c.actual, c.ok) for c in record.checks]
+            record.verdict = judge_mod.judge(scenario, expected, record.turn, history, checks)
+            record.pending = None
+
     def write_report(self) -> Path:
+        self.judge_pending()
         self.finished = self.finished or datetime.now(UTC)
         image = _backend_image()
         skill = _skill_hash()
