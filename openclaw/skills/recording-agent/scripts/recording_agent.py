@@ -15,7 +15,10 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:18000"
 MAX_RESPONSE_BYTES = 65_536
-TIMEOUT_SECONDS = 15.0
+TIMEOUT_SECONDS = 30.0
+# Scans and storage mutations talk to Disk, CalDAV, Notion (through a lossy proxy) and Synology
+# synchronously; a short client timeout reports "Backend unavailable" while the Backend succeeds.
+LONG_TIMEOUT_SECONDS = 300.0
 
 STATUS_LABELS = {
     "found": "найдена, ожидает сопоставления с календарём",
@@ -174,7 +177,8 @@ def _request(
         headers=request_headers,
     )
     try:
-        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        timeout = LONG_TIMEOUT_SECONDS if method != "GET" else TIMEOUT_SECONDS
+        with urlopen(request, timeout=timeout) as response:
             payload = response.read(MAX_RESPONSE_BYTES + 1)
             status = response.status
     except HTTPError as exc:

@@ -232,3 +232,37 @@ def test_route_interview_message_reports_notion_card_and_recording_links() -> No
     assert "https://app.notion.com/p/card" in message
     assert "https://gofile.me/x" in message
     assert "11111111-1111" not in message
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [("GET", CLIENT.TIMEOUT_SECONDS), ("POST", CLIENT.LONG_TIMEOUT_SECONDS)],
+)
+def test_mutating_requests_use_long_timeout(
+    monkeypatch: pytest.MonkeyPatch, method: str, expected: float
+) -> None:
+    captured: dict[str, float] = {}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return b"{}"
+
+    def fake_urlopen(_: object, timeout: float) -> _Response:
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", "secret")  # pragma: allowlist secret
+    monkeypatch.setattr(CLIENT, "urlopen", fake_urlopen)
+
+    CLIENT._request(method, "/tools/scan", body={} if method == "POST" else None)
+
+    assert captured["timeout"] == expected
+    assert CLIENT.LONG_TIMEOUT_SECONDS >= 300

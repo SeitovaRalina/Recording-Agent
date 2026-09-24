@@ -42,6 +42,15 @@ Add only explicit recruiter-requested filters such as `--date`, `--candidate`, `
 or `--status`. Never run `python3 scripts/recording_agent.py` without a subcommand. If the command
 fails, report its JSON `message`.
 
+## Long-running commands
+
+`scan`, `answer`, `route-interview`, `non-interview`, `reroute-recording`,
+`notion-reassignment-confirm` and `cleanup-confirm` can take several minutes (Disk, calendar,
+Notion and Synology are called synchronously). Run them with an exec timeout of at least 320
+seconds. If exec reports that the
+command is still running, poll it until it exits; never tell the recruiter that something failed
+while the command is still running.
+
 ## Finish the job in one turn
 
 The recruiter should not have to ask "what next?". One recruiter message ideally produces one
