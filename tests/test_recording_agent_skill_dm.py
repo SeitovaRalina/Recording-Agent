@@ -306,7 +306,9 @@ def test_review_item_hides_raw_backend_error_text() -> None:
                     "is_new": True,
                     "requires_review": True,
                     "review_reason": "storage_destination_required",
-                    "error": "Interview destination must be selected from allowed Synology inventory",
+                    "error": (
+                        "Interview destination must be selected from allowed Synology inventory"
+                    ),
                 }
             ],
         },

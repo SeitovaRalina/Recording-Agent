@@ -264,7 +264,9 @@ async def test_upload_refuses_existing_destination() -> None:
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]
@@ -286,7 +288,12 @@ def _marker_exists() -> httpx.Response:
         json={
             "success": True,
             "data": {
-                "files": [{"path": "/base/.video.webm.recording-agent-owner.json", "additional": {"size": 70}}]
+                "files": [
+                    {
+                        "path": "/base/.video.webm.recording-agent-owner.json",
+                        "additional": {"size": 70},
+                    }
+                ]
             },
         },
     )
@@ -306,7 +313,9 @@ async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]
@@ -365,7 +374,9 @@ async def test_upload_recovers_timeout_after_synology_accepted_exact_owned_file(
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]

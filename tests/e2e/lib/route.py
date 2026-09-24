@@ -71,6 +71,7 @@ class Interview:
     file: dict[str, Any] | None = None
     card: dict[str, Any] | None = None
     expected_folder: str | None = None
+    extra_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 class RouteCtx:
@@ -92,6 +93,7 @@ class RouteCtx:
         self.interviews: list[Interview] = []
         self.conclusions: list[str] = []
         self.error: str = ""
+        self._stopped: set[str] = set()
         self.dir = REPORTS / run_id
         self.dir.mkdir(parents=True, exist_ok=True)
         self.attempt = 1
@@ -135,6 +137,7 @@ class RouteCtx:
         disk_name: str | None = None,
         file_offset_s: int = 60,
         expected_folder: str | None = None,
+        duplicate_event: bool = False,
     ) -> Interview:
         candidate = self.person(candidate)
         start = start_utc or self.unique_minute(len(self.interviews) * 3)
@@ -158,19 +161,21 @@ class RouteCtx:
         digits = "".join(str(int(c, 16) % 10) for c in digits)
         payload: dict[str, Any] = {"run": self.session, "events": [], "files": [{"name": name}]}
         if event:
-            payload["events"].append(
-                {
-                    "calendar": calendar,
-                    "summary": summary,
-                    "description": description
-                    if description is not None
-                    else TELEMOST_LINK.format(digits=digits),
-                    "start_utc": start.isoformat(),
-                    "minutes": 30,
-                }
-            )
+            for _ in range(2 if duplicate_event else 1):
+                payload["events"].append(
+                    {
+                        "calendar": calendar,
+                        "summary": summary,
+                        "description": description
+                        if description is not None
+                        else TELEMOST_LINK.format(digits=digits),
+                        "start_utc": start.isoformat(),
+                        "minutes": 30,
+                    }
+                )
         seeded = remote.stand("seed", payload)
         item.event = seeded["events"][0] if seeded["events"] else None
+        item.extra_events = seeded["events"][1:]
         item.file = seeded["files"][0]
         if item.event:
             self.seed_rows.append(
@@ -301,6 +306,17 @@ class RouteCtx:
                 "Маркер Synology", f"{folder}/.{name}.recording-agent-owner.json", "удалить"
             )
 
+    def container(self, action: str, name: str = "recording-agent-notion-proxy-1") -> None:
+        """Stop/start a stand container to inject an infrastructure failure (R09, R15)."""
+        if action not in ("stop", "start") or not name.startswith("recording-agent-"):
+            raise ValueError("unsupported container action")
+        remote.bash(f"docker {action} {name} >/dev/null")
+        self.stand_notes.append(f"`docker {action} {name}` в {datetime.now(OMSK):%H:%M:%S}")
+        if action == "stop":
+            self._stopped.add(name)
+        else:
+            self._stopped.discard(name)
+
     def open_reviews(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         return [r for r in state["reviews"] if r["status"] == "pending"]
 
@@ -371,7 +387,9 @@ class RouteCtx:
     # ------------------------------------------------------------ teardown
 
     def teardown(self) -> None:
-        urls = [i.event["url"] for i in self.interviews if i.event]
+        for name in list(self._stopped):
+            self.container("start", name)
+        urls = [e["url"] for i in self.interviews for e in ([i.event] if i.event else []) + i.extra_events]
         if urls:
             try:
                 res = remote.stand("calendar_delete", {"urls": urls})
