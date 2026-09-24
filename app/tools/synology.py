@@ -414,11 +414,16 @@ class SynologyBackend:
         # DSM 7 reports a missing path as a successful response with a per-item error code.
         if isinstance(item, dict) and item.get("code") == 408:
             return None
-        if not isinstance(item, dict) or not isinstance(item.get("size"), int):
+        # DSM returns requested fields under `additional` ({"additional": {"size": n}}).
+        additional = item.get("additional") if isinstance(item, dict) else None
+        size = additional.get("size") if isinstance(additional, dict) else None
+        if size is None and isinstance(item, dict):
+            size = item.get("size")
+        if not isinstance(size, int):
             raise StorageCollisionError(
                 f"Synology destination exists but its size cannot be verified: {path}"
             )
-        return int(item["size"])
+        return size
 
     async def _read_owner_marker(self, folder: str, filename: str) -> dict[str, object] | None:
         marker_path = f"{folder.rstrip('/')}/{self._owner_marker_name(filename)}"

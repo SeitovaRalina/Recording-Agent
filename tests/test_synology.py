@@ -264,7 +264,7 @@ async def test_upload_refuses_existing_destination() -> None:
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
                         },
                     ),
                 ]
@@ -286,7 +286,7 @@ def _marker_exists() -> httpx.Response:
         json={
             "success": True,
             "data": {
-                "files": [{"path": "/base/.video.webm.recording-agent-owner.json", "size": 70}]
+                "files": [{"path": "/base/.video.webm.recording-agent-owner.json", "additional": {"size": 70}}]
             },
         },
     )
@@ -306,7 +306,7 @@ async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
                         },
                     ),
                 ]
@@ -365,7 +365,7 @@ async def test_upload_recovers_timeout_after_synology_accepted_exact_owned_file(
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {"files": [{"path": "/base/video.webm", "additional": {"size": 10}}]},
                         },
                     ),
                 ]
@@ -570,3 +570,21 @@ async def test_upload_sends_cyrillic_filename_as_raw_utf8() -> None:
     assert f'filename="{name}"'.encode() in bodies[-1]
     assert f'filename=".{name}.recording-agent-owner.json"'.encode() in bodies[0]
     assert b"%D0" not in b"".join(bodies)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"path": "/base/v.webm", "additional": {"size": 938034}}, 938034),
+        ({"path": "/base/v.webm", "size": 5}, 5),
+        ({"path": "/base/v.webm", "code": 408}, None),
+    ],
+)
+async def test_file_size_reads_dsm_additional_size(item: dict, expected: int | None) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "data": {"files": [item]}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        backend = SynologyBackend("https://nas.test", SecretStr("token"), client)
+        assert await backend._file_size("/base/v.webm") == expected
