@@ -702,6 +702,20 @@ async def route_non_interview(
         )
     except NonInterviewRejectedError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    # The recruiter classified the recording, which answers every open question about it.
+    await session.execute(
+        update(ManualReview)
+        .where(
+            ManualReview.recording_id == recording.id,
+            ManualReview.status == ManualReviewStatus.PENDING,
+        )
+        .values(
+            status=ManualReviewStatus.COMPLETED,
+            completed_at=datetime.now(UTC),
+            result={"resumed_by": "route_non_interview"},
+        )
+    )
+    await session.commit()
     response = NonInterviewRouteResponse(
         recording_id=recording.id,
         status=recording.status,
