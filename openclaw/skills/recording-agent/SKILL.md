@@ -155,8 +155,10 @@ python3 scripts/recording_agent.py destinations \
 
 Decide the folder yourself with this procedure:
 
-1. Take the role or technology from the Spot (`Python-разработчик @Т-банк` → Python;
-   `Java-разработчик` → Backend; `Бизнес-аналитик` → Analyst; `iOS-разработчик` → iOS/IOS).
+1. Take the role or technology from the part of the Spot BEFORE `@` (`Python-разработчик @Т-банк`
+   → Python; `Java-разработчик` → Backend; `Бизнес-аналитик` → Analyst; `iOS-разработчик` →
+   iOS/IOS). The part after `@` is the client company: never match folders by it
+   (`Discovery @Дизайн машина` has role Discovery, not «Дизайнер»).
 2. Count the returned folders, across all three roots, whose last path segment names that role or
    technology. Root folders themselves (`2. Interviews external`) never count.
 3. Exactly one folder → call `route-interview` with its id now. Asking the recruiter to confirm a

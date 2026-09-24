@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -121,7 +120,8 @@ def judge(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> V
         body = response.json()
         served = f"{body.get('provider') or 'gateway'}/{body.get('model') or MODEL}"
         content = body["choices"][0]["message"]["content"] or ""
-        data: dict[str, Any] = json.loads(re.search(r"\{.*\}", content, re.S).group(0))  # type: ignore[union-attr]
+        start = content.index("{")
+        data: dict[str, Any] = json.JSONDecoder().raw_decode(content[start:])[0]
         scores = {c: int(data["scores"].get(c, 0)) for c in CRITERIA}
         return Verdict(scores, data.get("reasons") or {}, data.get("summary", ""), served_by=served)
     except Exception as exc:  # noqa: BLE001
