@@ -85,6 +85,16 @@ def _key() -> str:
 
 
 def judge(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> Verdict:
+    """Score one turn; the gateway model sometimes returns broken JSON, so retry up to 3 times."""
+    verdict = _judge_once(scenario, expectation, turn, history)
+    for _ in range(2):
+        if not verdict.error:
+            break
+        verdict = _judge_once(scenario, expectation, turn, history)
+    return verdict
+
+
+def _judge_once(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> Verdict:
     calls = [
         {"command": c.command[:600], "backend_result": c.result[:2500]} for c in turn.tool_calls
     ]
@@ -122,7 +132,10 @@ def judge(scenario: str, expectation: str, turn: Turn, history: list[Turn]) -> V
         content = body["choices"][0]["message"]["content"] or ""
         start = content.index("{")
         data: dict[str, Any] = json.JSONDecoder().raw_decode(content[start:])[0]
-        scores = {c: int(data["scores"].get(c, 0)) for c in CRITERIA}
+        raw = data.get("scores") or {c: data[c] for c in CRITERIA if c in data}
+        if set(raw) < set(CRITERIA):
+            raise ValueError("judge answer has no complete scores")
+        scores = {c: int(raw[c]) for c in CRITERIA}
         return Verdict(scores, data.get("reasons") or {}, data.get("summary", ""), served_by=served)
     except Exception as exc:  # noqa: BLE001
         return Verdict({c: 0 for c in CRITERIA}, error=f"{type(exc).__name__}: {str(exc)[:300]}")

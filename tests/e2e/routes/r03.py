@@ -11,7 +11,8 @@ TARGET = "2 (+1 проверка D5)"
 
 
 def body(ctx: RouteCtx) -> None:
-    folder = f"{EXTERNAL}/E2E Discovery"
+    folder_name = f"E2E Discovery {ctx.tag}"
+    folder = f"{EXTERNAL}/{folder_name}"
     item = ctx.interview(
         "E2E Денис Дизайнов", spot_ids=[SPOTS["discovery"]], expected_folder=folder
     )
@@ -44,7 +45,7 @@ def body(ctx: RouteCtx) -> None:
     ctx.check_waiting(state, item, "storage_destination_required")
 
     turn = ctx.say(
-        "Создай папку «E2E Discovery» во внешних и сохрани туда",
+        f"Создай папку «{folder_name}» во внешних и сохрани туда",
         scenario="R03. Рекрутер называет имя новой папки и корень.",
         expected=(
             "Мила вызывает create-destination под корнем 2. Interviews external, затем "
