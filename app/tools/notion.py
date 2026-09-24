@@ -454,7 +454,10 @@ class NotionClient:
                 status_code=response.status_code,
                 response_body=_response_excerpt(response.text),
             )
-            raise NotionUpdateError(f"Notion page update failed with HTTP {response.status_code}")
+            raise NotionUpdateError(
+                f"Notion page update failed with HTTP {response.status_code}",
+                transient=_transient_status(response.status_code),
+            )
         self._trace(
             "notion.page_update.success",
             page_id=page_id,
@@ -515,7 +518,8 @@ class NotionClient:
         self._raise_common(response)
         if response.is_error:
             raise NotionUpdateError(
-                f"Notion recording update failed with HTTP {response.status_code}"
+                f"Notion recording update failed with HTTP {response.status_code}",
+                transient=_transient_status(response.status_code),
             )
 
     async def _resolve_source(self, key: SourceCacheKey) -> tuple[str, bool]:

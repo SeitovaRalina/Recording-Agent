@@ -867,6 +867,8 @@ async def _run_transfer_recording(
                 filename=recording.generated_filename or recording.disk_filename,
             )
         except Exception as error:
+            if await _defer_transient_notion_update(session, recording, error):
+                return
             await status.advance(
                 session,
                 recording,
@@ -923,6 +925,27 @@ async def _run_transfer_recording(
             disk_path=recording.disk_path,
             deletable_after=recording.disk_deletable_after,
         )
+
+
+async def _defer_transient_notion_update(
+    session: AsyncSession, recording: Recording, error: Exception
+) -> bool:
+    """Keep a stored recording at `synology_link_created` when Notion was not reached.
+
+    The file and its public link are durable; only the card write is missing. The next scan
+    resumes from this status and retries the write instead of failing the recording.
+    """
+    if not isinstance(error, NotionAPIError) or not error.transient:
+        return False
+    recording.error_step = "notion_update"
+    recording.error_message = NOTION_TEMPORARILY_UNAVAILABLE
+    recording.last_attempted_at = datetime.now(UTC)
+    await session.commit()
+    logger.warning(
+        "Notion temporarily unavailable for recording %s; card update left resumable",
+        recording.id,
+    )
+    return True
 
 
 async def _resume_committed_transfer_steps(
@@ -1074,6 +1097,8 @@ async def _resume_committed_transfer_steps(
                 filename=cast(str, recording.generated_filename),
             )
         except Exception as error:
+            if await _defer_transient_notion_update(session, recording, error):
+                return
             await status.advance(
                 session,
                 recording,

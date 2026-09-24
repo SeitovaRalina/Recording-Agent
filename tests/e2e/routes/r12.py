@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tests.e2e.lib import remote
 from tests.e2e.lib.route import RouteCtx
 from tests.e2e.routes.common import EXTERNAL, SCAN, SPOTS, terminal_sent
@@ -9,6 +11,26 @@ from tests.e2e.routes.common import EXTERNAL, SCAN, SPOTS, terminal_sent
 TITLE = "Очистка исходников на Диске"
 CATALOG = "L1, L2, L5, L6"
 TARGET = "3 (скан + превью + подтверждение) (+1 L6)"
+
+_TEST_FILE = re.compile(r"E2E|R\d{2}-\d{4}_\d+a\d+")
+
+
+def _is_test_file(name: str) -> bool:
+    return bool(_TEST_FILE.search(name))
+
+
+def _preview_filenames() -> list[str]:
+    rows = remote.stand(
+        "sql",
+        {
+            "query": "select snapshot from cleanup_previews where status = 'pending' "
+            "order by created_at desc limit 1",
+            "params": {},
+        },
+    )
+    if not rows:
+        return []
+    return [str(item.get("filename") or "") for item in rows[0]["snapshot"]]
 
 
 def body(ctx: RouteCtx) -> None:
@@ -39,6 +61,19 @@ def body(ctx: RouteCtx) -> None:
     files = remote.stand("disk_list")
     names = {f["name"] for f in files}
     ctx.check("L1: после превью файл на месте", True, done.disk_name in names)
+
+    # Cleanup covers every processed source of the recruiter, and prod Disk holds real
+    # interviews. Never confirm a preview that includes anything but E2E test files.
+    scope = _preview_filenames()
+    foreign = [name for name in scope if not _is_test_file(name)]
+    ctx.check(
+        "Превью очистки содержит только тестовые файлы",
+        "только E2E",
+        f"{len(scope)} файлов, чужих: {len(foreign)} {foreign[:5]}",
+        ok=bool(scope) and not foreign,
+    )
+    if foreign or not scope:
+        return  # confirmation is not sent; the route fails on the check above
 
     ctx.say(
         "Удали их навсегда, без корзины",

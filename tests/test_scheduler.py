@@ -47,7 +47,12 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 from app.tools.mattermost import MattermostError, MattermostPost
-from app.tools.notion import NotionPage, NotionQueryError, NotionRelationChoice
+from app.tools.notion import (
+    NotionPage,
+    NotionQueryError,
+    NotionRelationChoice,
+    NotionUpdateError,
+)
 
 
 def found(file_id: str) -> Recording:
@@ -1121,6 +1126,70 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     assert transfer.create_share_link.await_count == share_calls
     assert notion.update_page_interview.await_count == notion_calls
     candidate.find_and_match.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("transient", "expected_status"),
+    [(True, RecordingStatus.SYNOLOGY_LINK_CREATED), (False, RecordingStatus.FAILED)],
+)
+async def test_notion_card_update_outage_leaves_stored_recording_resumable(
+    transient: bool, expected_status: RecordingStatus
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
+    item = found("notion-update-down")
+    item.status = RecordingStatus.SYNOLOGY_LINK_CREATED
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.project_or_spot = "Project"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.storage_key = f"recruiter/2026-07-16/Ivan_Ivanov/{item.generated_filename}"
+    item.content_identity = item.disk_file_id
+    item.synology_folder_path = "/folder"
+    item.synology_file_path = f"/{item.storage_key}"
+    item.synology_share_url = "https://share/video"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    notion = AsyncMock()
+    notion.update_page_interview.side_effect = NotionUpdateError(
+        "Notion page update transport failed", transient=transient
+    )
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        StatusService(),
+        notion,
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == expected_status
+    assert loaded.error_step == "notion_update"
+    if transient:
+        assert loaded.error_message == "notion_temporarily_unavailable"
 
 
 @pytest.mark.anyio
