@@ -5,7 +5,7 @@ import hmac
 import json
 import secrets
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -21,6 +21,7 @@ from app.services.destinations import DestinationService
 
 WORKER_ID = "recordings-saver"
 DISPATCH_LEASE = timedelta(minutes=5)
+MAX_DEFER_CANDIDATES = 10
 
 
 class RoutingJobRejectedError(ValueError):
@@ -41,6 +42,7 @@ class WorkerRoutingPayload:
     snapshot_hash: str
     candidate_name: str
     interview_date: str
+    role: str
     destinations: tuple[tuple[uuid.UUID, str], ...]
 
 
@@ -58,12 +60,19 @@ class RoutingJobService:
             raise RoutingJobRejectedError("Recording is not ready for autonomous routing")
         if not recording.candidate_name or recording.calendar_dtstart is None:
             raise RoutingJobRejectedError("Recording routing context is incomplete")
+        # Leaf folder names repeat across roots (Analyst is both external and internal), so the
+        # worker and the recruiter see the path under /home; the Spot role is what it matches.
+        labelled = sorted(
+            ((destination.id, _destination_label(destination)) for destination in destinations),
+            key=lambda item: item[1].casefold(),
+        )
         snapshot: dict[str, Any] = {
             "candidate_name": recording.candidate_name[:160],
             "interview_date": recording.calendar_dtstart.date().isoformat(),
+            "role": (recording.project_or_spot or "")[:160],
             "destinations": [
-                {"id": str(destination.id), "label": destination.display_name[:160]}
-                for destination in destinations[:100]
+                {"id": str(destination_id), "label": label}
+                for destination_id, label in labelled[:100]
             ],
         }
         if not snapshot["destinations"]:
@@ -154,6 +163,7 @@ class RoutingJobService:
             snapshot_hash=job.snapshot_hash,
             candidate_name=str(snapshot["candidate_name"]),
             interview_date=str(snapshot["interview_date"]),
+            role=str(snapshot.get("role") or ""),
             destinations=destinations,
         )
 
@@ -216,6 +226,7 @@ class RoutingJobService:
         dispatch_nonce: str,
         snapshot_hash: str,
         reason: Literal["ambiguous", "no_match", "model_error"],
+        candidate_ids: Sequence[uuid.UUID] = (),
     ) -> tuple[Recording, RecruiterConfig]:
         job, recording = await self._lease_owned_job(
             session, job_id=job_id, worker_id=worker_id, dispatch_nonce=dispatch_nonce
@@ -225,11 +236,21 @@ class RoutingJobService:
         if recruiter is None or recording.disk_owner_email != recruiter.email:
             raise RoutingJobRejectedError("Routing job ownership is invalid")
         snapshot = _validated_snapshot(job)
+        by_id = {
+            str(item["id"]): str(item["label"])
+            for item in cast(list[dict[str, object]], snapshot["destinations"])
+        }
+        chosen = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids))
+        if any(candidate_id not in by_id for candidate_id in chosen):
+            raise RoutingJobRejectedError("Candidate destination is not in the job snapshot")
+        if len(chosen) > MAX_DEFER_CANDIDATES:
+            raise RoutingJobRejectedError("Too many candidate destinations")
+        # Only the plausible folders become numbered options; listing the whole catalog made
+        # the recruiter's answer map to an unrelated first folder.
         recording.transition_to(RecordingStatus.MANUAL_REVIEW_REQUIRED)
         recording.manual_review_reason = f"autonomous_routing_{reason}"
         recording.manual_review_candidates = [
-            {"destination_id": item["id"], "name": item["label"]}
-            for item in cast(list[dict[str, object]], snapshot["destinations"])
+            {"destination_id": candidate_id, "name": by_id[candidate_id]} for candidate_id in chosen
         ]
         recording.version += 1
         job.status = RoutingJobStatus.DEFERRED
@@ -315,3 +336,7 @@ def _validated_snapshot(job: RoutingJob) -> dict[str, Any]:
     ):
         raise RoutingJobRejectedError("Routing snapshot is malformed")
     return snapshot
+
+
+def _destination_label(destination: StorageDestination) -> str:
+    return destination.canonical_path.removeprefix("/home/")[:160]

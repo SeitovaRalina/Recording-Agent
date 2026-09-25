@@ -15,13 +15,16 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:18000"
 MAX_RESPONSE_BYTES = 65_536
-TIMEOUT_SECONDS = 15.0
+TIMEOUT_SECONDS = 30.0
+# Scans and storage mutations talk to Disk, CalDAV, Notion (through a lossy proxy) and Synology
+# synchronously; a short client timeout reports "Backend unavailable" while the Backend succeeds.
+LONG_TIMEOUT_SECONDS = 300.0
 
 STATUS_LABELS = {
     "found": "найдена, ожидает сопоставления с календарём",
     "calendar_event_found": "событие календаря найдено",
     "candidate_matched": "кандидат найден в Notion",
-    "manual_review_required": "требуется review",
+    "manual_review_required": "нужно ваше уточнение",
     "transfer_started": "перенос начат",
     "uploaded_to_synology": "файл загружен в хранилище",
     "synology_link_created": "ссылка на файл создана",
@@ -37,10 +40,49 @@ REVIEW_REASON_LABELS = {
     "low_confidence": "недостаточно уверенное совпадение с событием календаря",
     "no_compatible_event": "подходящее событие календаря не найдено",
     "multiple_compatible_events": "найдено несколько подходящих событий календаря",
+    "multiple_eligible_events": "найдено несколько подходящих событий календаря",
+    "unmonitored_only": "событие найдено только в неотслеживаемом календаре",
+    "unmonitored_collision": "похожее событие есть и в неотслеживаемом календаре",
+    "calendar_configuration_incomplete": "не настроены календари рекрутера",
+    "filename_invalid": "имя файла не похоже на запись Телемоста",
+    "filename_timestamp_inconsistent": "время в имени файла не совпадает с датой создания",
     "no_candidate_name_in_event": "в названии события не указано имя кандидата",
-    "no_candidate_found": "кандидат с нужным именем и датой не найден в Notion",
-    "multiple_candidates": "в Notion найдено несколько подходящих кандидатов",
-    "storage_key_collision": "путь в хранилище уже занят другой записью",
+    "no_candidate_found": "кандидат с таким именем не найден в Notion",
+    "multiple_candidates": "в Notion найдено несколько подходящих карточек",
+    "candidate_choices_exceed_limit": "в Notion слишком много подходящих карточек",
+    "multiple_spots": "у карточки несколько проектов (📍 Spots), нужно выбрать один",
+    "invalid_selected_spot_identity": "не удалось определить выбранный проект",
+    "invalid_storage_identity": "не удалось собрать имя файла для хранилища",
+    "stale_storage_identity": "данные для имени файла изменились, нужно подтвердить выбор",
+    "storage_destination_required": "нужно выбрать папку в Synology",
+    "storage_key_collision": "в выбранной папке уже есть другой файл с таким именем",
+    "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
+    "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
+    "autonomous_routing_model_error": "не удалось автоматически выбрать папку",
+}
+
+ERROR_LABELS = {
+    "notion_temporarily_unavailable": (
+        "Notion временно недоступен; запись сохранена в очереди и будет обработана "
+        "при следующей проверке"
+    ),
+}
+
+
+SETTLED_STATUSES = frozenset({"completed", "ignored", "source_deleted"})
+ERROR_STEP_LABELS = {
+    "calendar_matching": "поиск события в календаре",
+    "candidate_matching": "поиск карточки в Notion",
+    "destination": "выбор папки в Synology",
+    "ensure_folder": "создание папки в Synology",
+    "download": "скачивание с Диска",
+    "upload": "загрузка в Synology",
+    "share_link": "создание ссылки на запись",
+    "notion_preflight": "проверка доступа к Notion",
+    "notion_update": "запись ссылки в карточку Notion",
+    "mark_processed": "отметка исходника на Диске",
+    "restart_recovery": "восстановление после перезапуска",
+    "review_resolution": "применение ответа на вопрос",
 }
 
 
@@ -159,7 +201,8 @@ def _request(
         headers=request_headers,
     )
     try:
-        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        timeout = LONG_TIMEOUT_SECONDS if method != "GET" else TIMEOUT_SECONDS
+        with urlopen(request, timeout=timeout) as response:
             payload = response.read(MAX_RESPONSE_BYTES + 1)
             status = response.status
     except HTTPError as exc:
@@ -190,6 +233,8 @@ def _parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="query bounded recording statuses")
     _add_recruiter_user_id_argument(status)
+    # Mila passes the DM channel to every command; status does not need it, so accept and ignore.
+    status.add_argument("--mattermost-dm-channel-id", help=argparse.SUPPRESS)
     status.add_argument("--date")
     status.add_argument("--candidate")
     status.add_argument("--recording-id", type=uuid.UUID)
@@ -312,6 +357,13 @@ def _parser() -> argparse.ArgumentParser:
             routing.add_argument(
                 "--reason", required=True, choices=("ambiguous", "no_match", "model_error")
             )
+            routing.add_argument(
+                "--candidate-id",
+                action="append",
+                default=[],
+                type=uuid.UUID,
+                help="plausible destination ID from the snapshot; repeat for each option",
+            )
     return parser
 
 
@@ -397,6 +449,7 @@ def _execute(args: argparse.Namespace) -> Any:
                 "dispatch_nonce": args.dispatch_nonce,
                 "snapshot_hash": args.snapshot_hash,
                 "reason": args.reason,
+                "candidate_ids": [str(candidate_id) for candidate_id in args.candidate_id],
             },
             authenticate=False,
         )
@@ -594,20 +647,30 @@ def _item_line(item: dict[str, Any], *, review: bool = False) -> str:
         parts.append(f"кандидат: {candidate}")
     if "is_new" in item:
         parts.append("новая запись" if item.get("is_new") else "повторная обработка")
+    if item.get("spot"):
+        parts.append(f"проект: {item['spot']}")
     if review:
-        parts.append(f"review: {_review_reason(item.get('review_reason'))}")
+        parts.append(f"нужно уточнение: {_review_reason(item.get('review_reason'))}")
     else:
         parts.append(f"статус: {_status_label(item.get('status'))}")
-    recording_id = item.get("id") or item.get("recording_id")
-    if recording_id:
-        parts.append(f"recording ID: {recording_id}")
     generated_filename = item.get("generated_filename")
     if generated_filename:
         parts.append(f"имя в хранилище: {generated_filename}")
-    if item.get("error"):
-        parts.append(f"ошибка: {item['error']}")
+    # A parked recording's review reason already explains it; its raw Backend error text does not.
+    # A settled recording keeps its last error in the database, but it no longer applies.
+    status = item.get("status")
+    if (
+        item.get("error")
+        and status not in SETTLED_STATUSES
+        and (not review or item["error"] in ERROR_LABELS)
+    ):
+        step = ERROR_STEP_LABELS.get(str(item.get("error_step") or ""))
+        where = f" (шаг: {step})" if step else ""
+        parts.append(f"ошибка{where}: {ERROR_LABELS.get(item['error'], item['error'])}")
+    if item.get("notion_url"):
+        parts.append(f"карточка Notion: {item['notion_url']}")
     if item.get("safe_link"):
-        parts.append(f"ссылка: {item['safe_link']}")
+        parts.append(f"запись: {item['safe_link']}")
     return "- " + "; ".join(parts)
 
 
@@ -637,13 +700,15 @@ def _scan_message(result: dict[str, Any]) -> str:
     ]
     skipped = int(result.get("skipped_legacy", 0))
     if skipped:
-        lines.append(f"Старых записей пропущено по правилу canary: {skipped}.")
+        lines.append(f"Старых записей пропущено (созданы до начала работы агента): {skipped}.")
     lines.append(f"Обработано в этом запуске: {int(result.get('processed', len(items)))}.")
-    lines.append(f"Требуют review: {int(result.get('manual_review', len(review_items)))}.")
+    lines.append(
+        f"Требуют вашего уточнения: {int(result.get('manual_review', len(review_items)))}."
+    )
     lines.extend(_item_line(item, review=True) for item in review_items)
     lines.append(f"Ожидают повторной обработки: {int(result.get('pending', len(pending_items)))}.")
     lines.extend(_item_line(item) for item in pending_items)
-    lines.append(f"Не требуют review: {int(result.get('without_review', len(clear_items)))}.")
+    lines.append(f"Обработаны без вопросов: {int(result.get('without_review', len(clear_items)))}.")
     lines.extend(_item_line(item) for item in clear_items)
     failed_recordings = int(result.get("failed_recordings", len(failed_items)))
     lines.append(f"С ошибкой: {failed_recordings}.")
@@ -652,8 +717,8 @@ def _scan_message(result: dict[str, Any]) -> str:
         lines.append(
             f"Показано результатов: {len(items)} из "
             f"{int(result.get('processed', len(items)))}. "
-            "Остальные не включены в ответ; сузьте status-запрос по дате, кандидату, "
-            "recording ID или статусу."
+            "Остальные не включены в ответ; уточните запрос статуса по дате, кандидату "
+            "или статусу."
         )
     backend_failures = int(result.get("failed", 0))
     additional_failures = max(0, backend_failures - failed_recordings)
@@ -666,7 +731,21 @@ def _status_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
         return "По заданным фильтрам записей не найдено."
-    lines = [f"Найдено записей: {len(items)}."]
+    total = result.get("total")
+    header = f"Найдено записей: {len(items)}."
+    if isinstance(total, int) and total > len(items):
+        header = (
+            f"Найдено записей: {total}; показаны последние {len(items)}. "
+            "Уточните дату или кандидата, чтобы увидеть остальные."
+        )
+    counts: dict[str, int] = {}
+    for item in items:
+        label = _status_label(item.get("status"))
+        counts[label] = counts.get(label, 0) + 1
+    lines = [
+        header,
+        "По статусам: " + "; ".join(f"{label} — {n}" for label, n in counts.items()) + ".",
+    ]
     lines.extend(
         _item_line(item, review=item.get("status") == "manual_review_required") for item in items
     )
@@ -683,7 +762,7 @@ def _review_message(result: dict[str, Any]) -> str:
     if choices:
         lines.append("Доступные варианты:")
         for index, choice in enumerate(choices, start=1):
-            label = str(choice.get("name") or choice.get("summary") or choice.get("id") or index)
+            label = _choice_label(choice)
             project = choice.get("project_or_spot")
             url = choice.get("url")
             details = [label]
@@ -696,6 +775,15 @@ def _review_message(result: dict[str, Any]) -> str:
     else:
         lines.append("Автоматических вариантов нет; требуется ручная проверка данных.")
     return "\n".join(lines)
+
+
+def _choice_label(choice: dict[str, Any]) -> str:
+    label = choice.get("name") or choice.get("summary") or choice.get("event_summary")
+    if not label:
+        return "вариант без названия"
+    start = choice.get("event_start_utc")
+    suffix = f" ({str(start)[:16].replace('T', ' ')} UTC)" if start else ""
+    return f"{str(label)[:160]}{suffix}"
 
 
 def _mutation_message(command: str, result: dict[str, Any]) -> str:
@@ -713,16 +801,16 @@ def _mutation_message(command: str, result: dict[str, Any]) -> str:
 def _questions_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
-        return "No active Recording Agent questions."
-    lines = [f"Active Recording Agent questions: {len(items)}."]
+        return "Открытых вопросов по записям нет."
+    lines = [f"Открытых вопросов по записям: {len(items)}."]
     for number, item in enumerate(items, start=1):
         lines.append(
             f"{number}. {str(item.get('filename') or 'recording')[:240]} — "
-            f"{str(item.get('reason') or 'clarification required')[:240]}"
+            f"{_review_reason(item.get('reason'))[:240]}"
         )
         choices = [choice for choice in item.get("choices", []) if isinstance(choice, dict)]
         for choice_number, choice in enumerate(choices[:10], start=1):
-            details = [str(choice.get("name") or choice.get("summary") or "option")[:160]]
+            details = [_choice_label(choice)]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
             if choice.get("url"):
@@ -736,22 +824,22 @@ def _answer_message(result: dict[str, Any]) -> str:
     rejected = [item for item in result.get("rejected", []) if isinstance(item, dict)]
     pending = [item for item in result.get("pending", []) if item]
     lines = [
-        f"Answers accepted: {len(accepted)}; rejected: {len(rejected)}; "
-        f"still pending: {len(pending)}."
+        f"Принято ответов: {len(accepted)}; отклонено: {len(rejected)}; "
+        f"ещё ждут ответа: {len(pending)}."
     ]
     for item in rejected:
         reason = str(item.get("reason") or "rejected")[:300]
-        lines.append(f"- Question {item.get('question_id', '')}: {reason}")
+        lines.append(f"- Ответ не принят: {reason}")
     if accepted:
-        lines.append("Processing started for the accepted answers.")
+        lines.append("Обработка по принятым ответам запущена.")
     return "\n".join(lines)
 
 
 def _destinations_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
     if not items:
-        return "No writable storage destinations are available."
-    lines = [f"Writable storage destinations: {len(items)}."]
+        return "Нет доступных папок для записи в Synology."
+    lines = [f"Доступные папки в Synology: {len(items)}."]
     for number, item in enumerate(items, start=1):
         label = str(item.get("path_label") or item.get("display_name") or "folder")
         lines.append(f"{number}. {label[:240]}")
@@ -760,13 +848,12 @@ def _destinations_message(result: dict[str, Any]) -> str:
 
 def _cleanup_preview_message(result: dict[str, Any]) -> str:
     items = [item for item in result.get("items", []) if isinstance(item, dict)]
-    lines = [f"Cleanup preview contains {len(items)} completed recordings."]
+    lines = [f"Готовы к очистке (уже сохранены в Synology): {len(items)}."]
     for number, item in enumerate(items, start=1):
-        lines.append(
-            f"{number}. {str(item.get('filename') or 'recording')[:240]} "
-            f"(recording ID: {item.get('recording_id', '')})"
-        )
-    lines.append("Nothing has been moved. Explicit confirmation is required.")
+        lines.append(f"{number}. {str(item.get('filename') or 'запись')[:240]}")
+    lines.append(
+        "Пока ничего не перемещено. Для переноса в корзину Диска нужно ваше подтверждение."
+    )
     return "\n".join(lines)
 
 
@@ -777,7 +864,32 @@ def _cleanup_confirm_message(result: dict[str, Any]) -> str:
         state = str(item.get("state") or "unknown")
         states[state] = states.get(state, 0) + 1
     summary = ", ".join(f"{state}: {count}" for state, count in sorted(states.items()))
-    return f"Cleanup confirmation completed. {summary or 'No eligible recordings.'}"
+    return f"Очистка выполнена. {summary or 'Подходящих записей нет.'}"
+
+
+def _stored_message(subject: str, result: dict[str, Any]) -> str:
+    candidate = str(result.get("candidate_name") or "")
+    who = f" ({candidate})" if candidate else ""
+    if result.get("status") != "completed":
+        if result.get("error") == "notion_temporarily_unavailable":
+            # The file and its public link are durable; only the card write waits for Notion.
+            lines = [
+                f"{subject}{who}: файл сохранён в Synology, ссылка создана. Карточку Notion "
+                "обновить пока не удалось: Notion временно недоступен. Ссылка в карточку "
+                "будет записана при следующей проверке, повторять сохранение не нужно."
+            ]
+            if result.get("safe_link"):
+                lines.append(f"Запись: {result['safe_link']}")
+            return "\n".join(lines)
+        step = ERROR_STEP_LABELS.get(str(result.get("error_step") or ""))
+        where = f" Сбой на шаге: {step}." if step and result.get("status") == "failed" else ""
+        return f"{subject}{who}: {_status_label(result.get('status'))}.{where}"
+    lines = [f"Готово: {subject.lower()}{who} сохранена."]
+    if result.get("notion_url"):
+        lines.append(f"Карточка в Notion: {result['notion_url']}")
+    if result.get("safe_link"):
+        lines.append(f"Запись: {result['safe_link']}")
+    return "\n".join(lines)
 
 
 def _message_for(command: str, result: Any) -> str:
@@ -796,30 +908,49 @@ def _message_for(command: str, result: Any) -> str:
     if command == "destinations":
         return _destinations_message(result)
     if command == "create-destination":
-        return f"Storage destination created: {str(result.get('display_name') or 'folder')[:200]}."
+        return f"Папка создана: {str(result.get('display_name') or 'папка')[:200]}."
     if command == "non-interview":
-        return (
-            f"Working-meeting recording processed; status: {_status_label(result.get('status'))}; "
-            f"link: {result.get('safe_link') or 'unavailable'}."
-        )
+        return _stored_message("Запись рабочей встречи", result)
     if command == "route-interview":
-        return (
-            f"Interview recording processed; status: {_status_label(result.get('status'))}; "
-            f"link: {result.get('safe_link') or 'unavailable'}."
-        )
+        return _stored_message("Запись собеседования", result)
     if command == "reroute-recording":
-        return f"Recording moved; link: {result.get('safe_link') or 'unavailable'}."
+        return f"Запись перенесена. Новая ссылка: {result.get('safe_link') or 'пока недоступна'}."
     if command == "notion-reassignment-resolve":
-        return _destinations_message({"items": result.get("items", [])})
+        return _reassignment_targets_message(result)
     if command == "notion-reassignment-propose":
-        return "Confirm the displayed Notion reassignment before it changes either card."
+        target = result.get("target") if isinstance(result.get("target"), dict) else {}
+        return (
+            f"Запись будет привязана к карточке «{str(target.get('title') or '')[:200]}»: "
+            f"{target.get('url') or ''}\nПока ничего не изменено — нужно ваше подтверждение."
+        )
     if command == "notion-reassignment-confirm":
-        return "Notion recording link reassigned."
+        return (
+            "Готово: ссылка на запись перенесена в новую карточку Notion, из старой карточки "
+            f"она убрана. Запись: {result.get('safe_link') or 'ссылка без изменений'}."
+        )
     if command == "cleanup-preview":
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":
         return _cleanup_confirm_message(result)
+    if command == "routing-activate":
+        return "Задание автомаршрутизации получено."
+    if command == "routing-resolve":
+        return "Папка выбрана, перенос запущен."
+    if command == "routing-defer":
+        return "Решение отложено: рекрутеру отправлен вопрос."
     return _mutation_message(command, result)
+
+
+def _reassignment_targets_message(result: dict[str, Any]) -> str:
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return "Карточка по этой ссылке или имени не найдена в базе кандидатов."
+    lines = [f"Найдено карточек: {len(items)}."]
+    for number, item in enumerate(items[:10], start=1):
+        busy = " (в карточке уже есть запись)" if item.get("recording_present") else ""
+        title = str(item.get("title") or "")[:200]
+        lines.append(f"{number}. {title} — {item.get('url') or ''}{busy}")
+    return "\n".join(lines)
 
 
 def _error_message(error: str) -> str:
@@ -828,9 +959,10 @@ def _error_message(error: str) -> str:
     if "HTTP 404" in error:
         return "Запрошенная запись или review недоступны либо уже не существуют."
     if "HTTP 409" in error:
+        detail = error.split(":", 1)[1].strip() if ":" in error else ""
         return (
-            "Данные review уже изменились или запрос был повторён с другим контекстом. "
-            "Обновите статус."
+            f"Backend отклонил операцию: {detail[:300] or 'данные изменились'}. "
+            "Обновите статус и повторите."
         )
     if "HTTP 410" in error:
         return "Срок действия review истёк. Запросите актуальный статус записи."

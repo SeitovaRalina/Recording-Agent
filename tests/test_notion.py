@@ -6,8 +6,10 @@ import pytest
 import respx
 from pydantic import SecretStr
 
+from app.config import Settings
 from app.tools.notion import (
     NOTION_API_VERSION,
+    ConnectRetryTransport,
     NotionAPIError,
     NotionAuthError,
     NotionClient,
@@ -22,6 +24,7 @@ from app.tools.notion import (
     NotionSchemaError,
     NotionSourceAmbiguityError,
     NotionUpdateError,
+    build_notion_http_client,
 )
 
 BASE = "https://api.notion.com/v1"
@@ -768,3 +771,87 @@ async def test_proxy_transport_failure_is_sanitized_without_direct_retry() -> No
     assert len(route.calls) == 1
     assert "proxy-user" not in str(raised.value)
     assert "proxy-password" not in str(raised.value)
+
+
+@pytest.mark.anyio
+async def test_notion_http_client_uses_proxy_with_connect_retries() -> None:
+    settings = Settings(_env_file=None, notion_proxy_url="http://notion-proxy:7890")
+    async with build_notion_http_client(settings, httpx.Timeout(5)) as client:
+        transport = client._transport
+        assert isinstance(transport, ConnectRetryTransport)
+        assert transport.inner._pool._proxy_url.host == b"notion-proxy"
+        assert client._trust_env is False
+
+
+class _FlakyTransport(httpx.AsyncBaseTransport):
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return httpx.Response(200, json={"ok": True})
+
+
+@pytest.mark.anyio
+async def test_connect_retry_transport_recovers_from_dropped_tunnels() -> None:
+    inner = _FlakyTransport([httpx.ProxyError("tunnel"), httpx.ConnectError("syn")])
+    async with httpx.AsyncClient(
+        transport=ConnectRetryTransport(inner, attempts=3, backoff_seconds=0)
+    ) as client:
+        response = await client.post(f"{BASE}/pages", json={"a": 1})
+    assert response.status_code == 200
+    assert inner.calls == 3
+
+
+@pytest.mark.anyio
+async def test_connect_retry_transport_gives_up_and_never_retries_read_errors() -> None:
+    inner = _FlakyTransport([httpx.ConnectError("x")] * 3)
+    async with httpx.AsyncClient(
+        transport=ConnectRetryTransport(inner, attempts=3, backoff_seconds=0)
+    ) as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.get(f"{BASE}/users/me")
+    assert inner.calls == 3
+
+    inner = _FlakyTransport([httpx.ReadTimeout("slow")])
+    async with httpx.AsyncClient(
+        transport=ConnectRetryTransport(inner, attempts=3, backoff_seconds=0)
+    ) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.patch(f"{BASE}/pages/x", json={})
+    assert inner.calls == 1
+
+
+@pytest.mark.anyio
+async def test_connect_retry_transport_backs_off_exponentially_with_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("app.tools.notion.asyncio.sleep", fake_sleep)
+    inner = _FlakyTransport([httpx.ConnectTimeout("dial")] * 5)
+    async with httpx.AsyncClient(
+        transport=ConnectRetryTransport(inner, attempts=6, backoff_seconds=1)
+    ) as client:
+        response = await client.get(f"{BASE}/users/me")
+
+    assert response.status_code == 200
+    assert inner.calls == 6
+    assert sleeps == [1, 2, 4, 8, 8]
+
+
+def test_transport_and_server_errors_are_transient() -> None:
+    assert NotionQueryError("x", transient=True).transient
+    assert not NotionQueryError("x").transient
+    with pytest.raises(NotionQueryError) as error:
+        NotionClient._raise_query_error(httpx.Response(503))
+    assert error.value.transient
+    with pytest.raises(NotionQueryError) as error:
+        NotionClient._raise_query_error(httpx.Response(400))
+    assert not error.value.transient

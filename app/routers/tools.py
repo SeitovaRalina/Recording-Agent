@@ -41,6 +41,7 @@ from app.services.reviews import (
     ReviewRejectedError,
     ReviewService,
 )
+from app.tools.synology import SynologyAPIError
 
 router = APIRouter(
     prefix="/tools",
@@ -71,6 +72,8 @@ class ScanItem(BaseModel):
     review_reason: str | None
     generated_filename: str | None
     safe_link: str | None
+    notion_url: str | None = None
+    spot: str | None = None
     error: str | None
 
 
@@ -111,12 +114,16 @@ class RecordingStatusItem(BaseModel):
     version: int
     found_at: str
     safe_link: str | None
+    notion_url: str | None = None
+    spot: str | None = None
     error: str | None
+    error_step: str | None = None
 
 
 class RecordingStatusResponse(BaseModel):
     items: list[RecordingStatusItem]
     count: int
+    total: int | None = None
 
 
 class ReviewContext(BaseModel):
@@ -261,7 +268,11 @@ class InterviewRouteResponse(BaseModel):
     status: RecordingStatus
     version: int
     safe_link: str
+    notion_url: str = ""
+    candidate_name: str = ""
     replayed: bool = False
+    error: str | None = None
+    error_step: str | None = None
 
 
 class RecordingRerouteRequest(BaseModel):
@@ -400,6 +411,10 @@ async def create_storage_destination(
         )
     except (DestinationRejectedError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except SynologyAPIError as error:
+        raise HTTPException(
+            status_code=502, detail="Synology could not create the folder; retry later"
+        ) from error
     return _destination_item(row)
 
 
@@ -444,6 +459,7 @@ async def route_interview(
         if recording.status not in {
             RecordingStatus.CANDIDATE_MATCHED,
             RecordingStatus.MANUAL_REVIEW_REQUIRED,
+            RecordingStatus.FAILED,
         }:
             raise DestinationRejectedError("Recording is not awaiting interview destination")
         if (
@@ -452,6 +468,8 @@ async def route_interview(
             or not recording.notion_page_id
         ):
             raise DestinationRejectedError("Recording candidate state is incomplete")
+        if recording.status == RecordingStatus.FAILED:
+            recording.reset_for_retry()
         destination = await _destination_service(request).resolve(
             session, recruiter, body.destination_id
         )
@@ -465,15 +483,10 @@ async def route_interview(
         await session.execute(
             update(ManualReview)
             .where(
+                # Candidate identity is already resolved here, so every open question for this
+                # recording (destination, collision, autonomous defer) is answered by this route.
                 ManualReview.recording_id == recording.id,
                 ManualReview.status == ManualReviewStatus.PENDING,
-                ManualReview.question_type.in_(
-                    [
-                        "autonomous_routing_ambiguous",
-                        "autonomous_routing_no_match",
-                        "autonomous_routing_model_error",
-                    ]
-                ),
             )
             .values(
                 status=ManualReviewStatus.COMPLETED,
@@ -505,6 +518,10 @@ async def route_interview(
             status=refreshed.status,
             version=refreshed.version,
             safe_link=refreshed.synology_share_url or "",
+            notion_url=refreshed.notion_page_url or "",
+            candidate_name=refreshed.candidate_name or "",
+            error=refreshed.error_message,
+            error_step=refreshed.error_step,
         )
     if not resumed:
         raise HTTPException(
@@ -691,6 +708,20 @@ async def route_non_interview(
         )
     except NonInterviewRejectedError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    # The recruiter classified the recording, which answers every open question about it.
+    await session.execute(
+        update(ManualReview)
+        .where(
+            ManualReview.recording_id == recording.id,
+            ManualReview.status == ManualReviewStatus.PENDING,
+        )
+        .values(
+            status=ManualReviewStatus.COMPLETED,
+            completed_at=datetime.now(UTC),
+            result={"resumed_by": "route_non_interview"},
+        )
+    )
+    await session.commit()
     response = NonInterviewRouteResponse(
         recording_id=recording.id,
         status=recording.status,
@@ -883,6 +914,11 @@ async def recording_status(
     rows = list(
         (await session.scalars(statement.order_by(Recording.found_at.desc()).limit(limit))).all()
     )
+    total = len(rows)
+    if total == limit:
+        total = int(
+            await session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        )
     items = [
         RecordingStatusItem(
             id=row.id,
@@ -895,11 +931,14 @@ async def recording_status(
             version=row.version,
             found_at=row.found_at.isoformat(),
             safe_link=row.synology_share_url,
+            notion_url=row.notion_page_url,
+            spot=row.project_or_spot,
             error=row.error_message,
+            error_step=row.error_step,
         )
         for row in rows
     ]
-    return RecordingStatusResponse(items=items, count=len(items))
+    return RecordingStatusResponse(items=items, count=len(items), total=total)
 
 
 @router.get("/reviews/{review_id}", response_model=ReviewContext)
@@ -1316,6 +1355,8 @@ def _scan_response(
             review_reason=row.manual_review_reason,
             generated_filename=row.generated_filename,
             safe_link=row.synology_share_url,
+            notion_url=row.notion_page_url,
+            spot=row.project_or_spot,
             error=row.error_message,
         )
         for row in (rows or [])

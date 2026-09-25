@@ -44,13 +44,14 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
-from app.tools.notion import NotionClient, NotionPage, NotionRelationChoice
+from app.tools.notion import NotionAPIError, NotionClient, NotionPage, NotionRelationChoice
 
 logger = logging.getLogger(__name__)
 
 SUMMARY_LOCAL_HOUR = 18
 SUMMARY_LOCAL_MINUTE = 0
 SUMMARY_CLAIM_TTL = timedelta(minutes=15)
+NOTION_TEMPORARILY_UNAVAILABLE = "notion_temporarily_unavailable"
 _SCAN_LOCKS: WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
 ] = WeakKeyDictionary()
@@ -551,6 +552,28 @@ async def _run_transfer_recording(
             )
             try:
                 match = await candidate_service.find_and_match(recording, recruiter, session)
+            except NotionAPIError as error:
+                if not error.transient:
+                    await status.advance(
+                        session,
+                        recording,
+                        RecordingStatus.FAILED,
+                        error_step="candidate_matching",
+                        error_message=str(error),
+                    )
+                    await session.commit()
+                    return
+                # Notion was not reached (proxy/network) or answered 429/5xx: the data is fine.
+                # Keep the recording resumable; the next scan retries the lookup.
+                recording.error_step = "candidate_matching"
+                recording.error_message = NOTION_TEMPORARILY_UNAVAILABLE
+                recording.last_attempted_at = datetime.now(UTC)
+                await session.commit()
+                logger.warning(
+                    "Notion temporarily unavailable for recording %s; left resumable",
+                    recording.id,
+                )
+                return
             except Exception as error:
                 await status.advance(
                     session,
@@ -844,6 +867,8 @@ async def _run_transfer_recording(
                 filename=recording.generated_filename or recording.disk_filename,
             )
         except Exception as error:
+            if await _defer_transient_notion_update(session, recording, error):
+                return
             await status.advance(
                 session,
                 recording,
@@ -892,7 +917,7 @@ async def _run_transfer_recording(
             source_processed=True,
             disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
         )
-        await session.commit()
+        await _complete_marked_source(session, recording, status)
         trace(
             settings,
             "pipeline.completed_source_marked",
@@ -900,6 +925,27 @@ async def _run_transfer_recording(
             disk_path=recording.disk_path,
             deletable_after=recording.disk_deletable_after,
         )
+
+
+async def _defer_transient_notion_update(
+    session: AsyncSession, recording: Recording, error: Exception
+) -> bool:
+    """Keep a stored recording at `synology_link_created` when Notion was not reached.
+
+    The file and its public link are durable; only the card write is missing. The next scan
+    resumes from this status and retries the write instead of failing the recording.
+    """
+    if not isinstance(error, NotionAPIError) or not error.transient:
+        return False
+    recording.error_step = "notion_update"
+    recording.error_message = NOTION_TEMPORARILY_UNAVAILABLE
+    recording.last_attempted_at = datetime.now(UTC)
+    await session.commit()
+    logger.warning(
+        "Notion temporarily unavailable for recording %s; card update left resumable",
+        recording.id,
+    )
+    return True
 
 
 async def _resume_committed_transfer_steps(
@@ -997,7 +1043,11 @@ async def _resume_committed_transfer_steps(
             recording,
             RecordingStatus.SYNOLOGY_LINK_CREATED,
             synology_share_url=share_url,
+            storage_is_durable=settings.storage_provider == "synology",
         )
+        if settings.storage_provider == "synology":
+            # Same durable identity as the scan path: reroute and Disk cleanup rely on it.
+            await _ensure_active_storage_artifact(session, recording)
         await session.commit()
 
     if recording.status == RecordingStatus.SYNOLOGY_LINK_CREATED:
@@ -1047,6 +1097,8 @@ async def _resume_committed_transfer_steps(
                 filename=cast(str, recording.generated_filename),
             )
         except Exception as error:
+            if await _defer_transient_notion_update(session, recording, error):
+                return
             await status.advance(
                 session,
                 recording,
@@ -1088,6 +1140,18 @@ async def _resume_committed_transfer_steps(
         RecordingStatus.SOURCE_MARKED_PROCESSED,
         source_processed=True,
         disk_deletable_after=datetime.now(UTC) + timedelta(days=7),
+    )
+    await _complete_marked_source(session, recording, status)
+
+
+async def _complete_marked_source(
+    session: AsyncSession, recording: Recording, status: StatusService
+) -> None:
+    # Marking the Disk source is the last pipeline step: no retention job advances this state,
+    # and the terminal DM and Disk cleanup both wait for `completed`.
+    await session.commit()
+    await status.advance(
+        session, recording, RecordingStatus.COMPLETED, completed_at=datetime.now(UTC)
     )
     await session.commit()
 
@@ -1520,9 +1584,12 @@ def register_jobs(
             notion,
             review_service,
             question_queue_service,
-            destination_service,
-            routing_job_service,
         ],
+        # Keyword arguments: the positional slot after question_queue_service is `now`.
+        kwargs={
+            "destination_service": destination_service,
+            "routing_job_service": routing_job_service,
+        },
         max_instances=1,
         coalesce=True,
         misfire_grace_time=86400,
@@ -1530,9 +1597,8 @@ def register_jobs(
         replace_existing=True,
     )
     logger.info(
-        "recruiter-local scan/summary dispatcher registered: local_time=%02d:%02d",
-        SUMMARY_LOCAL_HOUR,
-        SUMMARY_LOCAL_MINUTE,
+        "recruiter-local scan/summary dispatcher registered: local_time=%s",
+        settings.summary_local_time,
     )
 
 
@@ -1554,7 +1620,9 @@ async def run_due_recruiter_summaries(
 ) -> None:
     current = _utc(now or datetime.now(UTC))
     for recruiter in await _active_recruiters(session_factory):
-        local_date = _due_recruiter_local_date(recruiter, current)
+        local_date = _due_recruiter_local_date(
+            recruiter, current, _summary_time(settings.summary_local_time)
+        )
         if (
             local_date is None
             or not recruiter.mattermost_user_id
@@ -1623,6 +1691,12 @@ async def drain_notification_outbox(
 ) -> None:
     worker_id = str(uuid.uuid4())
     async with session_factory() as session:
+        try:
+            await service.queue_terminal_notifications(session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("Queueing terminal recording notifications failed")
         items = await service.claim_outbox(session, worker_id=worker_id)
         await session.commit()
         for item in items:
@@ -1634,13 +1708,21 @@ async def drain_notification_outbox(
                 logger.exception("Notification outbox delivery failed for item %s", item.id)
 
 
-def _due_recruiter_local_date(recruiter: RecruiterConfig, now: datetime) -> date | None:
+def _summary_time(value: str) -> time:
+    hour, minute = value.split(":")
+    return time(int(hour), int(minute))
+
+
+def _due_recruiter_local_date(
+    recruiter: RecruiterConfig,
+    now: datetime,
+    due: time = time(SUMMARY_LOCAL_HOUR, SUMMARY_LOCAL_MINUTE),
+) -> date | None:
     try:
         local = _utc(now).astimezone(ZoneInfo(recruiter.timezone))
     except Exception:
         logger.error("Recruiter %s has invalid timezone", recruiter.email)
         return None
-    due = time(SUMMARY_LOCAL_HOUR, SUMMARY_LOCAL_MINUTE)
     return local.date() if local.timetz().replace(tzinfo=None) >= due else None
 
 

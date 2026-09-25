@@ -209,6 +209,139 @@ def test_cleanup_preview_message_requires_explicit_confirmation() -> None:
         },
     )
 
-    assert "Nothing has been moved" in message
-    assert "Explicit confirmation is required" in message
+    assert "Пока ничего не перемещено" in message
+    assert "нужно ваше подтверждение" in message
     assert "must-not-render" not in message
+    assert "11111111-1111" not in message
+
+
+def test_route_interview_message_reports_notion_card_and_recording_links() -> None:
+    message = CLIENT._message_for(
+        "route-interview",
+        {
+            "recording_id": "11111111-1111-1111-1111-111111111111",
+            "status": "completed",
+            "version": 6,
+            "safe_link": "https://gofile.me/x",
+            "notion_url": "https://app.notion.com/p/card",
+            "candidate_name": "Dmitry",
+        },
+    )
+
+    assert message.startswith("Готово: запись собеседования (Dmitry) сохранена.")
+    assert "https://app.notion.com/p/card" in message
+    assert "https://gofile.me/x" in message
+    assert "11111111-1111" not in message
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [("GET", CLIENT.TIMEOUT_SECONDS), ("POST", CLIENT.LONG_TIMEOUT_SECONDS)],
+)
+def test_mutating_requests_use_long_timeout(
+    monkeypatch: pytest.MonkeyPatch, method: str, expected: float
+) -> None:
+    captured: dict[str, float] = {}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return b"{}"
+
+    def fake_urlopen(_: object, timeout: float) -> _Response:
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setenv("RECORDING_AGENT_BACKEND_SECRET", "secret")  # pragma: allowlist secret
+    monkeypatch.setattr(CLIENT, "urlopen", fake_urlopen)
+
+    CLIENT._request(method, "/tools/scan", body={} if method == "POST" else None)
+
+    assert captured["timeout"] == expected
+    assert CLIENT.LONG_TIMEOUT_SECONDS >= 300
+
+
+def test_temporary_notion_outage_is_explained_not_reported_as_code() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "accepted": True,
+            "discovered": 1,
+            "inserted": 1,
+            "items": [
+                {
+                    "filename": "interview.webm",
+                    "status": "calendar_event_found",
+                    "is_new": True,
+                    "requires_review": False,
+                    "error": "notion_temporarily_unavailable",
+                }
+            ],
+        },
+    )
+
+    assert "Notion временно недоступен" in message
+    assert "notion_temporarily_unavailable" not in message
+
+
+def test_review_item_hides_raw_backend_error_text() -> None:
+    message = CLIENT._message_for(
+        "scan",
+        {
+            "accepted": True,
+            "discovered": 1,
+            "inserted": 1,
+            "manual_review": 1,
+            "items": [
+                {
+                    "filename": "interview.webm",
+                    "status": "manual_review_required",
+                    "is_new": True,
+                    "requires_review": True,
+                    "review_reason": "storage_destination_required",
+                    "error": (
+                        "Interview destination must be selected from allowed Synology inventory"
+                    ),
+                }
+            ],
+        },
+    )
+
+    assert "нужно выбрать папку в Synology" in message
+    assert "allowed Synology inventory" not in message
+
+
+def test_reassignment_messages_are_russian_and_name_the_target() -> None:
+    empty = CLIENT._message_for("notion-reassignment-resolve", {"items": []})
+    found = CLIENT._message_for(
+        "notion-reassignment-resolve",
+        {
+            "items": [
+                {"title": "Zoya", "url": "https://app.notion.com/p/x", "recording_present": False}
+            ]
+        },
+    )
+    proposal = CLIENT._message_for(
+        "notion-reassignment-propose",
+        {"target": {"title": "Zoya", "url": "https://app.notion.com/p/x"}, "capability": "secret"},
+    )
+
+    assert "не найдена" in empty and "папок" not in empty
+    assert "Zoya — https://app.notion.com/p/x" in found
+    assert "нужно ваше подтверждение" in proposal and "secret" not in proposal
+
+
+def test_conflict_error_reports_backend_reason() -> None:
+    message = CLIENT._error_message(
+        "Backend rejected request (HTTP 409): Recording version is stale"
+    )
+
+    assert "Recording version is stale" in message
+    assert "review" not in message

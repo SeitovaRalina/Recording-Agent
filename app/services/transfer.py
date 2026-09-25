@@ -142,6 +142,11 @@ class TransferService:
     async def create_share_link(self, path: str) -> str:
         try:
             if isinstance(self._storage, SynologyBackend):
+                # A retry after a later failure re-runs this step for the same stored file;
+                # reuse its public link instead of minting a second one.
+                existing = await self._storage.find_public_share_link(path)
+                if existing:
+                    return existing
                 return await self._storage.create_share_link(path)
             return await self._storage.create_share_link(path)
         except Exception as error:

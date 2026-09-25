@@ -362,3 +362,21 @@ async def test_share_failure_reports_separate_step(session: AsyncSession) -> Non
         with pytest.raises(TransferError, match="share_link") as raised:
             await service.create_share_link("/base/video.webm")
     assert raised.value.step == "share_link"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("existing", "expected", "creates"),
+    [("https://gofile.me/old", "https://gofile.me/old", 0), (None, "https://gofile.me/new", 1)],
+)
+async def test_share_link_reuses_existing_public_link_of_the_same_file(
+    existing: str | None, expected: str, creates: int
+) -> None:
+    storage = AsyncMock(spec=SynologyBackend)
+    storage.find_public_share_link.return_value = existing
+    storage.create_share_link.return_value = "https://gofile.me/new"
+    async with download_client() as http:
+        service = TransferService(AsyncMock(), storage, http)
+        assert await service.create_share_link("/base/video.webm") == expected
+    storage.find_public_share_link.assert_awaited_once_with("/base/video.webm")
+    assert storage.create_share_link.await_count == creates

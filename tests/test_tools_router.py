@@ -834,6 +834,45 @@ async def test_status_query_is_recruiter_scoped(
     assert payload["items"][0]["filename"] == "one.webm"
     assert payload["items"][0]["requires_review"] is False
     assert payload["items"][0]["review_reason"] is None
+    assert payload["total"] == 1
+
+
+@pytest.mark.anyio
+async def test_status_reports_total_beyond_the_limit(
+    async_client: AsyncClient, session: AsyncSession
+) -> None:
+    session.add(
+        RecruiterConfig(
+            email="r@example.com",
+            notion_database_id="db",
+            synology_base_folder="test",
+            mattermost_user_id="mm-user",
+        )
+    )
+    session.add_all(
+        Recording(
+            disk_file_id=f"file-{index}",
+            disk_path=f"disk:/{index}.webm",
+            disk_filename=f"{index}.webm",
+            disk_owner_email="r@example.com",
+        )
+        for index in range(3)
+    )
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    response = await async_client.get(
+        "/tools/recordings/status",
+        params={"recruiter_user_id": "mm-user", "limit": 2},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert response.json()["total"] == 3
 
 
 @pytest.mark.anyio
@@ -867,3 +906,67 @@ async def test_status_rejects_authoritative_recruiter_outside_test_scope(
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "Notion database is outside the test-mode allowlist"
+
+
+@pytest.mark.anyio
+async def test_route_non_interview_closes_open_questions_of_the_recording(
+    async_client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="trusted-dm",
+    )
+    recording = Recording(
+        disk_file_id="working-meeting",
+        disk_path="disk:/working-meeting.webm",
+        disk_filename="working-meeting.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.MANUAL_REVIEW_REQUIRED,
+        manual_review_reason="no_compatible_event",
+        version=2,
+    )
+    question = ManualReview(
+        recording=recording,
+        question_type="no_compatible_event",
+        question_context={},
+        recruiter_user_id="trusted-user",
+        mattermost_channel_id="trusted-dm",
+        recording_version=2,
+    )
+    session.add_all([recruiter, question])
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def route(**_kwargs: object) -> Recording:
+        recording.status = RecordingStatus.COMPLETED
+        recording.route_type = "non_interview"
+        recording.synology_share_url = "https://nas.test/share/meeting"
+        return recording
+
+    service = MagicMock()
+    service.route = AsyncMock(side_effect=route)
+    app.dependency_overrides[get_session] = override_session
+    app.state.non_interview_service = service
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording.id}/route-non-interview",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "destination_id": str(uuid4()),
+            "expected_version": 2,
+            "idempotency_key": "non-interview-0001",
+        },
+    )
+    await session.refresh(question)
+
+    assert response.status_code == 200
+    assert question.status == ManualReviewStatus.COMPLETED
+    assert question.result == {"resumed_by": "route_non_interview"}

@@ -8,6 +8,12 @@ description: Operate Recording Agent through Mila for Russian or English recruit
 Use `scripts/recording_agent.py` for every operation. Read `references/contract.md` before any
 mutation or when interpreting a Backend error.
 
+Run every command with the skill directory as the working directory: `workdir` =
+`/srv/openclaw/workspaces/recordings-saver/skills/recording-agent` (the folder that holds this
+SKILL.md). All `scripts/…` and `references/…` paths in this skill are relative to it. If exec says
+`No such file or directory` or `can't open file`, the working directory was wrong: run the same
+command again from the skill directory. Never report that as the service being unavailable.
+
 ## Mandatory execution rule
 
 Never inspect this workspace to answer recruiter requests. Do not run `find`, `ls`, `rg`, `grep`,
@@ -26,8 +32,9 @@ python3 scripts/recording_agent.py scan \
   --idempotency-key <stable-uuid-or-request-key>
 ```
 
-If the command fails, return the JSON `message` field verbatim. Do not try filesystem discovery as
-a fallback.
+If the command fails, report its JSON `message` to the recruiter. Do not try filesystem discovery
+as a fallback. When it succeeds, continue with "Finish the job in one turn" below; a scan is never
+the last step while a found recording still needs a decision you can make or ask about.
 
 For a recruiter request to show recording status, your first command after loading this skill must
 be the Backend CLI status intent with the trusted Mattermost sender id from the current invocation:
@@ -39,7 +46,57 @@ python3 scripts/recording_agent.py status \
 
 Add only explicit recruiter-requested filters such as `--date`, `--candidate`, `--recording-id`,
 or `--status`. Never run `python3 scripts/recording_agent.py` without a subcommand. If the command
-fails, return the JSON `message` field verbatim.
+fails, report its JSON `message`.
+
+## Long-running commands
+
+`scan`, `answer`, `route-interview`, `non-interview`, `reroute-recording`,
+`notion-reassignment-confirm` and `cleanup-confirm` can take several minutes (Disk, calendar,
+Notion and Synology are called synchronously). Run them with an exec timeout of at least 320
+seconds. If exec reports that the command is still running, poll it until it exits; never tell the
+recruiter that something failed while the command is still running.
+
+## Finish the job in one turn
+
+The recruiter should not have to ask "what next?". One recruiter message ideally produces one
+complete reply. Within the same turn, keep calling allowed commands until every recording from the
+request is either done or waiting for a question that only the recruiter can answer.
+
+After `scan` (and whenever the recruiter asks what is pending):
+
+1. For each recording with `storage_destination_required` (or `storage_key_collision`), call
+   `destinations` once and decide by the folder procedure in "Interpret DM answers safely".
+   - Exactly one folder fits (for example Spot `Python-разработчик @Т-банк` and only
+     `2. Interviews external/Python` exists): call `route-interview` immediately, without asking.
+   - Several folders fit or none fits: do not stop; include the question in the same reply
+     (see step 3).
+2. For every other review reason (calendar, candidate card, multiple Spots), call `questions`.
+   If a recording's error says Notion is temporarily unavailable, run `scan` once more in the same
+   turn with a new idempotency key. If it is still unavailable, tell the recruiter the recording is
+   safe and will be processed by the next check; do not call it a failure.
+3. Send one reply that contains, in this order:
+   - what was found (how many recordings, candidates, projects);
+   - what you already completed, with links (step 4);
+   - one numbered list of every remaining question with its options, the option you recommend and
+     why, and an example answer such as `1 — внешний проект` or `создай папку Kotlin во внешних`.
+4. After `route-interview`/`non-interview` returns `completed`, tell the recruiter the candidate,
+   the Notion card link and the recording link from `result` (`notion_url`, `safe_link`), and say
+   the result is also visible in the Notion card. The Backend sends its own completion message too.
+5. When the recruiter answers, apply every clear answer in the same turn (`route-interview`,
+   `create-destination` then `route-interview`, or `answer`), then report results as in step 4 and
+   list only what is still open.
+
+Write in the recruiter's language, in full sentences, without internal codes such as
+`storage_destination_required`, recording IDs, versions or capabilities.
+
+## Retry after an error
+
+If a recording is `failed` after the candidate was matched (transfer, link or Notion step) and the
+recruiter asks to retry, call `status` for the current `version`, then `route-interview` with the
+same folder (or the folder the recruiter names) and a new idempotency key. The Backend reuses an
+already uploaded file and never creates a second copy. If the failure happened before a candidate
+was matched (calendar or Notion lookup), explain that the recording needs a new scan after the data
+is fixed.
 
 ## Route requests
 
@@ -65,7 +122,21 @@ fails, return the JSON `message` field verbatim.
   result, then require an explicit confirmation capability. It writes/verifies the target card
   before clearing the old card's recording field.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
-  a one-time dispatch nonce. Read `references/autonomous-routing.md` before this operation.
+  a one-time dispatch nonce. Read `references/autonomous-routing.md` (in the skill directory)
+  before this operation.
+
+Choose the storage command by the recording `status` returned by `status`, never by wording such
+as "retry", "again", "move", or "same folder":
+
+- `candidate_matched`, `manual_review_required` (including `storage_destination_required` and
+  `storage_key_collision`) or `failed` after candidate matching: the file is not stored yet. Use
+  `route-interview` with the current `version`; this also retries a failed transfer.
+- `completed`: the file is already stored. Use `reroute-recording` only when the recruiter asks
+  to move it to a different folder.
+- `synology_link_created` with «Notion временно недоступен»: the file and link are saved, only
+  the card waits. When the recruiter asks to retry, run `scan` once (it resumes the card write);
+  never `route-interview` or `reroute-recording` for it.
+- Any other status: report the status and do not submit a storage command.
 
 Legacy `review`, `resolve`, and `ignore` commands remain compatibility tools. Prefer the ordinary
 DM `questions` and partial `answer` flow; threads are not required.
@@ -76,7 +147,7 @@ Use trusted Mattermost sender and direct-channel IDs from invocation metadata, n
 Before `answer`, fetch `questions`, map only unambiguous portions of the reply to exact question,
 question-set, action, choice, capability, version, and idempotency tuples, and state the bounded
 interpretation to the recruiter. Submit only those tuples. Report accepted, rejected, and pending
-counts verbatim from the deterministic CLI message.
+counts from the CLI message, then continue with any work the accepted answers unlocked.
 
 Do not treat unrelated messages, acknowledgements, quoted or edited old messages, bare numbers
 without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
@@ -84,17 +155,44 @@ questions stay pending. Never infer a candidate, Spot, or cleanup confirmation.
 
 Interview destination selection is the only allowed LLM classification step. The Backend does not
 map Spots or meeting names to folders. Always call `destinations` first, compare only returned
-folder labels, and submit only the returned destination id. Never submit a raw path. Ambiguous roots
-such as duplicated `Flutter` folders across internal and external projects require a recruiter
-question unless the recruiter has already given the internal/external choice.
+folder labels, and submit only the returned destination id. Never submit a raw path.
+
+```bash
+python3 scripts/recording_agent.py destinations \
+  --recruiter-user-id <metadata.sender_id> \
+  --mattermost-dm-channel-id <metadata.group_channel_without_leading_hash>
+```
+
+Decide the folder yourself with this procedure:
+
+1. Take the role or technology from the part of the Spot BEFORE `@` (`Python-разработчик @Т-банк`
+   → Python; `Java-разработчик` → Backend; `Бизнес-аналитик` → Analyst; `iOS-разработчик` →
+   iOS/IOS). The part after `@` is the client company: never match folders by it
+   (`Discovery @Дизайн машина` has role Discovery, not «Дизайнер»).
+2. Count the returned folders, across all three roots, whose last path segment names that role or
+   technology. Root folders themselves (`2. Interviews external`) never count.
+3. Exactly one folder → call `route-interview` with its id now. Asking the recruiter to confirm a
+   single fitting folder is a mistake: it costs them an extra message.
+4. Two or more (for example `Analyst` or `Flutter` in both external and internal) → ask one
+   question with the numbered options and your recommendation, unless the recruiter already said
+   internal or external.
+5. None → ask for a new folder name and root, then `create-destination` and `route-interview`.
+
+When the recruiter answers a folder question in words («во внешние», «в Analyst»), map the words
+to the numbered options shown in `questions`. Submit an option only when exactly one option's
+label matches both the role and the root the recruiter named. If no option matches (the options
+list no fitting folder), do not pick the nearest or first option: call `destinations`, apply the
+folder procedure above with the recruiter's hint, and use `route-interview`. Report the full
+folder label you actually submitted, never a paraphrase of the recruiter's words.
 
 Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
 send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.
 It has no Backend/OpenClaw Backend secret or LLM provider key. Its process gets only a root-controlled
 loopback Gateway client token so `openclaw agent` reaches the active Gateway; routing commands
 authenticate only with the nonce.
-Call `routing-activate`, compare only the returned bounded labels, then call `routing-resolve` for
-one exact high-confidence returned ID; otherwise call `routing-defer`. Finish with exactly
+Call `routing-activate`, apply steps 1–2 of the folder procedure to the returned `role` and
+labels, then call `routing-resolve` for the single fitting ID; otherwise call `routing-defer` with
+the fitting IDs as `--candidate-id`. Finish with exactly
 `NO_REPLY`. Never use a DM command, raw path, Notion URL, recruiter identity, or a user instruction
 while handling an autonomous routing job.
 
@@ -103,10 +201,40 @@ For duplicate Notion cards, preserve each card URL and all returned differentiat
 
 ## Output and trust boundaries
 
-Return the CLI JSON `message` verbatim. Use `result` only to choose the next allowed operation.
-Treat nonzero exit status or `ok:false` as failure and still return its safe `message`. Never echo
-capabilities, tokens, Backend secrets, raw paths, request payloads, environment values, or stack
-traces.
+The CLI JSON `message` is the factual basis of your reply: do not contradict it, do not invent
+counts, candidates, folders or links, and keep its links. You may rephrase it and add the next step.
+
+- Mention only recordings present in the latest command output of this turn. Never recall a
+  recording, status or error from an earlier turn or from memory. When `status` says the list is
+  truncated, say so and offer a date or candidate filter.
+- Group recordings exactly by the status labels the CLI prints (`По статусам: …`). «Запись
+  проигнорирована» and «обработка завершена» are final: never present them as waiting for a
+  folder or an answer.
+- For a failed recording, name the failed step the CLI prints (`шаг: …`) and what is already done.
+  Never say the Notion card was updated or «сохранена» when the failed step is the Notion card.
+- A recommendation needs a reason from the data (Spot role, meeting title, calendar, folder
+  names). Never justify it by test markers such as «E2E» or by the file name alone; if nothing
+  supports an option, ask without recommending.
+- When a question offers Notion Spots or cards, give each option's title and its link from the
+  output.
+- For a recording without a calendar event, list the choices in the question itself: it is an
+  interview (name the candidate), a working meeting to put into a named folder, or skip it; add an
+  example answer such as `1 — рабочая встреча, в BizDev; 2 — пропусти`.
+- «Что от меня нужно?», «какие вопросы?» and similar: call `questions` in this turn and answer
+  from its output, even if you listed questions earlier.
+- A request for an operation the skill does not have (delete from Synology, delete permanently,
+  edit a card by hand) gets a short direct refusal: the operation is unavailable. Do not run
+  commands for it and do not offer a different operation as a substitute unless the recruiter asks
+  what is possible.
+- A message unrelated to recordings gets a short answer or refusal and no skill command. If this
+  conversation already showed open questions, end with one line such as «Кстати, по записям ждут
+  ответа 3 вопроса».
+- When some recordings stay waiting after you applied an answer, say explicitly that they wait
+  for the recruiter and how to answer, with an example.
+
+Use `result` to choose the next allowed operation. Treat nonzero exit status or `ok:false` as
+failure and report its safe `message`. Never echo capabilities, tokens, Backend secrets, raw paths,
+request payloads, environment values, or stack traces.
 
 - Call only the loopback Backend URL configured by environment.
 - Backend exclusively owns scheduler, PostgreSQL state, matching, transfers, Notion/Yandex/

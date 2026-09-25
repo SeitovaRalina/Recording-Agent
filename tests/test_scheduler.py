@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,7 @@ from app.db.base import Base
 from app.db.models.manual_review import ManualReview
 from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
+from app.db.models.recording_storage_artifact import RecordingStorageArtifact
 from app.db.models.recruiter_config import RecruiterConfig
 from app.main import app
 from app.scheduler.cron import (
@@ -24,6 +26,7 @@ from app.scheduler.cron import (
     _resume_found_recording,
     _resume_transfer_recording,
     _send_recruiter_notifications,
+    _summary_time,
     local_today_start_utc,
     register_jobs,
     run_due_recruiter_summaries,
@@ -44,7 +47,12 @@ from app.services.storage import StorageCollisionError
 from app.services.transfer import TransferError, TransferResult
 from app.tools.calendar import CalDAVAuthError, ParsedVEVENT
 from app.tools.mattermost import MattermostError, MattermostPost
-from app.tools.notion import NotionPage, NotionRelationChoice
+from app.tools.notion import (
+    NotionPage,
+    NotionQueryError,
+    NotionRelationChoice,
+    NotionUpdateError,
+)
 
 
 def found(file_id: str) -> Recording:
@@ -712,6 +720,11 @@ def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
     )
     assert dispatcher.kwargs["coalesce"] is True
     assert dispatcher.kwargs["misfire_grace_time"] == 86400
+    # `now` must stay unset: optional services are passed by keyword, never positionally.
+    signature = inspect.signature(run_due_recruiter_summaries)
+    bound = signature.bind(*dispatcher.kwargs["args"], **dispatcher.kwargs["kwargs"])
+    assert "now" not in bound.arguments
+    assert set(dispatcher.kwargs["kwargs"]) == {"destination_service", "routing_job_service"}
     assert dispatcher.kwargs["max_instances"] == 1
     assert all(
         call.kwargs["id"] != "cleanup_expired_recordings"
@@ -721,7 +734,7 @@ def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
 
 
 @pytest.mark.anyio
-async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed() -> None:
+async def test_unique_candidate_with_blank_spot_completes_after_marking_source() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -775,8 +788,10 @@ async def test_unique_candidate_with_blank_spot_reaches_source_marked_processed(
     await engine.dispose()
 
     assert loaded is not None
-    assert loaded.status == RecordingStatus.SOURCE_MARKED_PROCESSED
+    assert loaded.status == RecordingStatus.COMPLETED
     assert loaded.source_processed is True
+    assert loaded.completed_at is not None
+    assert loaded.disk_deletable_after is not None
     assert loaded.candidate_name == "Ivan Ivanov"
     assert loaded.notion_database_id == owner.notion_database_id
     assert loaded.project_or_spot is None
@@ -1113,6 +1128,142 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     assert transfer.create_share_link.await_count == share_calls
     assert notion.update_page_interview.await_count == notion_calls
     candidate.find_and_match.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("transient", "expected_status"),
+    [(True, RecordingStatus.SYNOLOGY_LINK_CREATED), (False, RecordingStatus.FAILED)],
+)
+async def test_notion_card_update_outage_leaves_stored_recording_resumable(
+    transient: bool, expected_status: RecordingStatus
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
+    item = found("notion-update-down")
+    item.status = RecordingStatus.SYNOLOGY_LINK_CREATED
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.project_or_spot = "Project"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.storage_key = f"recruiter/2026-07-16/Ivan_Ivanov/{item.generated_filename}"
+    item.content_identity = item.disk_file_id
+    item.synology_folder_path = "/folder"
+    item.synology_file_path = f"/{item.storage_key}"
+    item.synology_share_url = "https://share/video"
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    notion = AsyncMock()
+    notion.update_page_interview.side_effect = NotionUpdateError(
+        "Notion page update transport failed", transient=transient
+    )
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        StatusService(),
+        notion,
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == expected_status
+    assert loaded.error_step == "notion_update"
+    if transient:
+        assert loaded.error_message == "notion_temporarily_unavailable"
+
+
+@pytest.mark.anyio
+async def test_resumed_synology_transfer_is_durable_and_reroutable() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(
+        notion_writes_enabled=True,
+        yandex_source_mutation_enabled=False,
+        storage_provider="synology",
+        synology_base_url="https://nas.test",
+        synology_api_key="token",  # pragma: allowlist secret
+        synology_interview_roots=("/folder",),
+    )
+    owner.notion_preflight_token_hash = notion_token_hash(settings)
+    owner.notion_preflight_database_id = owner.notion_database_id
+    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_synthetic_page_id = "synthetic-page"
+    owner.notion_preflight_completed_at = datetime.now(UTC)
+    item = found("route-interview-resume")
+    item.status = RecordingStatus.UPLOADED_TO_SYNOLOGY
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.project_or_spot = "Project"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.content_identity = item.disk_file_id
+    item.synology_folder_path = "/folder"
+    item.synology_file_path = f"/folder/{item.generated_filename}"
+    item.storage_destination_id = uuid.uuid4()
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    transfer = AsyncMock()
+    transfer.create_share_link.return_value = "https://share/video"
+
+    await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        transfer,
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        artifacts = (
+            await session.scalars(
+                select(RecordingStorageArtifact).where(
+                    RecordingStorageArtifact.recording_id == recording_id
+                )
+            )
+        ).all()
+    await engine.dispose()
+
+    assert loaded is not None
+    assert (loaded.status, loaded.error_step, loaded.error_message) == (
+        RecordingStatus.COMPLETED,
+        None,
+        None,
+    )
+    assert loaded.storage_is_durable is True
+    assert [a.file_path for a in artifacts if a.is_active] == [item.synology_file_path]
 
 
 @pytest.mark.anyio
@@ -1543,6 +1694,56 @@ async def test_scan_resumes_calendar_match_and_routes_missing_candidate_to_revie
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("transient", "expected_status"),
+    [(True, RecordingStatus.CALENDAR_EVENT_FOUND), (False, RecordingStatus.FAILED)],
+)
+async def test_scan_keeps_recording_resumable_when_notion_is_temporarily_unreachable(
+    transient: bool, expected_status: RecordingStatus
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    item = found("notion-down")
+    item.status = RecordingStatus.CALENDAR_EVENT_FOUND
+    item.calendar_event_summary = "Interview (Ivan Ivanov)"
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    disk = AsyncMock()
+    disk.list_new.return_value = []
+    candidate = AsyncMock()
+    candidate.find_and_match.side_effect = NotionQueryError(
+        "Notion query transport failed", transient=transient
+    )
+
+    await scan_recruiter(
+        recruiter(),
+        factory,
+        disk,
+        AsyncMock(),
+        InterviewMatcher(Settings()),
+        Settings(),
+        candidate_service=candidate,
+        transfer_service=AsyncMock(),
+        status_service=StatusService(),
+        notion=AsyncMock(),
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert loaded is not None
+    assert loaded.status == expected_status
+    assert loaded.error_step == "candidate_matching"
+    if transient:
+        assert loaded.error_message == "notion_temporarily_unavailable"
+
+
+@pytest.mark.anyio
 async def test_scan_enqueues_manual_review_question_for_daily_digest() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -1900,5 +2101,19 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
 
     assert statuses == {
         "first@example.com": RecordingStatus.FAILED,
-        "second@example.com": RecordingStatus.SOURCE_MARKED_PROCESSED,
+        "second@example.com": RecordingStatus.COMPLETED,
     }
+
+
+def test_summary_local_time_is_configurable_and_validated() -> None:
+    owner = recruiter()
+    owner.timezone = "Asia/Omsk"
+    due = _summary_time(Settings(summary_local_time="11:35").summary_local_time)
+
+    assert _due_recruiter_local_date(owner, datetime(2026, 9, 24, 5, 34, tzinfo=UTC), due) is None
+    assert _due_recruiter_local_date(owner, datetime(2026, 9, 24, 5, 35, tzinfo=UTC), due) == date(
+        2026, 9, 24
+    )
+    assert Settings().summary_local_time == "18:00"
+    with pytest.raises(ValueError):
+        Settings(summary_local_time="25:00")

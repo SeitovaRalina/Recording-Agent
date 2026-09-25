@@ -43,13 +43,31 @@ class MattermostClient:
         if payload.get("id") != recruiter_user_id:
             raise MattermostError("Mattermost recruiter mapping response is malformed")
 
+    def direct_channel_name(self, recruiter_user_id: str) -> str:
+        """Return Mattermost's deterministic DM name, which OpenClaw reports as the channel."""
+        return "__".join(sorted((self._bot_user_id, recruiter_user_id)))
+
+    def _matches_binding(self, channel: dict[str, Any], binding: str) -> bool:
+        return binding in {channel.get("id"), channel.get("name")}
+
     async def validate_direct_channel(self, recruiter_user_id: str, channel_id: str) -> None:
-        """Fail closed unless a channel is a DM containing exactly bot and recruiter."""
+        """Fail closed unless a channel is a DM containing exactly bot and recruiter.
+
+        `channel_id` is either the channel ID or the DM name (`<user>__<user>`).
+        """
         if not self._base_url or not self._bot_user_id or not recruiter_user_id or not channel_id:
             raise MattermostError("Mattermost DM configuration is incomplete")
-        channel = await self._json_request("GET", f"/api/v4/channels/{channel_id}")
-        if channel.get("id") != channel_id or channel.get("type") != "D":
+        if "__" in channel_id:
+            if channel_id != self.direct_channel_name(recruiter_user_id):
+                raise MattermostError("Mattermost DM name does not match bot and recruiter")
+            channel = await self._json_request(
+                "POST", "/api/v4/channels/direct", json=[self._bot_user_id, recruiter_user_id]
+            )
+        else:
+            channel = await self._json_request("GET", f"/api/v4/channels/{channel_id}")
+        if not self._matches_binding(channel, channel_id) or channel.get("type") != "D":
             raise MattermostError("Mattermost channel is not a direct channel")
+        channel_id = str(channel.get("id") or "")
         members = await self._list_request(
             "GET", f"/api/v4/channels/{channel_id}/members?page=0&per_page=3"
         )
@@ -75,7 +93,7 @@ class MattermostClient:
         channel_id = channel_payload.get("id")
         if not isinstance(channel_id, str) or not channel_id:
             raise MattermostError("Mattermost direct-channel response is malformed")
-        if expected_channel_id and channel_id != expected_channel_id:
+        if expected_channel_id and not self._matches_binding(channel_payload, expected_channel_id):
             raise MattermostError("Mattermost direct-channel binding changed")
         if pending_post_id:
             existing = await self._find_pending_post(channel_id, pending_post_id)

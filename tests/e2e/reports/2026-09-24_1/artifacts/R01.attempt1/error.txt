@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 475, in run_route
+    body(ctx)
+    ~~~~^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r01.py", line 45, in body
+    state = ctx.wait_for(
+        lambda s: any(
+    ...<3 lines>...
+        timeout=120,
+    )
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 209, in wait_for
+    state = self.observe(notion=False)
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 195, in observe
+    return remote.stand(
+           ~~~~~~~~~~~~^
+        "observe",
+        ^^^^^^^^^^
+    ...<5 lines>...
+        },
+        ^^
+    )
+    ^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\remote.py", line 69, in stand
+    raise RemoteError(f"stand {command}: {result['error']}")
+tests.e2e.lib.remote.RemoteError: stand observe: DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) <class 'asyncpg.exceptions.DataError'>: invalid input for query argument $1: '2026-09-24T01:24:51.360018+00:00' (expected a datetime.date or datetime.datetime instance, got 'str')
+[SQL: select id, kind, dedupe_key, status, payload, created_at, sent_at, last_error from notification_outbox where created_at >= coalesce(cast($1 as timestamptz), now() - interval '1 day') order by created_at]
+[parameters: ('2026-09-24T01:24:51.360018+00:00',)]
+(Background

@@ -122,3 +122,48 @@ async def test_mattermost_validates_exact_direct_channel_membership() -> None:
         await MattermostClient(
             "https://mm.test", SecretStr("secret"), "bot", http
         ).validate_direct_channel("recruiter", "dm")
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_mattermost_validates_dm_by_openclaw_channel_name() -> None:
+    direct = respx.post("https://mm.test/api/v4/channels/direct").mock(
+        return_value=httpx.Response(200, json={"id": "dm", "name": "bot__recruiter", "type": "D"})
+    )
+    respx.get("https://mm.test/api/v4/channels/dm/members?page=0&per_page=3").mock(
+        return_value=httpx.Response(200, json=[{"user_id": "bot"}, {"user_id": "recruiter"}])
+    )
+    async with httpx.AsyncClient() as http:
+        client = MattermostClient("https://mm.test", SecretStr("secret"), "bot", http)
+        assert client.direct_channel_name("recruiter") == "bot__recruiter"
+        await client.validate_direct_channel("recruiter", "bot__recruiter")
+    assert direct.calls[0].request.content == b'["bot","recruiter"]'
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_mattermost_rejects_dm_name_of_other_users_without_api_call() -> None:
+    direct = respx.post("https://mm.test/api/v4/channels/direct")
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(MattermostError, match="does not match"):
+            await MattermostClient(
+                "https://mm.test", SecretStr("secret"), "bot", http
+            ).validate_direct_channel("recruiter", "bot__intruder")
+    assert direct.call_count == 0
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_mattermost_sender_accepts_dm_name_binding() -> None:
+    respx.post("https://mm.test/api/v4/channels/direct").mock(
+        return_value=httpx.Response(201, json={"id": "dm", "name": "bot__recruiter"})
+    )
+    respx.post("https://mm.test/api/v4/posts").mock(
+        return_value=httpx.Response(201, json={"id": "post"})
+    )
+    async with httpx.AsyncClient() as http:
+        client = MattermostClient("https://mm.test", SecretStr("secret"), "bot", http)
+        result = await client.send_dm("recruiter", "hi", expected_channel_id="bot__recruiter")
+        assert result.channel_id == "dm"
+        with pytest.raises(MattermostError, match="binding changed"):
+            await client.send_dm("recruiter", "hi", expected_channel_id="bot__other")

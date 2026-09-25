@@ -297,6 +297,10 @@ def test_autonomous_routing_defer_sends_nonce_and_snapshot_only(
             "a" * 64,
             "--reason",
             "ambiguous",
+            "--candidate-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--candidate-id",
+            "33333333-3333-3333-3333-333333333333",
         ]
     )
 
@@ -310,6 +314,10 @@ def test_autonomous_routing_defer_sends_nonce_and_snapshot_only(
             "dispatch_nonce": "nonce_value_123456",
             "snapshot_hash": "a" * 64,
             "reason": "ambiguous",
+            "candidate_ids": [
+                "22222222-2222-2222-2222-222222222222",
+                "33333333-3333-3333-3333-333333333333",
+            ],
         },
         "authenticate": False,
     }
@@ -360,9 +368,9 @@ def test_scan_message_reports_counts_and_every_category() -> None:
     )
 
     assert "Новых записей добавлено: 3." in message
-    assert "Старых записей пропущено по правилу canary: 6." in message
-    assert "Требуют review: 1." in message
-    assert "Не требуют review: 1." in message
+    assert "Старых записей пропущено (созданы до начала работы агента): 6." in message
+    assert "Требуют вашего уточнения: 1." in message
+    assert "Обработаны без вопросов: 1." in message
     assert "С ошибкой: 1." in message
     assert "review.webm" in message
     assert "complete.webm" in message
@@ -386,7 +394,7 @@ def test_empty_scan_message_is_explicit_without_claiming_disk_is_empty() -> None
 
     assert "Новых записей добавлено: 0." in message
     assert "Обнаружено файлов для проверки: 7." in message
-    assert "Старых записей пропущено по правилу canary: 7." in message
+    assert "Старых записей пропущено (созданы до начала работы агента): 7." in message
 
 
 def test_scan_message_explains_calendar_discovery_abort() -> None:
@@ -431,7 +439,7 @@ def test_scan_message_lists_found_as_pending_not_without_review() -> None:
 
     assert "Ожидают повторной обработки: 1." in message
     assert message.count("pending.webm") == 1
-    assert "Не требуют review: 0." in message
+    assert "Обработаны без вопросов: 0." in message
 
 
 def test_scan_message_explains_truncation_without_double_counting_failures() -> None:
@@ -458,7 +466,7 @@ def test_scan_message_explains_truncation_without_double_counting_failures() -> 
     )
 
     assert "Показано результатов: 1 из 51." in message
-    assert "сузьте status-запрос по дате, кандидату, recording ID или статусу" in message
+    assert "уточните запрос статуса по дате, кандидату или статусу" in message
     assert "Полный список доступен через status" not in message
     assert "Дополнительных ошибок" not in message
 
@@ -484,8 +492,61 @@ def test_status_message_lists_identity_status_and_error() -> None:
     assert "Найдено записей: 1." in message
     assert "interview.webm" in message
     assert "Иван Иванов" in message
-    assert "кандидат с нужным именем и датой не найден в Notion" in message
+    assert "кандидат с таким именем не найден в Notion" in message
     assert "имя в хранилище: stored-interview.webm" in message
+
+
+def test_status_message_counts_statuses_and_hides_errors_of_settled_recordings() -> None:
+    message = CLIENT._message_for(
+        "status",
+        {
+            "total": 42,
+            "items": [
+                {
+                    "filename": "done.webm",
+                    "status": "completed",
+                    "error": "Notion page update transport failed",
+                    "error_step": "notion_update",
+                },
+                {
+                    "filename": "skipped.webm",
+                    "status": "ignored",
+                    "error": "Interview destination must be selected",
+                },
+                {
+                    "filename": "broken.webm",
+                    "status": "failed",
+                    "error": "Notion page update failed with HTTP 400",
+                    "error_step": "notion_update",
+                },
+            ],
+        },
+    )
+
+    assert "Найдено записей: 42; показаны последние 3." in message
+    assert "обработка завершена — 1" in message
+    assert "запись проигнорирована — 1" in message
+    assert "transport failed" not in message
+    assert "must be selected" not in message
+    assert "ошибка (шаг: запись ссылки в карточку Notion): Notion page update failed" in message
+
+
+def test_route_message_says_the_notion_card_still_waits() -> None:
+    message = CLIENT._message_for(
+        "route-interview",
+        {
+            "status": "synology_link_created",
+            "candidate_name": "Иван Иванов",
+            "safe_link": "https://gofile.me/x",
+            "error": "notion_temporarily_unavailable",
+            "error_step": "notion_update",
+        },
+    )
+
+    assert "файл сохранён в Synology" in message
+    assert "Карточку Notion обновить пока не удалось" in message
+    assert "https://gofile.me/x" in message
+    assert "Готово" not in message
 
 
 def test_review_message_lists_only_returned_choices() -> None:

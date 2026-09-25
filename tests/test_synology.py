@@ -130,7 +130,9 @@ async def test_find_public_share_link_paginates_to_exact_path() -> None:
                         200,
                         json={
                             "success": True,
-                            "data": {"links": [{"path": "/base/video.webm", "url": "https://right"}]},
+                            "data": {
+                                "links": [{"path": "/base/video.webm", "url": "https://right"}]
+                            },
                         },
                     ),
                 ]
@@ -262,7 +264,9 @@ async def test_upload_refuses_existing_destination() -> None:
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]
@@ -278,6 +282,23 @@ async def test_upload_refuses_existing_destination() -> None:
                 )
 
 
+def _marker_exists() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {
+                "files": [
+                    {
+                        "path": "/base/.video.webm.recording-agent-owner.json",
+                        "additional": {"size": 70},
+                    }
+                ]
+            },
+        },
+    )
+
+
 @pytest.mark.anyio
 async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner() -> None:
     marker = b'{"content_identity":"md5-1","recording_id":"recording-1","size":10,"v":1}'
@@ -286,12 +307,15 @@ async def test_upload_reuses_existing_destination_only_for_exact_persisted_owner
         with respx.mock(assert_all_called=True) as router:
             router.get(URL).mock(
                 side_effect=[
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]
@@ -314,7 +338,13 @@ async def test_upload_rejects_existing_destination_owned_by_another_recording() 
     async with httpx.AsyncClient() as http:
         backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
         with respx.mock(assert_all_called=True) as router:
-            router.get(URL).mock(return_value=httpx.Response(200, content=marker))
+            router.get(URL).mock(
+                side_effect=[
+                    _marker_exists(),
+                    httpx.Response(200, content=marker),
+                    _marker_exists(),
+                ]
+            )
 
             with pytest.raises(StorageCollisionError, match="different ownership"):
                 await backend.upload(
@@ -335,14 +365,18 @@ async def test_upload_recovers_timeout_after_synology_accepted_exact_owned_file(
         with respx.mock(assert_all_called=True) as router:
             router.get(URL).mock(
                 side_effect=[
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(404),
+                    _marker_exists(),
                     httpx.Response(200, content=marker),
                     httpx.Response(
                         200,
                         json={
                             "success": True,
-                            "data": {"files": [{"path": "/base/video.webm", "size": 10}]},
+                            "data": {
+                                "files": [{"path": "/base/video.webm", "additional": {"size": 10}}]
+                            },
                         },
                     ),
                 ]
@@ -414,3 +448,180 @@ async def test_folder_discovery_is_paginated_bounded_and_omits_symlinks() -> Non
 
     assert [folder.path for folder in folders] == ["/root/real"]
     assert len(route.calls) == 2
+
+
+def _dsm7_folder(path: str, real_path: str, *, write: bool = True) -> dict[str, object]:
+    return {
+        "path": path,
+        "name": path.rsplit("/", 1)[-1],
+        "isdir": True,
+        "additional": {
+            "perm": {
+                "acl": {"append": write, "del": write, "exec": True, "read": True, "write": write},
+                "is_acl_mode": True,
+                "posix": 777,
+            },
+            "real_path": real_path,
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_home_share_folders_with_dsm7_acl_are_writable_and_not_symlinks() -> None:
+    home = "/volume1/homes/saver"
+    root = "/home/Recruiting-E/3. Interviews internal"
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "total": 3,
+                            "files": [
+                                _dsm7_folder(
+                                    f"{root}/Flutter",
+                                    f"{home}/Recruiting-E/3. Interviews internal/Flutter",
+                                ),
+                                _dsm7_folder(
+                                    f"{root}/Web",
+                                    f"{home}/Recruiting-E/3. Interviews internal/Web",
+                                    write=False,
+                                ),
+                                _dsm7_folder(f"{root}/Linked", "/volume2/other/Linked"),
+                            ],
+                        },
+                    },
+                )
+            )
+            folders = await backend.discover_folders(root, max_depth=0, max_pages=1, max_results=10)
+
+    assert [(folder.path, folder.writable) for folder in folders] == [
+        (f"{root}/Flutter", True),
+        (f"{root}/Web", False),
+    ]
+
+
+def test_symlink_detection_uses_share_relative_tail() -> None:
+    assert not SynologyBackend._is_symlink("/home", "/volume1/homes/saver")
+    assert not SynologyBackend._is_symlink("/home/a/b", "/volume1/homes/saver/a/b")
+    assert not SynologyBackend._is_symlink("/root", "/root")
+    assert not SynologyBackend._is_symlink("/root/real", "/root/real")
+    assert SynologyBackend._is_symlink("/home/a/b", "/volume1/homes/saver/a/c")
+    assert SynologyBackend._is_symlink("/root/team", "/elsewhere")
+    assert not SynologyBackend._is_symlink("/root/team", None)
+
+
+def test_writable_reads_dsm7_acl_and_legacy_flat_perm() -> None:
+    assert SynologyBackend._is_writable({"perm": {"acl": {"write": True}, "posix": 777}})
+    assert not SynologyBackend._is_writable({"perm": {"acl": {"write": False}, "posix": 777}})
+    assert SynologyBackend._is_writable({"perm": {"write": True}})
+    assert not SynologyBackend._is_writable({})
+
+
+@pytest.mark.anyio
+async def test_missing_owner_marker_is_detected_without_download_behind_proxy() -> None:
+    """A DSM reverse proxy answers Download of a missing file with HTML 502."""
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=False) as router:
+            info = router.get(URL, params={"method": "getinfo"}).mock(
+                return_value=httpx.Response(200, json={"success": False, "error": {"code": 408}})
+            )
+            download = router.get(URL, params={"method": "download"}).mock(
+                return_value=httpx.Response(502, text="<!DOCTYPE html>")
+            )
+            router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
+            path = await backend.upload(
+                "/base",
+                "video.webm",
+                chunks(),
+                10,
+                recording_id="recording-1",
+                content_identity="md5-1",
+            )
+
+    assert path == "/base/video.webm"
+    assert download.call_count == 0
+    assert info.call_count >= 2
+
+
+@pytest.mark.anyio
+async def test_file_size_treats_dsm7_per_item_not_found_as_missing() -> None:
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {"files": [{"code": 408, "path": "/base/.missing.json"}]},
+                    },
+                )
+            )
+            assert await backend._file_size("/base/.missing.json") is None  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_upload_sends_cyrillic_filename_as_raw_utf8() -> None:
+    name = "2026-09-24_Дмитрий_Голуб_Java-разработчик_@Т-банк_general_interview.webm"
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL).mock(return_value=httpx.Response(404))
+            route = router.post(URL).mock(return_value=httpx.Response(200, json={"success": True}))
+            await backend.upload(
+                "/base", name, chunks(), 10, recording_id="r-1", content_identity="md5-1"
+            )
+
+    bodies = [call.request.content for call in route.calls]
+    assert f'filename="{name}"'.encode() in bodies[-1]
+    assert f'filename=".{name}.recording-agent-owner.json"'.encode() in bodies[0]
+    assert b"%D0" not in b"".join(bodies)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"path": "/base/v.webm", "additional": {"size": 938034}}, 938034),
+        ({"path": "/base/v.webm", "size": 5}, 5),
+        ({"path": "/base/v.webm", "code": 408}, None),
+    ],
+)
+async def test_file_size_reads_dsm_additional_size(item: dict, expected: int | None) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "data": {"files": [item]}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        backend = SynologyBackend("https://nas.test", SecretStr("token"), client)
+        assert await backend._file_size("/base/v.webm") == expected
+
+
+@pytest.mark.anyio
+async def test_create_folder_is_retry_safe_when_folder_already_exists() -> None:
+    root = "/home/Recruiting-E/2. Interviews external"
+    home = "/volume1/homes/saver/Recruiting-E/2. Interviews external"
+
+    def info(request: httpx.Request) -> httpx.Response:
+        path = parse_qs(request.url.query.decode())["path"][0]
+        target = f"{root}/E2E Discovery"
+        folder = _dsm7_folder(root, home) if root + '"' in path else _dsm7_folder(
+            target, f"{home}/E2E Discovery"
+        )
+        return httpx.Response(200, json={"success": True, "data": {"files": [folder]}})
+
+    async with httpx.AsyncClient() as http:
+        backend = SynologyBackend("https://nas.test", SecretStr("key"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.get(URL, params={"method": "getinfo"}).mock(side_effect=info)
+            router.post(URL).mock(
+                return_value=httpx.Response(200, json={"success": False, "error": {"code": 1100}})
+            )
+            created = await backend.create_folder_under_root(root, root, "E2E Discovery")
+
+    assert created.path == f"{root}/E2E Discovery"
+    assert created.directory and created.writable

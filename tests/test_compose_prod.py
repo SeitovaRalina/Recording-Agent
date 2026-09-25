@@ -31,6 +31,20 @@ def test_production_compose_isolates_notion_proxy() -> None:
     assert backend["depends_on"]["notion-proxy"]["condition"] == "service_healthy"
 
 
+def test_production_effect_flags_come_from_env_file_and_default_off() -> None:
+    environment = _compose()["services"]["backend"]["environment"]
+
+    assert environment["TEST_MODE_ENABLED"] == "false"
+    assert environment["PIPELINE_TRACE_ENABLED"] == "false"
+    for flag in (
+        "SCHEDULER_ENABLED",
+        "YANDEX_SOURCE_MUTATION_ENABLED",
+        "NOTION_WRITES_ENABLED",
+        "MATTERMOST_DELIVERY_ENABLED",
+    ):
+        assert environment[flag] == f"${{{flag}:-false}}"
+
+
 def test_proxy_network_cannot_reach_backend_or_postgres() -> None:
     compose = _compose()
     services = compose["services"]

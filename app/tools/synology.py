@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
@@ -225,7 +224,7 @@ class SynologyBackend:
                     additional = item.get("additional")
                     extra = additional if isinstance(additional, dict) else {}
                     real_path = extra.get("real_path")
-                    symlink = isinstance(real_path, str) and self._canonical(real_path) != path
+                    symlink = self._is_symlink(path, real_path)
                     folder = SynologyFolder(
                         path=path,
                         name=name[:200],
@@ -264,7 +263,17 @@ class SynologyBackend:
             params={"api": "SYNO.FileStation.CreateFolder", "method": "create", "version": "2"},
             data={"folder_path": canonical_parent, "name": name, "force_parent": "false"},
         )
-        self._validate(response)
+        try:
+            self._validate(response)
+        except SynologyAPIError:
+            # DSM rejects creating a folder that already exists; an existing writable real folder
+            # at exactly the requested path is the desired end state (retry-safe create).
+            try:
+                existing = await self._get_info(target)
+            except (SynologyAPIError, SynologyPathError):
+                raise
+            if existing.path != target or not existing.directory:
+                raise
         created = await self._get_info(target)
         if not created.directory or created.symlink or not created.writable:
             raise PermissionError("Created destination is not a writable real folder")
@@ -412,14 +421,26 @@ class SynologyBackend:
         if not isinstance(files, list) or not files:
             return None
         item = files[0]
-        if not isinstance(item, dict) or not isinstance(item.get("size"), int):
+        # DSM 7 reports a missing path as a successful response with a per-item error code.
+        if isinstance(item, dict) and item.get("code") == 408:
+            return None
+        # DSM returns requested fields under `additional` ({"additional": {"size": n}}).
+        additional = item.get("additional") if isinstance(item, dict) else None
+        size = additional.get("size") if isinstance(additional, dict) else None
+        if size is None and isinstance(item, dict):
+            size = item.get("size")
+        if not isinstance(size, int):
             raise StorageCollisionError(
                 f"Synology destination exists but its size cannot be verified: {path}"
             )
-        return int(item["size"])
+        return size
 
     async def _read_owner_marker(self, folder: str, filename: str) -> dict[str, object] | None:
         marker_path = f"{folder.rstrip('/')}/{self._owner_marker_name(filename)}"
+        # A reverse proxy in front of DSM may turn Download's "not found" into an HTML 502, so
+        # existence is established through List.getinfo before the marker body is read.
+        if await self._file_size(marker_path) is None:
+            return None
         response = await self._get(
             "/webapi/entry.cgi",
             params={
@@ -500,7 +521,7 @@ class SynologyBackend:
             path=canonical,
             name=str(item.get("name") or PurePosixPath(canonical).name)[:200],
             writable=self._is_writable(extra),
-            symlink=isinstance(real_path, str) and self._canonical(real_path) != canonical,
+            symlink=self._is_symlink(canonical, real_path),
             directory=item.get("isdir") is True,
         )
 
@@ -526,7 +547,29 @@ class SynologyBackend:
     @staticmethod
     def _is_writable(additional: dict[str, Any]) -> bool:
         perm = additional.get("perm")
-        return isinstance(perm, dict) and perm.get("write") is True
+        if not isinstance(perm, dict):
+            return False
+        # DSM 7 reports effective rights under perm.acl; keep the flat form for older payloads.
+        acl = perm.get("acl")
+        if isinstance(acl, dict):
+            return acl.get("write") is True
+        return perm.get("write") is True
+
+    @classmethod
+    def _is_symlink(cls, path: str, real_path: object) -> bool:
+        """Detect a redirected folder without assuming share names equal volume paths.
+
+        DSM maps the first path component to a share volume (for `/home` it is
+        `/volume1/homes/<user>`), so only the share-relative remainder must match the tail of
+        `real_path`.
+        """
+        if not isinstance(real_path, str):
+            return False
+        relative = PurePosixPath(path).parts[2:]
+        real_parts = PurePosixPath(cls._canonical(real_path)).parts[1:]
+        if not relative:
+            return False
+        return tuple(real_parts[-len(relative) :]) != relative
 
     async def create_share_link(self, path: str) -> str:
         response = await self._post(
@@ -581,11 +624,17 @@ class SynologyBackend:
         root: str,
         expected_size: int | None,
         expected_owner: dict[str, object],
+        target_root: str | None = None,
     ) -> SynologyMoveResult:
-        """Move a proven owned file without overwrite and prove the result before returning."""
+        """Move a proven owned file without overwrite and prove the result before returning.
+
+        The source is confined to `root` and the target to `target_root` (default: `root`), so a
+        move between two allowed interview roots is validated on both ends.
+        """
+        destination_root = target_root or root
         source = self.canonical_under_root(root, source_path)
-        folder = self.canonical_under_root(root, target_folder)
-        target = self.canonical_under_root(root, f"{folder.rstrip('/')}/{filename}")
+        folder = self.canonical_under_root(destination_root, target_folder)
+        target = self.canonical_under_root(destination_root, f"{folder.rstrip('/')}/{filename}")
         if await self._file_size(target) is not None:
             raise StorageCollisionError(
                 "Synology reroute target already exists; overwrite is forbidden"
@@ -609,7 +658,9 @@ class SynologyBackend:
         source_marker = self.canonical_under_root(
             root, f"{PurePosixPath(source).parent}/{marker_name}"
         )
-        target_marker = self.canonical_under_root(root, f"{folder.rstrip('/')}/{marker_name}")
+        target_marker = self.canonical_under_root(
+            destination_root, f"{folder.rstrip('/')}/{marker_name}"
+        )
         if await self._file_size(target_marker) is not None:
             raise StorageCollisionError("Synology reroute owner-marker target already exists")
         await self._start_copy_move(source_marker, folder)
@@ -706,10 +757,14 @@ class SynologyBackend:
             yield (
                 f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
             ).encode()
-        encoded_name = quote(filename, safe="._- ")
+        # File Station stores the multipart filename verbatim, so percent-encoding would become
+        # part of the name; send raw UTF-8 inside an escaped quoted-string instead.
+        if any(character in filename for character in "\r\n\x00"):
+            raise SynologyPathError("Upload filename contains control characters")
+        quoted_name = filename.replace("\\", "\\\\").replace('"', '\\"')
         yield (
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-            f'filename="{encoded_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            f'filename="{quoted_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
         ).encode()
         async for chunk in stream:
             yield chunk

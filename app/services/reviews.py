@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -63,6 +63,20 @@ class ReviewMutation:
             "replayed": self.replayed,
         }
 
+
+
+def locked_review_statement(review_id: uuid.UUID) -> Select[tuple[ManualReview]]:
+    """Lock a review and its recording.
+
+    PostgreSQL rejects FOR UPDATE on the nullable side of an outer join, so the recording is
+    joined with an inner join (manual_reviews.recording_id is NOT NULL).
+    """
+    return (
+        select(ManualReview)
+        .where(ManualReview.id == review_id)
+        .options(joinedload(ManualReview.recording, innerjoin=True))
+        .with_for_update()
+    )
 
 class ReviewService:
     def __init__(
@@ -222,7 +236,8 @@ class ReviewService:
         choices = (recording.manual_review_candidates or [])[:10]
         rendered_choices: list[str] = []
         for index, choice in enumerate(choices, start=1):
-            details = [str(choice.get("name") or choice.get("event_summary") or "option")[:160]]
+            label = choice.get("name") or choice.get("event_summary") or "вариант без названия"
+            details = [str(label)[:160]]
             if choice.get("project_or_spot"):
                 details.append(f"📍 Spots: {str(choice['project_or_spot'])[:160]}")
             if choice.get("spot_url"):
@@ -415,12 +430,7 @@ class ReviewService:
         replay = await self._find_replay(session, recruiter_user_id, operation, idempotency_key)
         if replay is not None:
             return self._mutation_from_replay(replay, fingerprint)
-        review = await session.scalar(
-            select(ManualReview)
-            .where(ManualReview.id == review_id)
-            .options(joinedload(ManualReview.recording))
-            .with_for_update()
-        )
+        review = await session.scalar(locked_review_statement(review_id))
         if review is None:
             raise ReviewRejectedError("Review not found")
         await self._enforce_authoritative_scope(session, review, recruiter_user_id)

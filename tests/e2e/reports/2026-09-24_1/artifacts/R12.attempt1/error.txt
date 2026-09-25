@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 684, in run_route
+    body(ctx)
+    ~~~~^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\routes\r12.py", line 19, in body
+    waiting = ctx.interview("E2E Пётр Ожидающий", spot_ids=[SPOTS["analyst"]])
+              ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\route.py", line 152, in interview
+    item.card = remote.stand(
+                ~~~~~~~~~~~~^
+        "notion_card_create", {"name": candidate, "spot_ids": spot_ids or []}
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\.vscode\Agentication\projects\Recording Agent\tests\e2e\lib\remote.py", line 69, in stand
+    raise RemoteError(f"stand {command}: {result['error']}")
+tests.e2e.lib.remote.RemoteError: stand notion_card_create: ConnectError: 

@@ -62,6 +62,12 @@ class Settings(BaseSettings):
         default="Europe/Moscow",
         validation_alias=AliasChoices("recording_filename_timezone", "RECORDING_FILENAME_TIMEZONE"),
     )
+    summary_local_time: str = Field(
+        default="18:00",
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        validation_alias=AliasChoices("summary_local_time", "SUMMARY_LOCAL_TIME"),
+        description="Recruiter-local HH:MM of the daily scan and question digest.",
+    )
     disk_cleanup_hour: int = 3
     disk_cleanup_minute: int = 0
     disk_retention_days: int = 7

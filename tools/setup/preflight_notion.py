@@ -8,7 +8,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import Settings, get_settings
-from app.tools.notion import NotionClient, NotionDatabaseInspection
+from app.tools.notion import NotionClient, NotionDatabaseInspection, build_notion_http_client
 
 
 def _require_canary_boundary(settings: Settings, database_id: str) -> None:
@@ -34,10 +34,8 @@ async def inspect_canary_notion_schema(
 ) -> NotionDatabaseInspection:
     """Inspect exactly one allowlisted Notion schema using the dedicated proxy client."""
     _require_canary_boundary(settings, database_id)
-    async with httpx.AsyncClient(
-        proxy=settings.notion_proxy_url.get_secret_value() or None,
-        timeout=httpx.Timeout(connect=10, read=30, write=30, pool=10),
-        trust_env=False,
+    async with build_notion_http_client(
+        settings, httpx.Timeout(connect=10, read=30, write=30, pool=10)
     ) as http_client:
         notion = NotionClient(settings.notion_token, http_client, settings=settings)
         return await notion.inspect_database(
