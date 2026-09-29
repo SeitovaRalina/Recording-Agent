@@ -621,6 +621,7 @@ async def propose_notion_reassignment(
         proposal = await _notion_reassignment_service(request).propose(
             session,
             recording=recording,
+            recruiter=recruiter,
             recruiter_user_id=body.recruiter_user_id,
             dm_channel_id=body.mattermost_dm_channel_id,
             target=pages[0],
@@ -650,10 +651,14 @@ async def confirm_notion_reassignment(
     session: Session,
     request: Request,
 ) -> RecordingRerouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
     try:
         recording = await _notion_reassignment_service(request).confirm(
             session,
             proposal_id=proposal_id,
+            recruiter=recruiter,
             recruiter_user_id=body.recruiter_user_id,
             dm_channel_id=body.mattermost_dm_channel_id,
             capability=body.capability.get_secret_value(),

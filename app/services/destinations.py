@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
 from app.db.models.storage_destination import StorageDestination
+from app.services.recruiter_schema import resolve_synology_roots
 from app.tools.synology import SynologyAPIError, SynologyBackend, SynologyFolder, SynologyPreflight
 
 
@@ -21,13 +22,16 @@ class DestinationService:
     def __init__(self, synology: SynologyBackend, settings: Settings) -> None:
         self._synology = synology
         self._settings = settings
-        self._roots = settings.synology_interview_roots
+
+    def _roots(self, recruiter: RecruiterConfig) -> tuple[str, ...]:
+        """Allowed interview roots for this recruiter (NULL column -> global Settings)."""
+        return resolve_synology_roots(self._settings, recruiter)
 
     async def preflight(self, recruiter: RecruiterConfig) -> SynologyPreflight:
-        del recruiter
-        if not self._roots:
+        roots = self._roots(recruiter)
+        if not roots:
             raise DestinationRejectedError("Synology interview roots are not configured")
-        checks = [await self._synology.preflight(root) for root in self._roots]
+        checks = [await self._synology.preflight(root) for root in roots]
         result = SynologyPreflight(
             api_available=all(item.api_available for item in checks),
             root_exists=all(item.root_exists for item in checks),
@@ -49,9 +53,10 @@ class DestinationService:
         self, session: AsyncSession, recruiter: RecruiterConfig
     ) -> list[StorageDestination]:
         await self.preflight(recruiter)
+        roots = self._roots(recruiter)
         folders: list[SynologyFolder] = []
-        per_root_results = max(1, self._settings.synology_discovery_max_results // len(self._roots))
-        for root in self._roots:
+        per_root_results = max(1, self._settings.synology_discovery_max_results // len(roots))
+        for root in roots:
             folders.append(
                 SynologyFolder(
                     root,
@@ -74,7 +79,7 @@ class DestinationService:
             if (
                 folder.symlink
                 or not folder.writable
-                or not self._is_allowed_interview_path(folder.path)
+                or not self._is_allowed_interview_path(roots, folder.path)
             ):
                 continue
             destinations.append(await self._persist(session, recruiter, folder))
@@ -90,7 +95,7 @@ class DestinationService:
         name: str,
     ) -> StorageDestination:
         parent = await self.resolve(session, recruiter, parent_id)
-        if parent.canonical_path not in self._roots:
+        if parent.canonical_path not in self._roots(recruiter):
             raise DestinationRejectedError("New folders are allowed only under an allowed root")
         folder = await self._synology.create_folder_under_root(
             parent.canonical_path, parent.canonical_path, name
@@ -116,7 +121,9 @@ class DestinationService:
         if destination is None:
             raise DestinationRejectedError("Storage destination is unavailable")
         try:
-            root = self._require_allowed_interview_path(destination.canonical_path)
+            root = self._require_allowed_interview_path(
+                self._roots(recruiter), destination.canonical_path
+            )
         except ValueError as error:
             raise DestinationRejectedError(
                 "Storage destination is outside allowed interview roots"
@@ -147,7 +154,7 @@ class DestinationService:
                 StorageDestination.recruiter_id == recruiter.id,
                 StorageDestination.writable.is_(True),
                 StorageDestination.symlink_safe.is_(True),
-                _allowed_destination_clause(self._roots),
+                _allowed_destination_clause(self._roots(recruiter)),
             )
             .order_by(StorageDestination.canonical_path.asc())
             .limit(max_results)
@@ -185,15 +192,17 @@ class DestinationService:
                 raise DestinationRejectedError("Synology inventory returned duplicate paths")
             seen.add(folder.path)
 
-    def _is_allowed_interview_path(self, path: str) -> bool:
+    @staticmethod
+    def _is_allowed_interview_path(roots: tuple[str, ...], path: str) -> bool:
         try:
-            self._require_allowed_interview_path(path)
+            DestinationService._require_allowed_interview_path(roots, path)
         except ValueError:
             return False
         return True
 
-    def _require_allowed_interview_path(self, path: str) -> str:
-        for root in self._roots:
+    @staticmethod
+    def _require_allowed_interview_path(roots: tuple[str, ...], path: str) -> str:
+        for root in roots:
             try:
                 SynologyBackend.canonical_under_root(root, path)
                 return root
