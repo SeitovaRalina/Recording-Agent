@@ -177,12 +177,22 @@ class NotionDataSourceSchema:
         contacts_prop: str,
         project_prop: str = "",
         project_prop_type: str = "",
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
     ) -> bool:
+        if contacts_mode == "none":
+            contacts_ok = True
+        elif contacts_mode == "formula":
+            contacts_ok = self.property_types.get(contacts_prop) == "formula"
+        elif contacts_mode == "relation":
+            contacts_ok = self.property_types.get(contacts_relation_prop) == "relation"
+        else:
+            contacts_ok = False
         return (
             self.property_types.get(name_prop) == "title"
             and self.property_types.get(date_prop) == "date"
             and self.property_types.get(recording_prop) == "files"
-            and self.property_types.get(contacts_prop) == "formula"
+            and contacts_ok
             and (
                 not project_prop
                 or (
@@ -200,7 +210,31 @@ class NotionDatabaseInspection:
     schema: NotionDataSourceSchema
 
 
-SourceCacheKey = tuple[str, str, str, str, str, str, str]
+SourceCacheKey = tuple[str, str, str, str, str, str, str, str, str]
+
+
+def _source_key(
+    database_id: str,
+    name_prop: str,
+    date_prop: str,
+    recording_prop: str,
+    contacts_prop: str,
+    project_prop: str,
+    project_prop_type: str,
+    contacts_mode: str,
+    contacts_relation_prop: str,
+) -> SourceCacheKey:
+    return (
+        database_id,
+        name_prop,
+        date_prop,
+        recording_prop,
+        contacts_prop,
+        project_prop,
+        project_prop_type,
+        contacts_mode,
+        contacts_relation_prop,
+    )
 
 
 class NotionClient:
@@ -241,9 +275,12 @@ class NotionClient:
         project_prop: str = "",
         project_prop_type: str = "",
         contacts_prop: str = "TBD",
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
+        contacts_target_prop: str = "",
     ) -> list[NotionPage]:
         del event_date
-        key = (
+        key = _source_key(
             database_id,
             name_prop,
             date_prop,
@@ -251,6 +288,8 @@ class NotionClient:
             contacts_prop,
             project_prop,
             project_prop_type,
+            contacts_mode,
+            contacts_relation_prop,
         )
         source_id, was_cached = await self._resolve_source(key)
         self._trace(
@@ -277,13 +316,24 @@ class NotionClient:
             raise NotionMalformedResponseError("Notion query response has invalid results")
         pages: list[NotionPage] = []
         relation_cache: dict[str, NotionRelationChoice] = {}
+        contacts_cache: dict[str, tuple[str, ...]] = {}
         for item in results[:10]:
             page = self._parse_page(
-                item, name_prop, date_prop, contacts_prop, project_prop, recording_prop
+                item,
+                name_prop,
+                date_prop,
+                contacts_prop,
+                project_prop,
+                recording_prop,
+                contacts_mode=contacts_mode,
             )
             if page.recording_present:
                 continue
-            relation_ids = self._project_relation_ids(item, project_prop)
+            if contacts_mode == "relation":
+                page = await self._with_relation_contacts(
+                    page, item, contacts_relation_prop, contacts_target_prop, contacts_cache
+                )
+            relation_ids = self._relation_ids(item, project_prop)
             relations: list[NotionRelationChoice] = []
             for relation_id in relation_ids:
                 relation = relation_cache.get(relation_id)
@@ -320,9 +370,12 @@ class NotionClient:
         contacts_prop: str,
         project_prop: str,
         project_prop_type: str,
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
+        contacts_target_prop: str = "",
     ) -> list[NotionPage]:
         """Resolve a URL/name hint only in a configured schema-verified database."""
-        key = (
+        key = _source_key(
             database_id,
             name_prop,
             date_prop,
@@ -330,9 +383,12 @@ class NotionClient:
             contacts_prop,
             project_prop,
             project_prop_type,
+            contacts_mode,
+            contacts_relation_prop,
         )
         source_id, _ = await self._resolve_source(key)
         canonical_id = _canonical_notion_page_id(hint)
+        contacts_cache: dict[str, tuple[str, ...]] = {}
         if canonical_id is not None:
             page = await self._retrieve_reassignment_page(
                 canonical_id,
@@ -343,6 +399,9 @@ class NotionClient:
                 contacts_prop,
                 project_prop,
                 recording_prop,
+                contacts_mode=contacts_mode,
+                contacts_relation_prop=contacts_relation_prop,
+                contacts_target_prop=contacts_target_prop,
             )
             # Page URL is only a lookup hint; configured-source schema validation happens above.
             # The schema cache above still proves the configured source before this lookup.
@@ -353,13 +412,25 @@ class NotionClient:
         items = payload.get("results")
         if not isinstance(items, list):
             raise NotionMalformedResponseError("Notion reassignment query has invalid results")
-        pages = [
-            self._parse_page(
-                item, name_prop, date_prop, contacts_prop, project_prop, recording_prop
+        matched: list[NotionPage] = []
+        for item in items[:10]:
+            page = self._parse_page(
+                item,
+                name_prop,
+                date_prop,
+                contacts_prop,
+                project_prop,
+                recording_prop,
+                contacts_mode=contacts_mode,
             )
-            for item in items[:10]
-        ]
-        return [page for page in pages if _hint_matches_page(hint, page)]
+            if not _hint_matches_page(hint, page):
+                continue
+            if contacts_mode == "relation":
+                page = await self._with_relation_contacts(
+                    page, item, contacts_relation_prop, contacts_target_prop, contacts_cache
+                )
+            matched.append(page)
+        return matched
 
     async def _retrieve_reassignment_page(
         self,
@@ -371,6 +442,10 @@ class NotionClient:
         contacts_prop: str,
         project_prop: str,
         recording_prop: str,
+        *,
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
+        contacts_target_prop: str = "",
     ) -> NotionPage:
         try:
             response = await self._client.get(
@@ -390,14 +465,20 @@ class NotionClient:
         )
         if parent_id not in {source_id, database_id}:
             raise NotionForbiddenError("Notion reassignment page is outside configured database")
-        return self._parse_page(
+        page = self._parse_page(
             payload,
             name_prop,
             date_prop,
             contacts_prop,
             project_prop,
             recording_prop,
+            contacts_mode=contacts_mode,
         )
+        if contacts_mode == "relation":
+            page = await self._with_relation_contacts(
+                page, payload, contacts_relation_prop, contacts_target_prop, {}
+            )
+        return page
 
     async def update_page_interview(
         self,
@@ -563,6 +644,8 @@ class NotionClient:
             contacts_prop,
             project_prop,
             project_prop_type,
+            contacts_mode,
+            contacts_relation_prop,
         ) = key
         database = await self._retrieve_database(database_id)
         selected = await self._select_compatible_schema(
@@ -573,6 +656,8 @@ class NotionClient:
             contacts_prop,
             project_prop,
             project_prop_type,
+            contacts_mode,
+            contacts_relation_prop,
         )
         self._trace_source_selection(database_id, database, selected.id)
         return selected.id
@@ -586,6 +671,8 @@ class NotionClient:
         project_prop: str = "",
         project_prop_type: str = "",
         contacts_prop: str = "TBD",
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
     ) -> NotionDatabaseInspection:
         database = await self._retrieve_database(database_id)
         selected = await self._select_compatible_schema(
@@ -596,6 +683,8 @@ class NotionClient:
             contacts_prop,
             project_prop,
             project_prop_type,
+            contacts_mode,
+            contacts_relation_prop,
         )
         self._trace_source_selection(database_id, database, selected.id)
         return NotionDatabaseInspection(
@@ -614,6 +703,8 @@ class NotionClient:
         project_prop: str = "",
         project_prop_type: str = "",
         contacts_prop: str = "TBD",
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
     ) -> NotionDatabaseInspection:
         inspection = await self.inspect_database(
             database_id,
@@ -623,6 +714,8 @@ class NotionClient:
             project_prop,
             project_prop_type,
             contacts_prop,
+            contacts_mode,
+            contacts_relation_prop,
         )
         try:
             response = await self._client.post(
@@ -657,7 +750,10 @@ class NotionClient:
             raise NotionMalformedResponseError(
                 "Selected synthetic Notion row has malformed properties"
             )
-        self._formula_emails(properties.get(contacts_prop))
+        if contacts_mode == "formula":
+            self._formula_emails(properties.get(contacts_prop))
+        # contacts_mode="relation": the linked Candidates database id is not configured, so the
+        # target rich_text property is only checked at runtime (soft-fails to no emails).
         return inspection
 
     async def _retrieve_database(self, database_id: str) -> dict[str, Any]:
@@ -687,6 +783,8 @@ class NotionClient:
         contacts_prop: str,
         project_prop: str,
         project_prop_type: str,
+        contacts_mode: str = "formula",
+        contacts_relation_prop: str = "",
     ) -> NotionDataSourceSchema:
         sources = self._parse_sources(database)
         compatible: list[NotionDataSourceSchema] = []
@@ -699,6 +797,8 @@ class NotionClient:
                 contacts_prop,
                 project_prop,
                 project_prop_type,
+                contacts_mode,
+                contacts_relation_prop,
             ):
                 compatible.append(schema)
         if not compatible:
@@ -784,6 +884,54 @@ class NotionClient:
         if not isinstance(page_url, str) or not page_url:
             raise NotionMalformedResponseError("Notion related page has no URL")
         return NotionRelationChoice(id=page_id, title=title, url=page_url)
+
+    async def _retrieve_related_property(self, page_id: str, target_prop: str) -> Any:
+        """Raw `properties[target_prop]` of a related page (None when the property is absent)."""
+        try:
+            response = await self._client.get(
+                f"{NOTION_API_BASE}/pages/{page_id}", headers=self._headers
+            )
+        except httpx.RequestError:
+            raise NotionQueryError(
+                "Notion related page retrieval transport failed", transient=True
+            ) from None
+        self._raise_common(response)
+        if response.is_error:
+            raise NotionQueryError(
+                f"Notion related page retrieval failed with HTTP {response.status_code}",
+                transient=_transient_status(response.status_code),
+            )
+        payload = self._json_object(response, "related page retrieval")
+        properties = payload.get("properties")
+        if not isinstance(properties, dict):
+            raise NotionMalformedResponseError("Notion related page properties are malformed")
+        return properties.get(target_prop)
+
+    async def _with_relation_contacts(
+        self,
+        page: NotionPage,
+        item: Any,
+        contacts_relation_prop: str,
+        contacts_target_prop: str,
+        cache: dict[str, tuple[str, ...]],
+    ) -> NotionPage:
+        """Fill emails from the single related candidate card; zero/many/malformed -> none.
+
+        Email is only a supplementary matching signal, so contacts never block the match.
+        """
+        try:
+            relation_ids = self._relation_ids(item, contacts_relation_prop, label="contacts")
+        except NotionMalformedResponseError:
+            return replace(page, email=None, emails=())
+        if len(relation_ids) != 1:
+            return replace(page, email=None, emails=())
+        relation_id = relation_ids[0]
+        emails = cache.get(relation_id)
+        if emails is None:
+            value = await self._retrieve_related_property(relation_id, contacts_target_prop)
+            emails = self._rich_text_emails(value)
+            cache[relation_id] = emails
+        return replace(page, email=emails[0] if len(emails) == 1 else None, emails=emails)
 
     async def _query_source(
         self,
@@ -908,7 +1056,13 @@ class NotionClient:
         contacts_prop: str,
         project_prop: str = "",
         recording_prop: str = DEFAULT_RECORDING_PROP,
+        *,
+        contacts_mode: str = "formula",
     ) -> NotionPage:
+        """Parse one page; only `formula` contacts are resolved here (no I/O).
+
+        `relation` contacts are filled by the async caller; `none` means no emails.
+        """
         if not isinstance(item, dict):
             raise NotionMalformedResponseError("Notion page payload must be an object")
         page_id = item.get("id")
@@ -918,7 +1072,11 @@ class NotionClient:
             raise NotionMalformedResponseError("Notion page identity is malformed")
         if not isinstance(properties, dict):
             raise NotionMalformedResponseError("Notion page properties are malformed")
-        emails = NotionClient._formula_emails(properties.get(contacts_prop))
+        emails = (
+            NotionClient._formula_emails(properties.get(contacts_prop))
+            if contacts_mode == "formula"
+            else ()
+        )
         return NotionPage(
             id=page_id,
             url=page_url,
@@ -933,22 +1091,22 @@ class NotionClient:
         )
 
     @staticmethod
-    def _project_relation_ids(item: Any, project_prop: str) -> list[str]:
-        if not project_prop or not isinstance(item, dict):
+    def _relation_ids(item: Any, prop_name: str, *, label: str = "project") -> list[str]:
+        if not prop_name or not isinstance(item, dict):
             return []
         properties = item.get("properties")
         if not isinstance(properties, dict):
             return []
-        value = properties.get(project_prop)
+        value = properties.get(prop_name)
         if not isinstance(value, dict) or "relation" not in value:
             return []
         relations = value.get("relation")
         if not isinstance(relations, list):
-            raise NotionMalformedResponseError("Notion project relation is malformed")
+            raise NotionMalformedResponseError(f"Notion {label} relation is malformed")
         if value.get("has_more") is True:
-            raise NotionMalformedResponseError("Notion project relation is incomplete")
+            raise NotionMalformedResponseError(f"Notion {label} relation is incomplete")
         if len(relations) > MAX_SPOT_CHOICES:
-            raise NotionMalformedResponseError("Notion project relation exceeds bounded choices")
+            raise NotionMalformedResponseError(f"Notion {label} relation exceeds bounded choices")
         relation_ids: list[str] = []
         for relation in relations:
             if (
@@ -956,7 +1114,7 @@ class NotionClient:
                 or not isinstance(relation.get("id"), str)
                 or not relation["id"]
             ):
-                raise NotionMalformedResponseError("Notion project relation is malformed")
+                raise NotionMalformedResponseError(f"Notion {label} relation is malformed")
             relation_ids.append(relation["id"])
         return relation_ids
 
@@ -972,6 +1130,17 @@ class NotionClient:
             return ()
         if not isinstance(rendered, str):
             raise NotionMalformedResponseError("Notion contacts formula string is malformed")
+        return NotionClient._extract_emails(rendered)
+
+    @staticmethod
+    def _rich_text_emails(value: Any) -> tuple[str, ...]:
+        """Emails from a rich_text property; absent or non-rich_text value soft-fails to ()."""
+        if not isinstance(value, dict) or not isinstance(value.get("rich_text"), list):
+            return ()
+        return NotionClient._extract_emails(NotionClient._plain_text(value))
+
+    @staticmethod
+    def _extract_emails(rendered: str) -> tuple[str, ...]:
         emails: list[str] = []
         for candidate in _EMAIL_CANDIDATE.findall(rendered):
             local, domain = candidate.rsplit("@", 1)
