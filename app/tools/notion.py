@@ -928,7 +928,17 @@ class NotionClient:
         relation_id = relation_ids[0]
         emails = cache.get(relation_id)
         if emails is None:
-            value = await self._retrieve_related_property(relation_id, contacts_target_prop)
+            try:
+                value = await self._retrieve_related_property(relation_id, contacts_target_prop)
+            except NotionForbiddenError:
+                # 403: the linked card is not shared with the integration.
+                value = None
+            except NotionQueryError as error:
+                # 404 / other non-transient 4xx: the card is deleted or trashed. Transient
+                # (transport, 429, 5xx) still propagates; 401 is NotionAuthError, not caught.
+                if error.transient:
+                    raise
+                value = None
             emails = self._rich_text_emails(value)
             cache[relation_id] = emails
         return replace(page, email=emails[0] if len(emails) == 1 else None, emails=emails)

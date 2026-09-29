@@ -8,9 +8,11 @@ import respx
 from pydantic import SecretStr
 
 from app.tools.notion import (
+    NotionAuthError,
     NotionClient,
     NotionDataSourceSchema,
     NotionPage,
+    NotionQueryError,
     NotionSchemaError,
 )
 from tests.test_notion import BASE, CONTACTS, DATE, NAME, RECORDING, SPOTS, database, page
@@ -186,6 +188,46 @@ async def test_relation_mode_missing_target_property_soft_fails() -> None:
         pages = await _search(router, [interview_page(["cand-1"])], "relation")
 
     assert pages[0].emails == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [403, 404])
+async def test_relation_mode_unavailable_linked_card_yields_no_emails(status: int) -> None:
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{BASE}/pages/cand-1").mock(
+            return_value=httpx.Response(status, json={"object": "error"})
+        )
+        pages = await _search(router, [interview_page(["cand-1"])], "relation")
+
+    assert len(pages) == 1
+    assert pages[0].emails == ()
+    assert pages[0].email is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("response", "error_type"),
+    [
+        (httpx.Response(500, json={"object": "error"}), NotionQueryError),
+        (httpx.Response(429, json={"object": "error"}), NotionQueryError),
+        (httpx.ConnectError("boom"), NotionQueryError),
+        (httpx.Response(401, json={"object": "error"}), NotionAuthError),
+    ],
+)
+async def test_relation_mode_transient_or_auth_linked_card_errors_propagate(
+    response: httpx.Response | Exception, error_type: type[Exception]
+) -> None:
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get(f"{BASE}/pages/cand-1")
+        if isinstance(response, Exception):
+            route.mock(side_effect=response)
+        else:
+            route.mock(return_value=response)
+        with pytest.raises(error_type) as caught:
+            await _search(router, [interview_page(["cand-1"])], "relation")
+
+    if isinstance(caught.value, NotionQueryError):
+        assert caught.value.transient
 
 
 @pytest.mark.anyio
