@@ -4,9 +4,10 @@ import argparse
 import asyncio
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -18,7 +19,16 @@ from app.db.engine import create_engine, create_session_factory
 from app.db.models.recruiter_calendar import RecruiterCalendar
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
-from app.services.recruiter_schema import default_notion_property_map
+from app.services.recruiter_schema import (
+    ContactsMode,
+    NotionPropertyMap,
+    NotionPropertyOverrides,
+    ProjectPropType,
+    default_notion_property_map,
+    merge_notion_property_map,
+    normalize_synology_roots,
+    resolve_notion_property_map,
+)
 from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import DISCOVERY_MAX_AGE, CalDAVClient
 from app.tools.mattermost import MattermostClient
@@ -34,7 +44,9 @@ class DatabaseInspection:
 
 
 class DatabaseInspector(Protocol):
-    async def inspect(self, database_id: str) -> DatabaseInspection: ...
+    async def inspect(
+        self, database_id: str, property_map: NotionPropertyMap | None = None
+    ) -> DatabaseInspection: ...
 
 
 class YandexCredentialProbe(Protocol):
@@ -68,15 +80,21 @@ class NotionInspector:
         self._notion = notion
         self._settings = settings
 
-    async def inspect(self, database_id: str) -> DatabaseInspection:
+    async def inspect(
+        self, database_id: str, property_map: NotionPropertyMap | None = None
+    ) -> DatabaseInspection:
+        """Inspect with the map the new recruiter row will use (global defaults if None)."""
+        props = property_map or default_notion_property_map(self._settings)
         inspection = await self._notion.inspect_database(
             database_id,
-            self._settings.notion_name_prop,
-            self._settings.notion_date_prop,
-            self._settings.notion_recording_prop,
-            self._settings.notion_project_prop,
-            self._settings.notion_project_prop_type,
-            self._settings.notion_contacts_prop,
+            props.name_prop,
+            props.date_prop,
+            props.recording_prop,
+            props.project_prop,
+            props.project_prop_type,
+            props.contacts_prop,
+            props.contacts_mode,
+            props.contacts_relation_prop,
         )
         return DatabaseInspection(
             database_id=database_id,
@@ -110,7 +128,10 @@ async def configure_recruiter(
     inspection: DatabaseInspection | None = None,
     timezone_name: str = "UTC",
     mattermost_dm_channel: str = "",
+    notion_property_map: dict[str, Any] | None = None,
+    synology_interview_roots: Sequence[str] | None = None,
 ) -> RecruiterConfig:
+    """Create an inactive recruiter; omitted Notion keys / roots stay NULL (inherit global)."""
     normalized_email = email.strip().casefold()
     if normalized_email not in settings.yandex_refresh_tokens:
         raise ValueError("Yandex refresh token is not provisioned for recruiter")
@@ -124,9 +145,21 @@ async def configure_recruiter(
         canonical_timezone = ZoneInfo(timezone_name.strip()).key
     except (ValueError, ZoneInfoNotFoundError):
         raise ValueError("Recruiter timezone is invalid") from None
+    # Validate before any Notion call so a typo fails here, not deep in production.
+    resolved_map = merge_notion_property_map(settings, notion_property_map)
+    stored_map = (
+        NotionPropertyOverrides.model_validate(notion_property_map).model_dump(exclude_none=True)
+        if notion_property_map
+        else None
+    )
+    stored_roots = (
+        list(normalize_synology_roots(tuple(synology_interview_roots)))
+        if synology_interview_roots
+        else None
+    )
     database_id = parse_notion_database_id(notion_target)
     if inspection is None:
-        inspection = await inspector.inspect(database_id)
+        inspection = await inspector.inspect(database_id, resolved_map)
         _display_inspection(inspection)
     elif inspection.database_id != database_id:
         raise ValueError("Database inspection does not match explicit Notion target")
@@ -139,6 +172,8 @@ async def configure_recruiter(
         mattermost_dm_channel=mattermost_dm_channel.strip() or None,
         synology_base_folder=storage_prefix.strip(" /"),
         timezone=canonical_timezone,
+        notion_property_map=stored_map or None,
+        synology_interview_roots=stored_roots,
         active=False,
     )
     session.add(recruiter)
@@ -162,23 +197,24 @@ async def preflight_recruiter_notion(
     )
     if recruiter is None:
         raise ValueError("Inactive recruiter config not found")
+    props = resolve_notion_property_map(settings, recruiter)
     inspection = await notion.preflight_database(
         recruiter.notion_database_id,
         synthetic_page_id,
-        settings.notion_name_prop,
-        settings.notion_date_prop,
-        settings.notion_recording_prop,
-        settings.notion_project_prop,
-        settings.notion_project_prop_type,
-        settings.notion_contacts_prop,
+        props.name_prop,
+        props.date_prop,
+        props.recording_prop,
+        props.project_prop,
+        props.project_prop_type,
+        props.contacts_prop,
+        props.contacts_mode,
+        props.contacts_relation_prop,
     )
     if inspection.database_id != recruiter.notion_database_id:
         raise ValueError("Notion preflight returned another database")
     recruiter.notion_preflight_token_hash = notion_token_hash(settings)
     recruiter.notion_preflight_database_id = recruiter.notion_database_id
-    recruiter.notion_preflight_schema_hash = notion_schema_hash(
-        default_notion_property_map(settings)
-    )
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(props)
     recruiter.notion_preflight_synthetic_page_id = synthetic_page_id
     recruiter.notion_preflight_completed_at = datetime.now(UTC)
     await session.commit()
@@ -333,8 +369,12 @@ async def _run(args: argparse.Namespace) -> None:
         try:
             async with factory() as session:
                 if args.command == "configure":
+                    overrides = notion_overrides_from_args(args)
+                    roots = synology_roots_from_args(args)
                     database_id = parse_notion_database_id(args.notion)
-                    inspection = await inspector.inspect(database_id)
+                    inspection = await inspector.inspect(
+                        database_id, merge_notion_property_map(settings, overrides)
+                    )
                     _display_inspection(inspection)
                     confirmed = (
                         input("Create inactive recruiter config? [yes/no] ").strip() == "yes"
@@ -351,6 +391,8 @@ async def _run(args: argparse.Namespace) -> None:
                         inspection=inspection,
                         timezone_name=args.timezone,
                         mattermost_dm_channel=args.mattermost_dm_channel,
+                        notion_property_map=overrides,
+                        synology_interview_roots=roots,
                     )
                 else:
                     yandex = YandexProbe(YandexTokenManager(factory, settings, client))
@@ -398,7 +440,37 @@ async def _run(args: argparse.Namespace) -> None:
             await engine.dispose()
 
 
-def main() -> None:
+# CLI flag -> NotionPropertyMap key. Omitted flags leave the key unset (inherit global).
+NOTION_PROPERTY_FLAGS: dict[str, str] = {
+    "notion_name_prop": "name_prop",
+    "notion_date_prop": "date_prop",
+    "notion_recording_prop": "recording_prop",
+    "notion_project_prop": "project_prop",
+    "notion_project_prop_type": "project_prop_type",
+    "notion_contacts_mode": "contacts_mode",
+    "notion_contacts_prop": "contacts_prop",
+    "notion_contacts_relation_prop": "contacts_relation_prop",
+    "notion_contacts_target_prop": "contacts_target_prop",
+}
+
+
+def notion_overrides_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    overrides = {
+        key: getattr(args, flag)
+        for flag, key in NOTION_PROPERTY_FLAGS.items()
+        if getattr(args, flag, None) is not None
+    }
+    return overrides or None
+
+
+def synology_roots_from_args(args: argparse.Namespace) -> list[str] | None:
+    raw = getattr(args, "synology_roots", None)
+    if raw is None:
+        return None
+    return list(normalize_synology_roots(raw)) or None
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Operator-only recruiter onboarding")
     commands = parser.add_subparsers(dest="command", required=True)
     configure = commands.add_parser("configure", help="Create an inactive recruiter")
@@ -408,13 +480,29 @@ def main() -> None:
     configure.add_argument("--mattermost-dm-channel", required=True)
     configure.add_argument("--timezone", required=True)
     configure.add_argument("--storage-prefix", required=True)
+    for flag in NOTION_PROPERTY_FLAGS:
+        option = "--" + flag.replace("_", "-")
+        if flag == "notion_project_prop_type":
+            configure.add_argument(option, choices=get_args(ProjectPropType))
+        elif flag == "notion_contacts_mode":
+            configure.add_argument(option, choices=get_args(ContactsMode))
+        else:
+            configure.add_argument(option)
+    configure.add_argument(
+        "--synology-roots",
+        help="Per-recruiter Synology interview roots: JSON list or comma-separated paths",
+    )
     preflight = commands.add_parser("preflight", help="Run all inactive recruiter preflights")
     preflight.add_argument("--email", required=True)
     preflight.add_argument("--synthetic-page-id", required=True)
     preflight.add_argument("--default-calendar-id", required=True)
     activate = commands.add_parser("activate", help="Revalidate preflights and activate")
     activate.add_argument("--email", required=True)
-    asyncio.run(_run(parser.parse_args()))
+    return parser
+
+
+def main() -> None:
+    asyncio.run(_run(build_parser().parse_args()))
 
 
 if __name__ == "__main__":
