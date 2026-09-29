@@ -18,6 +18,7 @@ from app.db.engine import create_engine, create_session_factory
 from app.db.models.recruiter_calendar import RecruiterCalendar
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
+from app.services.recruiter_schema import default_notion_property_map
 from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import DISCOVERY_MAX_AGE, CalDAVClient
 from app.tools.mattermost import MattermostClient
@@ -175,7 +176,9 @@ async def preflight_recruiter_notion(
         raise ValueError("Notion preflight returned another database")
     recruiter.notion_preflight_token_hash = notion_token_hash(settings)
     recruiter.notion_preflight_database_id = recruiter.notion_database_id
-    recruiter.notion_preflight_schema_hash = notion_schema_hash(settings)
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     recruiter.notion_preflight_synthetic_page_id = synthetic_page_id
     recruiter.notion_preflight_completed_at = datetime.now(UTC)
     await session.commit()

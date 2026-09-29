@@ -33,6 +33,10 @@ class RecruiterConfig(Base):
     calendar_selection_updated_by: Mapped[str | None] = mapped_column(Text)
     calendar_selection_before: Mapped[dict[str, object] | None] = mapped_column(JSON)
     calendar_selection_after: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    # NULL means "inherit Settings.notion_*"; any subset of NotionPropertyMap keys overrides.
+    notion_property_map: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    # NULL/empty means "inherit Settings.synology_interview_roots".
+    synology_interview_roots: Mapped[list[str] | None] = mapped_column(JSON)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )

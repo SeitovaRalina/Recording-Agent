@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from app.config import Settings
 from app.db.models.recruiter_calendar import RecruiterCalendar
 from app.services.canary import notion_schema_hash, notion_token_hash
+from app.services.recruiter_schema import default_notion_property_map
 from app.tools.notion import NotionClient, NotionDatabaseInspection, NotionDataSourceSchema
 from tools.setup.configure_recruiter import (
     DatabaseInspection,
@@ -324,7 +325,9 @@ async def test_activation_fails_closed_then_activates_after_all_preflights(
 
     recruiter.notion_preflight_token_hash = notion_token_hash(settings)
     recruiter.notion_preflight_database_id = database_id
-    recruiter.notion_preflight_schema_hash = notion_schema_hash(settings)
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     recruiter.notion_preflight_synthetic_page_id = "synthetic-page"
     recruiter.notion_preflight_completed_at = datetime.now(UTC)
     session.add(  # type: ignore[attr-defined]

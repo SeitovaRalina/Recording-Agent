@@ -36,6 +36,7 @@ from app.scheduler.cron import (
 from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
+from app.services.recruiter_schema import default_notion_property_map
 from app.services.reviews import (
     InteractionBinding,
     InteractionBindingConflict,
@@ -743,7 +744,9 @@ async def test_unique_candidate_with_blank_spot_completes_after_marking_source()
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=True)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("pipeline")
@@ -1075,7 +1078,9 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found(f"restart-{initial_status.value}")
@@ -1146,7 +1151,9 @@ async def test_notion_card_update_outage_leaves_stored_recording_resumable(
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("notion-update-down")
@@ -1211,7 +1218,9 @@ async def test_resumed_synology_transfer_is_durable_and_reroutable() -> None:
     )
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("route-interview-resume")
@@ -1276,7 +1285,9 @@ async def test_concurrent_transfer_resume_has_single_side_effect_owner() -> None
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("concurrent-resume")
@@ -2049,7 +2060,9 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
     for owner in owners:
         owner.notion_preflight_token_hash = notion_token_hash(settings)
         owner.notion_preflight_database_id = owner.notion_database_id
-        owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+        owner.notion_preflight_schema_hash = notion_schema_hash(
+            default_notion_property_map(settings)
+        )
         owner.notion_preflight_synthetic_page_id = "synthetic-page"
         owner.notion_preflight_completed_at = datetime.now(UTC)
     items: list[Recording] = []
