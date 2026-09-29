@@ -33,3 +33,13 @@ Diff `7d5db01..a2e8097` (swarm-report excluded). Verdict: **ship**. `acceptance_
 
 Not covered by tests: the confirm 409/404 path, relation 403/404, and migration upgrade/downgrade
 (not applied locally).
+
+## Resolution (2026-09-30)
+
+All four findings are fixed in `3b37af1` and `321d1cc`. A 403/404 on the linked card now gives
+`emails=()`; 401, 429, 5xx and transport errors still raise. Confirm 409/404 tests were added. The
+legacy-hash test asserts `relation` as a precondition. A malformed override raises
+`DestinationRejectedError` or `PermissionError`, and the reassignment resolve/propose routes
+return 409 instead of 500. Verified by the orchestrator: `462 passed, 2 skipped`, ruff clean.
+Migration upgrade/downgrade is still untested locally; the deploy's `migrate` service is the
+first real run.
