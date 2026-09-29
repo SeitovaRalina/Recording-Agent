@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -6,6 +7,11 @@ from pydantic import SecretStr, ValidationError
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
+from app.services.destinations import DestinationRejectedError, DestinationService
+from app.services.notion_reassignment import (
+    NotionReassignmentRejectedError,
+    NotionReassignmentService,
+)
 from app.services.recruiter_schema import (
     NotionPropertyMap,
     default_notion_property_map,
@@ -119,6 +125,8 @@ def test_default_map_hash_matches_legacy_payload() -> None:
     import json
 
     settings = Settings()
+    # Equivalence holds only while the global project type is "relation" (legacy hardcoded it).
+    assert settings.notion_project_prop_type == "relation"
     legacy = {
         settings.notion_name_prop: "title",
         settings.notion_date_prop: "date",
@@ -189,3 +197,56 @@ def test_preflight_hashes_are_isolated_between_recruiters() -> None:
     with pytest.raises(PermissionError, match="Backend-token"):
         require_notion_preflight(settings, lilia)
     require_notion_preflight(settings, anton)
+
+
+@pytest.mark.parametrize(
+    "raw", ["/Recruiting-NE/2. Interviews", '["/Recruiting-NE/2. Interviews"]', {"a": "/x"}]
+)
+def test_non_list_synology_roots_are_rejected_not_split(raw: object) -> None:
+    settings = Settings(synology_interview_roots=("/home/Recruiting-E/2. Interviews external",))
+    recruiter = _recruiter()
+    recruiter.synology_interview_roots = raw  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="must be a JSON array"):
+        resolve_synology_roots(settings, recruiter)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("raw", ["/Recruiting-NE/2. Interviews", ["relative"]])
+async def test_destination_service_maps_bad_recruiter_roots_to_rejection(raw: object) -> None:
+    settings = Settings(synology_interview_roots=("/home/Recruiting-E/2. Interviews external",))
+    recruiter = _recruiter()
+    recruiter.synology_interview_roots = raw  # type: ignore[assignment]
+    synology = AsyncMock()
+    service = DestinationService(synology, settings)
+
+    with pytest.raises(DestinationRejectedError, match="interview roots are invalid"):
+        await service.preflight(recruiter)
+    synology.preflight.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [{"contacts_mode": "rollup"}, {"unknown_key": "x"}, ["Vacancy"], "Vacancy"],
+)
+def test_malformed_stored_map_is_recruiter_misconfiguration(raw: object) -> None:
+    settings = Settings(notion_writes_enabled=True, notion_token=SecretStr("backend-token"))
+    recruiter = _preflighted(settings, _recruiter())
+    recruiter.notion_property_map = raw  # type: ignore[assignment]
+
+    with pytest.raises(PermissionError, match="notion_property_map"):
+        resolve_notion_property_map(settings, recruiter)
+    # Preflight callers already catch PermissionError (cron marks notion_preflight failed).
+    with pytest.raises(PermissionError, match="notion_property_map"):
+        require_notion_preflight(settings, recruiter)
+
+
+@pytest.mark.anyio
+async def test_reassignment_maps_malformed_map_to_typed_rejection() -> None:
+    recruiter = _recruiter(notion_property_map={"contacts_mode": "rollup"})
+    notion = AsyncMock()
+    service = NotionReassignmentService(notion, Settings())
+
+    with pytest.raises(NotionReassignmentRejectedError, match="notion_property_map is invalid"):
+        await service.resolve_targets(recruiter, "hint")
+    notion.resolve_reassignment_targets.assert_not_awaited()

@@ -14,6 +14,10 @@ from app.db.engine import get_session
 from app.db.models.intent_replay import IntentReplay
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.notification_outbox import NotificationOutbox
+from app.db.models.notion_reassignment_proposal import (
+    NotionReassignmentProposal,
+    NotionReassignmentStatus,
+)
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.db.models.storage_destination import StorageDestination
@@ -29,6 +33,7 @@ from app.routers.tools import (
 )
 from app.scheduler.cron import ScanError, ScanSummary
 from app.services.destinations import DestinationService
+from app.services.notion_reassignment import NotionReassignmentService
 from app.services.question_queue import QuestionQueueService
 from app.services.reviews import (
     InteractionBindingConflict,
@@ -280,9 +285,7 @@ async def test_offline_scan_binding_race_returns_409_and_releases_intent(
     ):
         setattr(app.state, name, MagicMock())
     scan = AsyncMock(
-        side_effect=InteractionBindingConflict(
-            "Pending question belongs to another interaction"
-        )
+        side_effect=InteractionBindingConflict("Pending question belongs to another interaction")
     )
     monkeypatch.setattr("app.routers.tools.scan_recruiter", scan)
 
@@ -461,9 +464,7 @@ async def test_autonomous_destination_answer_validates_then_resumes_once(
     question = ManualReview(
         recording=recording,
         question_type="autonomous_routing_ambiguous",
-        question_context={
-            "choices": [{"destination_id": str(destination_id), "name": "Android"}]
-        },
+        question_context={"choices": [{"destination_id": str(destination_id), "name": "Android"}]},
         recruiter_user_id="trusted-user",
         mattermost_channel_id="trusted-dm",
         delivery_nonce="nonce",
@@ -610,9 +611,7 @@ async def test_route_interview_persists_destination_and_resumes_transfer(
     app.dependency_overrides[get_session] = override_session
     app.state.destination_service = DestinationService(
         AsyncMock(),
-        get_settings().model_copy(
-            update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}
-        ),
+        get_settings().model_copy(update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}),
     )
     app.state.session_factory = session_factory
     for name in (
@@ -708,9 +707,7 @@ async def test_route_interview_does_not_complete_intent_when_resume_is_busy(
     app.dependency_overrides[get_session] = override_session
     app.state.destination_service = DestinationService(
         AsyncMock(),
-        get_settings().model_copy(
-            update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}
-        ),
+        get_settings().model_copy(update={"synology_interview_roots": TEST_INTERVIEW_ROOTS}),
     )
     app.state.session_factory = session_factory
     for name in (
@@ -736,9 +733,7 @@ async def test_route_interview_does_not_complete_intent_when_resume_is_busy(
         },
     )
     intent = await session.scalar(
-        select(IntentReplay).where(
-            IntentReplay.operation == f"route-interview:{recording_id}"
-        )
+        select(IntentReplay).where(IntentReplay.operation == f"route-interview:{recording_id}")
     )
 
     assert response.status_code == 409
@@ -970,3 +965,125 @@ async def test_route_non_interview_closes_open_questions_of_the_recording(
     assert response.status_code == 200
     assert question.status == ManualReviewStatus.COMPLETED
     assert question.result == {"resumed_by": "route_non_interview"}
+
+
+async def _seed_reassignment_proposal(
+    session: AsyncSession,
+    *,
+    recruiter_active: bool,
+    recording_owner_email: str,
+) -> tuple[NotionReassignmentProposal, str]:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="trusted-dm",
+        active=recruiter_active,
+    )
+    recording = Recording(
+        disk_file_id="reassign-guard",
+        disk_path="disk:/reassign-guard.webm",
+        disk_filename="reassign-guard.webm",
+        disk_owner_email=recording_owner_email,
+        status=RecordingStatus.COMPLETED,
+        notion_page_id="source-page",
+        synology_share_url="https://nas.test/share/opaque",
+        version=3,
+    )
+    session.add_all([recruiter, recording])
+    await session.flush()
+    capability = "reassign-capability"
+    proposal = NotionReassignmentProposal(
+        recording_id=recording.id,
+        recruiter_user_id="trusted-user",
+        dm_channel_id="trusted-dm",
+        source_page_id="source-page",
+        target_page_id="target-page",
+        recording_version=3,
+        source_snapshot={"files": []},
+        target_snapshot={"files": []},
+        capability_hash=hashlib.sha256(capability.encode()).hexdigest(),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    session.add(proposal)
+    await session.commit()
+    return proposal, capability
+
+
+def _install_reassignment_service(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> MagicMock:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    notion = MagicMock()
+    notion.get_recording_field = AsyncMock(return_value={"files": []})
+    notion.replace_recording_link = AsyncMock()
+    notion.clear_recording_link = AsyncMock()
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(
+        app.state,
+        "notion_reassignment_service",
+        NotionReassignmentService(notion, get_settings()),
+        raising=False,
+    )
+    return notion
+
+
+@pytest.mark.anyio
+async def test_confirm_reassignment_rejects_other_recruiters_recording_without_notion_calls(
+    async_client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, capability = await _seed_reassignment_proposal(
+        session, recruiter_active=True, recording_owner_email="other@example.com"
+    )
+    notion = _install_reassignment_service(session, monkeypatch)
+
+    response = await async_client.post(
+        f"/tools/notion-reassignment/{proposal.id}/confirm",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "capability": capability,
+            "idempotency_key": "reassign-0001",
+        },
+    )
+    await session.refresh(proposal)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Recording not found"
+    notion.get_recording_field.assert_not_awaited()
+    notion.replace_recording_link.assert_not_awaited()
+    notion.clear_recording_link.assert_not_awaited()
+    assert proposal.status == NotionReassignmentStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_confirm_reassignment_rejects_inactive_recruiter_binding(
+    async_client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, capability = await _seed_reassignment_proposal(
+        session, recruiter_active=False, recording_owner_email="r@example.com"
+    )
+    notion = _install_reassignment_service(session, monkeypatch)
+
+    response = await async_client.post(
+        f"/tools/notion-reassignment/{proposal.id}/confirm",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "trusted-user",
+            "mattermost_dm_channel_id": "trusted-dm",
+            "capability": capability,
+            "idempotency_key": "reassign-0001",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Active recruiter DM binding not found"
+    notion.get_recording_field.assert_not_awaited()

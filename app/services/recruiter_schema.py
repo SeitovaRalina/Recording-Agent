@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
@@ -90,9 +90,18 @@ def merge_notion_property_map(
 def resolve_notion_property_map(
     settings: Settings, recruiter: RecruiterConfig | None
 ) -> NotionPropertyMap:
-    """Recruiter-specific Notion map; NULL column (or no recruiter) means global defaults."""
+    """Recruiter-specific Notion map; NULL column (or no recruiter) means global defaults.
+
+    A malformed stored map is recruiter misconfiguration: it raises PermissionError, the type
+    callers already handle for recruiter scope/preflight failures.
+    """
     raw = recruiter.notion_property_map if recruiter is not None else None
-    return merge_notion_property_map(settings, raw)
+    if raw is not None and not isinstance(raw, dict):
+        raise PermissionError("Recruiter notion_property_map must be a JSON object")
+    try:
+        return merge_notion_property_map(settings, raw)
+    except ValidationError as error:
+        raise PermissionError("Recruiter notion_property_map is invalid") from error
 
 
 def normalize_synology_roots(value: Any) -> tuple[str, ...]:
@@ -106,6 +115,9 @@ def resolve_synology_roots(
 ) -> tuple[str, ...]:
     """Recruiter roots when set and non-empty, otherwise `Settings.synology_interview_roots`."""
     raw = recruiter.synology_interview_roots if recruiter is not None else None
+    if raw is not None and not isinstance(raw, list):
+        # tuple() of a str/dict would split it into characters/keys.
+        raise ValueError("Recruiter synology_interview_roots must be a JSON array")
     if raw:
         return normalize_synology_roots(tuple(raw))
     return settings.synology_interview_roots if settings is not None else ()

@@ -25,7 +25,12 @@ class DestinationService:
 
     def _roots(self, recruiter: RecruiterConfig) -> tuple[str, ...]:
         """Allowed interview roots for this recruiter (NULL column -> global Settings)."""
-        return resolve_synology_roots(self._settings, recruiter)
+        try:
+            return resolve_synology_roots(self._settings, recruiter)
+        except ValueError as error:
+            raise DestinationRejectedError(
+                f"Recruiter Synology interview roots are invalid: {error}"
+            ) from error
 
     async def preflight(self, recruiter: RecruiterConfig) -> SynologyPreflight:
         roots = self._roots(recruiter)

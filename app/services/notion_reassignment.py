@@ -16,7 +16,7 @@ from app.db.models.notion_reassignment_proposal import (
 )
 from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
-from app.services.recruiter_schema import resolve_notion_property_map
+from app.services.recruiter_schema import NotionPropertyMap, resolve_notion_property_map
 from app.tools.notion import NotionClient, NotionPage
 
 
@@ -37,8 +37,14 @@ class NotionReassignmentService:
         self._notion = notion
         self._settings = settings
 
+    def _props(self, recruiter: RecruiterConfig) -> NotionPropertyMap:
+        try:
+            return resolve_notion_property_map(self._settings, recruiter)
+        except PermissionError as error:
+            raise NotionReassignmentRejectedError(str(error)) from error
+
     async def resolve_targets(self, recruiter: RecruiterConfig, hint: str) -> list[NotionPage]:
-        props = resolve_notion_property_map(self._settings, recruiter)
+        props = self._props(recruiter)
         return await self._notion.resolve_reassignment_targets(
             recruiter.notion_database_id,
             hint,
@@ -65,7 +71,7 @@ class NotionReassignmentService:
     ) -> ReassignmentProposalResult:
         if not recording.notion_page_id or not recording.synology_share_url:
             raise NotionReassignmentRejectedError("Recording lacks an active Notion link")
-        recording_prop = resolve_notion_property_map(self._settings, recruiter).recording_prop
+        recording_prop = self._props(recruiter).recording_prop
         source = await self._notion.get_recording_field(recording.notion_page_id, recording_prop)
         target_snapshot = await self._notion.get_recording_field(target.id, recording_prop)
         capability = secrets.token_urlsafe(32)
@@ -131,7 +137,7 @@ class NotionReassignmentService:
             )
         if recording.disk_owner_email != recruiter.email:
             raise NotionReassignmentRejectedError("Recording not found")
-        recording_prop = resolve_notion_property_map(self._settings, recruiter).recording_prop
+        recording_prop = self._props(recruiter).recording_prop
         target_written = (
             proposal.result is not None and proposal.result.get("phase") == "target_written"
         )

@@ -59,6 +59,8 @@ def notion_schema_hash(property_map: NotionPropertyMap) -> str:
         if property_map.contacts_mode == "relation":
             payload[property_map.contacts_relation_prop] = "relation"
             payload["@contacts_target_prop"] = property_map.contacts_target_prop
+    # Legacy hardcoded "relation" here; the default map inherits NOTION_PROJECT_PROP_TYPE, which
+    # is "relation" in prod, so the default shape still hashes to the legacy payload.
     payload[property_map.project_prop] = property_map.project_prop_type
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
