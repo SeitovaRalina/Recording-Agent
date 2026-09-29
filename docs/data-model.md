@@ -1,7 +1,7 @@
 ---
 type: reference
 status: target
-last_updated: 2026-07-22
+last_updated: 2026-09-30
 sources:
   - .memory-bank/architecture.md
   - .memory-bank/decisions.md
@@ -61,6 +61,25 @@ metadata. They must not contain secrets or raw third-party payloads.
 Operator-owned recruiter configuration contains stable recruiter identity, allowlisted Mattermost
 user and exact DM channel, configured IANA timezone, Notion database ID, storage root, calendar
 selection version, enablement flags, and scheduler activation state.
+
+Two nullable JSON columns make the Notion schema and the Synology interview roots per-recruiter.
+NULL means "inherit the global `Settings` value", so existing rows need no backfill:
+
+- `notion_property_map` — any subset of `name_prop`, `date_prop`, `recording_prop`,
+  `project_prop`, `project_prop_type` (`rich_text` | `relation`), `contacts_mode`
+  (`none` | `formula` | `relation`), `contacts_prop`, `contacts_relation_prop`,
+  `contacts_target_prop`. Resolution is per field: a missing key falls back to the matching
+  `Settings.notion_*` value (`contacts_mode` falls back to `formula`). Unknown keys or values are
+  rejected by `app/services/recruiter_schema.py` when `configure_recruiter.py configure` writes
+  the row.
+- `synology_interview_roots` — list of absolute Synology paths allowed for destination
+  discovery, transfer, and reroute. Normalized like `SYNOLOGY_INTERVIEW_ROOTS` (trailing `/`
+  stripped, deduplicated). NULL or empty inherits `Settings.synology_interview_roots`. This is
+  separate from `synology_base_folder`, the default upload prefix.
+
+The stored Notion preflight schema hash is computed from the recruiter's resolved map, so changing
+one recruiter's map invalidates only that recruiter's preflight. The global-default map hashes to
+the same value as before per-recruiter maps existed.
 
 The schedule is fixed at 18:00 in the recruiter's configured local timezone. The scheduler is
 disabled by default and remains disabled through manual canary. Manual message-triggered scan and

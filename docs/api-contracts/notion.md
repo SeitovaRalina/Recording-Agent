@@ -1,7 +1,7 @@
 ---
 type: reference
 status: current
-last_updated: 2026-07-16
+last_updated: 2026-09-30
 sources:
   - https://developers.notion.com/guides/get-started/upgrade-guide-2025-09-03
   - https://developers.notion.com/reference/retrieve-a-database
@@ -38,15 +38,44 @@ Candidate lookup resolves a queryable data source at runtime:
 1. `GET /v1/databases/{database_id}`.
 2. Parse the returned `data_sources` descriptors.
 3. For every descriptor, call `GET /v1/data_sources/{data_source_id}`.
-4. Validate configured properties against the retrieved data-source schema:
-   - `notion_name_prop` must have type `title`.
-   - `notion_date_prop` must have type `date`.
-   - `notion_recording_prop` must have type `files`.
+4. Validate the recruiter's resolved property map against the retrieved data-source schema:
+   - `name_prop` must have type `title`.
+   - `date_prop` must have type `date`.
+   - `recording_prop` must have type `files`.
+   - `project_prop`, when set, must have type `relation` and `project_prop_type` must be
+     `relation`.
+   - Contacts depend on `contacts_mode`: `none` checks nothing; `formula` requires
+     `contacts_prop` of type `formula`; `relation` requires `contacts_relation_prop` of type
+     `relation`.
 5. Select the source only when exactly one schema is compatible.
 
 Zero compatible sources is a schema error. More than one compatible source is an ambiguity error.
 Source ordering must never choose a winner. Successful resolution may be cached in process by the
-database ID and all three configured property names, but the cache must be bounded.
+database ID and every configured property name, project type, and contacts mode, but the cache
+must be bounded.
+
+## Per-recruiter property map
+
+Property names are resolved per recruiter by `resolve_notion_property_map`
+(`app/services/recruiter_schema.py`). `recruiter_config.notion_property_map` may override any
+subset of keys; every missing key falls back to the global `NOTION_*_PROP` settings, and a NULL
+column means the global map. The same resolved map drives candidate search, reassignment,
+page updates, the operator preflight, and the preflight schema hash.
+
+## Candidate contacts
+
+Contacts are only a supplementary matching signal; they never block a match.
+
+- `none` — the database has no contacts field; pages carry no emails.
+- `formula` — `contacts_prop` is a formula rendering a string; emails are extracted from it.
+- `relation` — the interview page links to a candidate card through `contacts_relation_prop`.
+  With exactly one link, the backend retrieves that page (`GET /v1/pages/{page_id}`) and extracts
+  emails from its `contacts_target_prop` rich_text value, caching per linked page within one
+  query. Zero links, several links, a malformed relation, or a missing / non-rich_text target
+  property yield no emails. The operator preflight does not check the target property on the
+  linked database; a mismatch soft-fails at runtime to no emails.
+
+All modes use the same email extraction: valid addresses only, lowercased, deduplicated.
 
 When a cached source query returns source-not-found, invalidate the cache entry, rediscover, and
 retry the query exactly once. Do not retry authentication, sharing, schema, ambiguity, or arbitrary
@@ -157,6 +186,7 @@ exists, or multiple schemas are compatible. Never resolve ambiguity by response 
 
 - One `NOTION_TOKEN` serves the shared workspace.
 - Each recruiter supplies an original database ID through configuration.
+- Each recruiter may supply its own property map; otherwise the global defaults apply.
 - Runtime discovery supplies data-source IDs; they are neither configured nor persisted.
-- Known property defaults are `Name`, `General Interview Date`, and
-  `General Interview recording`.
+- Known global property defaults are `Name`, `General Interview Date`,
+  `General Interview recording`, `📍 Spots` (relation), and `TBD` (formula contacts).
