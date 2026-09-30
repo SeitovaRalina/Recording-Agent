@@ -42,11 +42,13 @@ release, migration, skill files, flags and logs afterwards.
 
 ## Multi-tenancy on production (2026-09-30)
 
-The user chose a manual rollout before merging to `main`. Commit `022c173` (branch pushed) was
-built by `canary-build` run 36662325389, which produced image
-`…@sha256:9de7cec2…`. At 03:06 UTC the image was rolled out with the steps from `deploy.sh`: stop
-backend → `pg_dump` backup
-`/var/backups/recording-agent/20260930T030620Z-022c173…-manual.dump` (verified) → `migrate`
+The user chose a manual rollout before merging to `main`. Commit `a5cec1d` (branch pushed, then
+squashed later the same day — see `backup/pre-squash-20260930` for the pre-squash hashes; the
+deployed commit was `022c173` before the rewrite) was built by `canary-build` run 36662325389,
+which produced image `…@sha256:9de7cec2…`. At 03:06 UTC the image was rolled out with the steps
+from `deploy.sh`: stop backend → `pg_dump` backup
+`/var/backups/recording-agent/20260930T030620Z-022c173…-manual.dump` (filename keeps the
+pre-squash hash it was made under; verified) → `migrate`
 (`20260729_1100 → 20260930_1000`) → backend on the new image (healthy, ~10 s downtime). Compose,
 the skill and `current` still point to release `bd40428` (unchanged files). The PR → `main` → CI
 deploy later reconciles the release dir; `upgrade head` will then be a no-op. Rollback: backend on
@@ -67,7 +69,8 @@ Lilia's onboarding progress (2026-09-30):
   `backend.env.bak-20260930T034856Z`), and the backend was recreated on the new image. `configure`
   created an inactive row with the map above. `synology_base_folder` was fixed by hand to
   `/Recruiting-NE/2. Interviews`: configure stripped the leading `/`; the code is fixed in
-  `43729df`, not deployed yet. Her calendar was discovered (`Мои события`, row `1192d414-…`), and
+  `46d9505` (pre-squash `43729df`), not deployed yet. Her calendar was discovered (`Мои события`,
+  row `1192d414-…`), and
   `preflight` passed (Yandex, CalDAV, Mattermost, Synology root, Notion).
 - Done by the user at 03:59 UTC (the auto-mode classifier blocks the agent from secret writes
   and account/allowlist changes): `activate`, her id in Mila's `allowFrom` (backup
@@ -75,7 +78,7 @@ Lilia's onboarding progress (2026-09-30):
   Mattermost is connected as `@bot.recordings_saver`. The Gateway start-up warnings (EROFS
   last-good, loopback callbackUrl, empty plugins.allow, OpenRouter pricing 403) predate this change.
 - Left: her first scan (daily run or a request to Mila in her DM), then PR → `main` → CI deploy.
-  That deploy brings `43729df` and moves the release dir; the migration is already applied.
+  That deploy brings `46d9505` and moves the release dir; the migration is already applied.
 
 ## Next steps (as of 2026-09-29 evening)
 
