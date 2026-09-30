@@ -15,6 +15,7 @@ from app.tools.notion import NotionClient, NotionDatabaseInspection, NotionDataS
 from tools.setup.configure_recruiter import (
     DatabaseInspection,
     NotionInspector,
+    _storage_base_folder,
     activate_recruiter,
     configure_recruiter,
     parse_notion_database_id,
@@ -64,6 +65,21 @@ async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
     assert inspection.property_types["Name"] == "title"
     assert database_route.call_count == 1
     assert schema_route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "prefix", "expected"),
+    [
+        ("synology", "/Recruiting-NE/2. Interviews/", "/Recruiting-NE/2. Interviews"),
+        ("synology", "Recruiting-NE/2. Interviews", "/Recruiting-NE/2. Interviews"),
+        ("minio", "/test-prefix/", "test-prefix"),
+    ],
+)
+def test_storage_base_folder_is_absolute_only_for_synology(
+    provider: str, prefix: str, expected: str
+) -> None:
+    settings = Settings.model_construct(storage_provider=provider)
+    assert _storage_base_folder(settings, prefix) == expected
 
 
 def test_parse_explicit_notion_target() -> None:

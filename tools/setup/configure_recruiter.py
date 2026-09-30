@@ -115,6 +115,12 @@ def parse_notion_database_id(value: str) -> str:
     return str(uuid.UUID(match.group(1)))
 
 
+def _storage_base_folder(settings: Settings, storage_prefix: str) -> str:
+    # Synology File Station paths must be absolute; MinIO prefixes are bare object-key prefixes.
+    prefix = storage_prefix.strip(" /")
+    return f"/{prefix}" if settings.storage_provider == "synology" else prefix
+
+
 async def configure_recruiter(
     session: AsyncSession,
     inspector: DatabaseInspector,
@@ -170,7 +176,7 @@ async def configure_recruiter(
         notion_database_id=database_id,
         mattermost_user_id=mattermost_user_id.strip(),
         mattermost_dm_channel=mattermost_dm_channel.strip() or None,
-        synology_base_folder=storage_prefix.strip(" /"),
+        synology_base_folder=_storage_base_folder(settings, storage_prefix),
         timezone=canonical_timezone,
         notion_property_map=stored_map or None,
         synology_interview_roots=stored_roots,
