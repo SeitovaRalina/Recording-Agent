@@ -22,10 +22,65 @@ agent session should read this file right after `index.md`.
 - SSH to the server needs the passphrase-protected key `~/.ssh/access_K0DE` loaded into the
   Windows ssh-agent (the user does `ssh-add`; never handle the passphrase).
 
+## Deployment path (decided 2026-09-30)
+
+The canary stack from `deploy/README.md` («Canary and activation») is NOT viable: the server runs
+out of resources and falls over when it runs next to production. Changes go straight to
+production. During the E2E week this was done by hot-swapping the backend image in the prod
+Compose stack (`docker compose up -d --no-deps backend` with a `canary-build` image) — that path
+skips the `migrate` service, the DB backup and the release checks, so it is FORBIDDEN for any
+change with an Alembic migration (multi-tenancy has one).
+
+Use the regular path instead: PR → `main` → CI → Deploy. `deploy.sh` checks the single Alembic
+head against `deploy/release-metadata.json`, stops the old backend, takes and validates a
+`pg_dump` backup, runs `alembic upgrade head` via the `migrate` service and recovers the previous
+image when the migration is declared compatible. For multi-tenancy: additive, nullable columns
+(empty = global defaults) so the old app works on the new schema; update
+`deploy/release-metadata.json` in the same PR (new target revision, `expand-contract`,
+`previousApplicationCompatibleWithTargetSchema=true`); deploy at an agreed quiet time; verify the
+release, migration, skill files, flags and logs afterwards.
+
+## Multi-tenancy on production (2026-09-30)
+
+The user chose a manual rollout before merging to `main`. Commit `022c173` (branch pushed) was
+built by `canary-build` run 36662325389, which produced image
+`…@sha256:9de7cec2…`. At 03:06 UTC the image was rolled out with the steps from `deploy.sh`: stop
+backend → `pg_dump` backup
+`/var/backups/recording-agent/20260930T030620Z-022c173…-manual.dump` (verified) → `migrate`
+(`20260729_1100 → 20260930_1000`) → backend on the new image (healthy, ~10 s downtime). Compose,
+the skill and `current` still point to release `bd40428` (unchanged files). The PR → `main` → CI
+deploy later reconciles the release dir; `upgrade head` will then be a no-op. Rollback: backend on
+the old image `…@sha256:f1003091…` (schema compatible). Ralina's row: both new columns NULL; her
+stored preflight hash matches and `require_notion_preflight` passes on the new code.
+
+Lilia's Notion was verified read-only with the new code. Interviews DB: `Candidate` (relation →
+Candidates) and `Vacancy` (relation). The test card resolves via `search_pages`: vacancy resolved,
+the linked candidate card is readable, and its `Contacts` is empty. Onboarding flags:
+`--notion-project-prop Vacancy --notion-project-prop-type relation --notion-contacts-mode relation
+--notion-contacts-relation-prop Candidate --notion-contacts-target-prop Contacts
+--synology-roots "/Recruiting-NE/2. Interviews"`. `.env.lilya` has
+`LILYA_STORAGE_PREFIX=/home/Recruiting-E`, which contradicts the 29.09 decision; use
+`/Recruiting-NE/2. Interviews` (confirmed by the user 2026-09-30).
+
+Lilia's onboarding progress (2026-09-30):
+- Done: the user merged her Yandex keys into `backend.env` (backup
+  `backend.env.bak-20260930T034856Z`), and the backend was recreated on the new image. `configure`
+  created an inactive row with the map above. `synology_base_folder` was fixed by hand to
+  `/Recruiting-NE/2. Interviews`: configure stripped the leading `/`; the code is fixed in
+  `43729df`, not deployed yet. Her calendar was discovered (`Мои события`, row `1192d414-…`), and
+  `preflight` passed (Yandex, CalDAV, Mattermost, Synology root, Notion).
+- Done by the user at 03:59 UTC (the auto-mode classifier blocks the agent from secret writes
+  and account/allowlist changes): `activate`, her id in Mila's `allowFrom` (backup
+  `/etc/openclaw/openclaw.json.bak-20260930T035910Z`), Gateway restart. Gateway is active, and
+  Mattermost is connected as `@bot.recordings_saver`. The Gateway start-up warnings (EROFS
+  last-good, loopback callbackUrl, empty plugins.allow, OpenRouter pricing 403) predate this change.
+- Left: her first scan (daily run or a request to Mila in her DM), then PR → `main` → CI deploy.
+  That deploy brings `43729df` and moves the release dir; the migration is already applied.
+
 ## Next steps (as of 2026-09-29 evening)
 
 1. **Multi-tenancy first** (item 0). The 29.09 update to the lead already reports it as done, so
-   it must land next: `/plan` → `/build` → tests → canary deploy. Per-recruiter Notion property
+   it must land next: `/plan` → `/build` → tests → PR → regular deploy (see «Deployment path»; no canary stack). Per-recruiter Notion property
    mapping (name, date, recording, project/vacancy relation + its type, optional contacts) and
    per-recruiter Synology interview roots, stored per recruiter via an Alembic migration, global
    settings as defaults, schema preflight per recruiter. Lilia: `Vacancy` relation, no contacts,
