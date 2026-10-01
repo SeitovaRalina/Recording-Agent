@@ -332,6 +332,27 @@ async def activate_recruiter(
     return recruiter
 
 
+async def set_daily_digest(
+    session: AsyncSession,
+    *,
+    recruiter_email: str,
+    enabled: bool,
+) -> RecruiterConfig:
+    """Toggle the 18:00 Mattermost digest for an existing recruiter (active or inactive).
+
+    The scheduled scan, Notion write-back and Synology transfer are unaffected — this only
+    silences the automatic summary message.
+    """
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email.strip().casefold())
+    )
+    if recruiter is None:
+        raise ValueError("Recruiter config not found")
+    recruiter.daily_digest_enabled = enabled
+    await session.commit()
+    return recruiter
+
+
 async def _inactive_recruiter(session: AsyncSession, recruiter_email: str) -> RecruiterConfig:
     recruiter = await session.scalar(
         select(RecruiterConfig).where(
@@ -432,7 +453,9 @@ async def _run(args: argparse.Namespace) -> None:
                                 else None
                             ),
                         )
-                    elif input("Activate recruiter? [yes/no] ").strip() == "yes":
+                    elif args.command == "activate":
+                        if input("Activate recruiter? [yes/no] ").strip() != "yes":
+                            raise ValueError("Operator confirmation is required")
                         await activate_recruiter(
                             session,
                             settings,
@@ -440,8 +463,19 @@ async def _run(args: argparse.Namespace) -> None:
                             yandex_probe=yandex,
                             mattermost=mattermost,
                         )
-                    else:
-                        raise ValueError("Operator confirmation is required")
+                    elif args.command == "set-digest":
+                        enabled = args.state == "enabled"
+                        prompt = "enable" if enabled else "disable"
+                        if (
+                            input(f"{prompt.capitalize()} the 18:00 digest? [yes/no] ").strip()
+                            != "yes"
+                        ):
+                            raise ValueError("Operator confirmation is required")
+                        recruiter = await set_daily_digest(
+                            session, recruiter_email=args.email, enabled=enabled
+                        )
+                        state = recruiter.daily_digest_enabled
+                        print(f"{recruiter.email}: daily_digest_enabled={state}")
         finally:
             await engine.dispose()
 
@@ -504,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--default-calendar-id", required=True)
     activate = commands.add_parser("activate", help="Revalidate preflights and activate")
     activate.add_argument("--email", required=True)
+    set_digest = commands.add_parser(
+        "set-digest", help="Enable or disable an existing recruiter's 18:00 digest message"
+    )
+    set_digest.add_argument("--email", required=True)
+    set_digest.add_argument("--state", required=True, choices=["enabled", "disabled"])
     return parser
 
 

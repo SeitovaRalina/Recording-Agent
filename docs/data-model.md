@@ -85,6 +85,11 @@ The schedule is fixed at 18:00 in the recruiter's configured local timezone. The
 disabled by default and remains disabled through manual canary. Manual message-triggered scan and
 status intents remain available while the scheduler is disabled.
 
+`daily_digest_enabled` (`NOT NULL DEFAULT true`) silences only the 18:00 Mattermost summary
+message for one recruiter; the scheduled scan, matching, transfer and Notion write-back are
+unaffected, and the manual-review auto-complete/suppress hygiene inside `build_digest` still runs.
+Set it with `configure_recruiter.py set-digest --email <email> --state enabled|disabled`.
+
 ### Calendar inventory and provenance
 
 `recruiter_calendar` is the authoritative inventory of recruiter-owned CalDAV VEVENT collections.

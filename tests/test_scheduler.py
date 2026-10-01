@@ -698,6 +698,48 @@ async def test_scheduled_scan_abort_skips_digest_and_preserves_retryable_failed_
     assert digest.status == QuestionDigestStatus.FAILED
 
 
+@pytest.mark.anyio
+async def test_digest_disabled_recruiter_still_scans_but_skips_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "user"
+    owner.mattermost_dm_channel = "dm"
+    owner.timezone = "UTC"
+    owner.daily_digest_enabled = False
+    async with factory() as session:
+        session.add(owner)
+        await session.commit()
+    scan = AsyncMock(return_value=ScanSummary())
+    monkeypatch.setattr("app.scheduler.cron.scan_recruiter", scan)
+    questions = AsyncMock()
+    now = datetime(2026, 7, 22, 18, tzinfo=UTC)
+
+    await run_due_recruiter_summaries(
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        MagicMock(),
+        Settings(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        questions,
+        now,
+    )
+    await engine.dispose()
+
+    scan.assert_awaited_once()
+    questions.build_digest.assert_awaited_once()
+    assert questions.build_digest.await_args.kwargs["send"] is False
+
+
 def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

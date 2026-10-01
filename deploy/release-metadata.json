@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "targetAlembicRevision": "20260930_1000",
+  "targetAlembicRevision": "20261001_0900",
   "previousApplicationCompatibleWithTargetSchema": true,
   "migrationStrategy": "expand-contract",
   "failurePolicy": "automatic-application-rollback",
   "reviewPolicy": "code-owner-and-production-environment-approver",
-  "rationale": "20260930_1000 only adds two nullable JSON columns to recruiter_config; NULL means the global defaults, and the previous application never selects them, so it runs unchanged on the new schema."
+  "rationale": "20261001_0900 adds a NOT NULL DEFAULT true recruiter_config column the previous application never selects, so it runs unchanged on the new schema."
 }

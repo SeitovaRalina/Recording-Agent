@@ -30,9 +30,7 @@ QuestionAction = Literal["resolve", "ignore"]
 SETTLED_RECORDING_STATUSES = (RecordingStatus.COMPLETED, RecordingStatus.IGNORED)
 
 
-_FOLDER_QUESTION_TYPES = frozenset(
-    {"storage_destination_required", "autonomous_routing_no_match"}
-)
+_FOLDER_QUESTION_TYPES = frozenset({"storage_destination_required", "autonomous_routing_no_match"})
 _QUESTION_LABELS = {
     "low_confidence": "подтвердите событие календаря",
     "no_compatible_event": "событие календаря не найдено — это собеседование?",
@@ -226,6 +224,7 @@ class QuestionQueueService:
         recruiter_user_id: str,
         dm_channel_id: str,
         local_date: date,
+        send: bool = True,
     ) -> QuestionDigest | None:
         await self._validate_dm(session, recruiter_user_id, dm_channel_id)
         dedupe_key = f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}"
@@ -297,7 +296,7 @@ class QuestionQueueService:
             .unique()
             .all()
         )
-        if not questions:
+        if not send or not questions:
             if existing is not None:
                 existing.status = QuestionDigestStatus.SENT
                 existing.sent_at = now

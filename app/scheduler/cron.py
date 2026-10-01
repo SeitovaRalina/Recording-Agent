@@ -53,9 +53,9 @@ SUMMARY_LOCAL_HOUR = 18
 SUMMARY_LOCAL_MINUTE = 0
 SUMMARY_CLAIM_TTL = timedelta(minutes=15)
 NOTION_TEMPORARILY_UNAVAILABLE = "notion_temporarily_unavailable"
-_SCAN_LOCKS: WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
-] = WeakKeyDictionary()
+_SCAN_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    WeakKeyDictionary()
+)
 
 TRANSFER_RESUMABLE_STATUSES = (
     RecordingStatus.CALENDAR_EVENT_FOUND,
@@ -343,19 +343,13 @@ async def _validate_offline_interaction_binding(
                 Recording.disk_owner_email == recruiter.email,
                 ManualReview.status == ManualReviewStatus.PENDING,
                 or_(
-                    ManualReview.recruiter_user_id.is_distinct_from(
-                        binding.recruiter_user_id
-                    ),
-                    ManualReview.mattermost_channel_id.is_distinct_from(
-                        binding.dm_channel_id
-                    ),
+                    ManualReview.recruiter_user_id.is_distinct_from(binding.recruiter_user_id),
+                    ManualReview.mattermost_channel_id.is_distinct_from(binding.dm_channel_id),
                 ),
             )
         )
     if conflicting is not None:
-        raise InteractionBindingConflict(
-            "Pending question belongs to another interaction"
-        )
+        raise InteractionBindingConflict("Pending question belongs to another interaction")
 
 
 async def _resume_transfer_recording(
@@ -1676,6 +1670,7 @@ async def run_due_recruiter_summaries(
                     recruiter_user_id=recruiter.mattermost_user_id,
                     dm_channel_id=recruiter.mattermost_dm_channel,
                     local_date=local_date,
+                    send=recruiter.daily_digest_enabled,
                 )
                 await session.commit()
         except Exception:

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models.manual_review import ManualReview, ManualReviewStatus
 from app.db.models.notification_outbox import NotificationOutbox, OutboxStatus
+from app.db.models.question_digest import QuestionDigest, QuestionDigestStatus
 from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
@@ -133,6 +134,58 @@ async def test_digest_rotates_digest_bound_capability_with_next_day_ttl(
     assert question.token_expires_at >= before + timedelta(hours=24)
     capability = reviews.capability_token(question)
     assert question.token_hash == hashlib.sha256(capability.encode()).hexdigest()
+
+
+@pytest.mark.anyio
+async def test_digest_send_false_skips_message_but_keeps_hygiene(session: AsyncSession) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    settled = _question("settled", "unused-1")
+    settled.recording.status = RecordingStatus.COMPLETED
+    pending = _question("pending", "unused-2")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            settled,
+            pending,
+            # Simulates the claim cron.py takes before calling build_digest.
+            QuestionDigest(
+                recruiter_user_id="recruiter",
+                mattermost_channel_id="dm",
+                local_date=date(2026, 10, 1),
+            ),
+        ]
+    )
+    await session.commit()
+
+    digest = await service.build_digest(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        local_date=date(2026, 10, 1),
+        send=False,
+    )
+
+    assert digest is None
+    await session.refresh(settled)
+    assert settled.status == ManualReviewStatus.COMPLETED
+    assert settled.result == {"closed_by": "recording_settled"}
+    assert pending.status == ManualReviewStatus.PENDING
+    assert pending.automatic_delivery_count == 0
+    summary = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "summary")
+    )
+    assert summary is None
+    stored = await session.scalar(select(QuestionDigest))
+    assert stored is not None
+    assert stored.status == QuestionDigestStatus.SENT
 
 
 @pytest.mark.anyio

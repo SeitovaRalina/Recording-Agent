@@ -6,9 +6,11 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models.recruiter_calendar import RecruiterCalendar
+from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.recruiter_schema import default_notion_property_map
 from app.tools.notion import NotionClient, NotionDatabaseInspection, NotionDataSourceSchema
@@ -21,6 +23,7 @@ from tools.setup.configure_recruiter import (
     parse_notion_database_id,
     preflight_recruiter,
     preflight_recruiter_notion,
+    set_daily_digest,
 )
 
 
@@ -128,6 +131,31 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
     assert recruiter.timezone == "Asia/Omsk"
     assert recruiter.mattermost_dm_channel == "dm-channel"
     inspector.inspect.assert_awaited_once()
+    assert recruiter.daily_digest_enabled is True
+
+
+@pytest.mark.anyio
+async def test_set_daily_digest_toggles_existing_active_recruiter(session: AsyncSession) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="/root",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    disabled = await set_daily_digest(session, recruiter_email="R@example.com", enabled=False)
+    assert disabled.daily_digest_enabled is False
+
+    enabled = await set_daily_digest(session, recruiter_email="r@example.com", enabled=True)
+    assert enabled.daily_digest_enabled is True
+
+
+@pytest.mark.anyio
+async def test_set_daily_digest_rejects_unknown_recruiter(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        await set_daily_digest(session, recruiter_email="missing@example.com", enabled=False)
 
 
 @pytest.mark.anyio
