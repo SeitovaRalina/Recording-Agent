@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.engine import create_engine, create_session_factory
 from app.db.models.recording import Recording, RecordingStatus
-from app.services.matching import normalize_title, parse_recording_filename
+from app.services.matching import parse_recording_filename
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,19 @@ class RemediationFinding:
 async def find_false_calendar_matches(
     session: AsyncSession, timezone_name: str
 ) -> list[RemediationFinding]:
+    """Find CALENDAR_EVENT_FOUND recordings whose disk filename cannot be parsed.
+
+    NOTE: title-mismatch is NOT a false-match signal here (and never scanned for).
+    Since InterviewMatcher.score() gained a booking-marker pool-entry path
+    (calink.ru/calendly.com/cal.com in the event description), a mismatched title
+    between the recording filename and the matched calendar event summary is the
+    EXPECTED shape of a correct calink match — the calink-generated event summary
+    and the independently-generated Telemost recording filename only ever coincide
+    by chance. Flagging every such recording as a false match would requeue
+    correctly-matched calink interviews back to FOUND via apply_requeue() and
+    destroy their calendar linkage. Only a genuinely unparseable filename (which
+    InterviewMatcher.score() itself would also reject) is treated as a finding.
+    """
     rows = list(
         (
             await session.scalars(
@@ -34,24 +47,16 @@ async def find_false_calendar_matches(
     findings: list[RemediationFinding] = []
     for recording in rows:
         try:
-            parsed = parse_recording_filename(recording.disk_filename, timezone_name)
+            parse_recording_filename(recording.disk_filename, timezone_name)
         except ValueError:
-            reason = "filename_invalid"
-        else:
-            if (
-                recording.calendar_event_summary is not None
-                and normalize_title(recording.calendar_event_summary) == parsed.normalized_title
-            ):
-                continue
-            reason = "title_mismatch"
-        findings.append(
-            RemediationFinding(
-                recording_id=recording.id,
-                disk_filename=recording.disk_filename,
-                stored_summary=recording.calendar_event_summary,
-                reason=reason,
+            findings.append(
+                RemediationFinding(
+                    recording_id=recording.id,
+                    disk_filename=recording.disk_filename,
+                    stored_summary=recording.calendar_event_summary,
+                    reason="filename_invalid",
+                )
             )
-        )
     return findings
 
 
