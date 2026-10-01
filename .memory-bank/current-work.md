@@ -80,6 +80,28 @@ Lilia's onboarding progress (2026-09-30):
 - Left: her first scan (daily run or a request to Mila in her DM), then PR → `main` → CI deploy.
   That deploy brings `46d9505` and moves the release dir; the migration is already applied.
 
+## 18:00 digest opt-out (2026-10-01)
+
+Lilia asked (via the lead's channel) not to get the automatic 18:00 Mattermost summary during
+onboarding. No existing lever did only that: `active=false` stops the whole scan/transfer/Notion
+pipeline, and clearing her Mattermost binding would also kill manual-review question delivery.
+Added `recruiter_config.daily_digest_enabled` (migration `20261001_0900`, default `true`, no
+backfill) and gated only the outbound summary inside `QuestionQueueService.build_digest`
+(`send=False`): the scan, matching, transfer, Notion write-back and the settled-review
+auto-complete/suppress hygiene keep running unchanged. `configure_recruiter.py set-digest --email
+<email> --state enabled|disabled` flips it for an existing recruiter. Plan:
+`swarm-report/recruiter-digest-toggle-plan.md`.
+
+Rolled out the same way as multi-tenancy (manual canary-build + swap, not the canary stack — see
+«Deployment path» above): commit `6aa8c52` built by `canary-build` run 36796806954 → image
+`…@sha256:03755e6b…`. At 00:36 UTC: backup
+`/var/backups/recording-agent/20261001T003641Z-6aa8c52…-manual.dump` (verified) → `migrate`
+(`20260930_1000 → 20261001_0900`) → backend swapped (healthy). Then
+`set-digest --email lilia.akentyeva@effective.band --state disabled` ran on the server:
+`lilia.akentyeva@effective.band|t|f`, Ralina unchanged (`ralina.seitova@effective.band|t|t`).
+Not yet done: PR → `main` → CI deploy to make this the regular release (same gap as the
+multi-tenancy rollout).
+
 ## Next steps (as of 2026-09-29 evening)
 
 1. **Multi-tenancy first** (item 0). The 29.09 update to the lead already reports it as done, so
@@ -204,16 +226,126 @@ DSM listing: whether her roots are `/Recruiting-NE/2. Interviews` (non-engineeri
 notes contradict each other. `SYNOLOGY_INTERVIEW_ROOTS` is global today, so per-recruiter roots
 are another code change.
 
-## 3. calink matching (scope)
+## 3. calink matching (scope) — corrected 2026-10-02 from Lilia's real Disk + Calendar data
 
-calink recordings are named like `25_09_11_10_Собеседование_с_Лилей.webm` (date/time prefix,
-generic meeting title, no candidate). The calendar event title ends with the first name only,
-e.g. `(Иван)`; the description carries a broadcast link unique per meeting. The current title
-gate (`app/services/matching.py`: exact normalized title + ±15 min window) never matches these.
-Work: parse the new file-name format, a compatibility gate on time + meeting title with the
-broadcast link as the unique key, candidate lookup by first name (several namesakes → narrow by
-vacancy, else ask the recruiter with all card links), re-weight signals, keep old names working,
-tests.
+**The 2026-09-29 note above (2-digit-date filename, `(Name)$` as the only signal) was wrong —
+replaced by what the data actually shows.** Read `app/services/matching.py` before touching this;
+`FILENAME_PATTERN` (`YYYY-MM-DD_HHMMSS_<title>.webm`) already matches every real filename seen,
+no format-parsing work needed.
+
+**Real calink-booked event (confirmed twice, 2026-09-21 and 2026-09-23 on her live calendar):**
+```
+SUMMARY: Собеседование в Effective c Лилией Акентьевой (Четова Дарья)
+DESCRIPTION: Участник: Четова Дарья (dashachetova@gmail.com)
+  https://telemost.360.yandex.ru/j/2973463676
+  Детали встречи, отмена и перенос: https://calink.ru/liliya-akenteva/45min/45409?code=FAtvM1
+```
+Existing signals already score this ~1.0 once it reaches `_score_event`: `(Четова Дарья)` matches
+`NAME_PATTERN`, `Собеседование` matches `INTERVIEW_PATTERN`, `calink.ru` matches `BOOKING_PATTERN`,
+plus `time_overlap` and `has_telemost_url`. **Scoring is not the problem.**
+
+**The actual bug:** the corresponding Disk recording is never titled like the event. Seen on her
+real Disk: a generic Telemost-default title shared by many unrelated bookings
+(`2026-09-21_144443_Ссылка для собеседования с Лилией Акентьевой_audio_only.mp3`) *and*, for the
+same exact timestamp, a sibling `.webm` someone/something renamed to
+`2026-09-21_144443_Чегова Дарья DM Junior с Лилией Акентьевой.webm` — neither string equals the
+calendar summary `Собеседование в Effective c Лилией Акентьевой (Четова Дарья)`. The hard gate at
+`matching.py:165` (`normalize_title(event.summary) == parsed.normalized_title`) rejects the event
+before scoring ever runs → `NO_COMPATIBLE_EVENT`, even though a near-perfect signal (calink URL,
+candidate email, unique Telemost room, correct time window) was sitting right there. This affects
+every calink-booked interview, not just a "generic-title" subset: a calink event's calendar summary
+and the Telemost recording's filename are independently generated strings that essentially never
+match, whether the file keeps the Telemost default name or gets manually/automatically renamed
+afterward.
+
+**Separately confirmed, likely NOT a bug:** two real recordings
+(`2026-09-30_110310_Консультация по инфраструктуре с Денисом Васильевым.webm`,
+`…113314_…Михаилом Кононенко.webm`) exact-title-match a real calendar event (so the gate passes)
+but score only ~0.35–0.40 (`time_overlap` + `has_telemost_url`) — below the 0.7 threshold — because
+the title has no `(Name)$`, no `calink.ru`, and "Консультация" isn't an `INTERVIEW_PATTERN`
+keyword. These are plausibly genuine 1:1 technical consultations, not calink-booked candidate
+interviews; the recruiter can confirm via the existing manual-review question. Do not widen
+`INTERVIEW_PATTERN`/`NAME_PATTERN` just to force these above threshold without her confirmation —
+she has many non-candidate named 1:1 meetings on the same calendar (colleagues, vendors) that must
+not start auto-matching.
+
+**Third real pattern, found 2026-10-02 after the user flagged that Lilia manually renames + files
+these herself today:** a plainer calink link (no `45min` parameter) produces an event whose summary
+is the literal generic string `Ссылка для собеседования с Лилией Акентьевой` (confirmed on her live
+calendar, 2026-09-07T19:00) — i.e. for this link type, event summary and the recording's default
+Telemost title are IDENTICAL, so the exact-title gate already passes today. It still fails to
+auto-match: the description carries only a bare Telemost link, no `calink.ru` URL, no candidate
+name/email at all — `BOOKING_PATTERN`/`NAME_PATTERN` can never fire, and there is no machine-
+readable candidate identity anywhere (not a code bug — this calink template just doesn't capture
+it; Lilia supplies the candidate from memory, which is presumably why she's renaming/filing these
+by hand right now instead of waiting on the agent). Separately, a real regex bug: `INTERVIEW_PATTERN`
+matches literal `собеседование` (nominative), but this title has `собеседования` (genitive, "для
+собеседования") — not a substring match, so `interview_keywords` never fires here even though a
+human reads it as obviously interview-related. Cheap fix: match the stem `собеседован` instead of
+the full nominative word. Worth fixing regardless, but won't by itself resolve candidate-identity
+for this link type — recommend telling Lilia to prefer her richer calink template (the one with
+`Участник: Имя (email)` + `calink.ru` URL, `/45min/` in current examples) for interviews, since
+only that one carries enough signal to fully automate; the plain-link bookings will keep landing as
+a manual-review question either way, which is still a workflow improvement over her renaming and
+filing to Synology by hand.
+
+**Proposed direction (confirm in `/plan`, do not just implement):** stop treating title-equality as
+a hard pre-filter. Build the compatible-event pool from time-window overlap alone (keep the
+existing `eligible`/`unmonitored` split and the `NO_COMPATIBLE_EVENT` /
+`UNMONITORED_ONLY` / `MULTIPLE_ELIGIBLE` / `UNMONITORED_COLLISION` safety checks — Q11's
+"never silently auto-`ignored`" invariant is unaffected, ambiguity still goes to manual review).
+Score every pool member with the existing signal set unchanged (it already works once an event is
+reachable). Optionally add a new low-weight "filename title matches event summary" signal so the
+already-working exact-match path (Anton, and Lilia's directly-scheduled named meetings) keeps its
+current confidence or better. Must not regress Anton's current matching — his exact-match cases
+stay single-eligible-event in the same time window either way. Needs: unit tests reproducing both
+real cases above (calink event now matches; consultation stays manual-review), a regression test
+for Anton's existing exact-match path, and confirmation that broadening the pool doesn't turn
+unrelated recorded meetings into false auto-matches (scoring threshold is the existing safety net).
+
+**Status: implemented 2026-10-02 (`app/services/matching.py`).** Shipped per `/plan`
+`swarm-report/calink-matching-plan.md`, not the broader "drop title gate for all events" idea
+above — the skeptic's safety hole (HIGH-1) stays closed. `score()` now builds `compatible` from one
+loop with two independent entry conditions per event (title-exact-match OR
+`BOOKING_PATTERN.search(event.description)`), both still requiring the ±15 min time window, both
+excluding events with span ≥ 20 hours (all-day/multi-day blocks), deduped by
+`(calendar_id, uid, recurrence_id)` as before. `INTERVIEW_PATTERN` now matches the stem
+`собеседован` instead of the full nominative word, so it also catches genitive/other case forms.
+`NAME_PATTERN`/`BOOKING_PATTERN`/`_score_event` weights/`confidence_threshold` unchanged.
+
+Final confidence numbers from real prod data (`tests/test_matching.py`):
+- Четова Дарья calink case (calink.ru in description, mismatched title) — **confidence 1.0**,
+  `manual_review_required=False`, for both the generic Telemost-default filename and the
+  manually-renamed filename.
+- Денис Васильев / Михаил Кононенко consultation case (exact title match, no calink link) —
+  **confidence 0.40**, `ManualReviewReason.LOW_CONFIDENCE` (not auto-matched, not
+  `NO_COMPATIBLE_EVENT`). Weights not widened, per Out-of-scope.
+- Bare calink-link case ("Ссылка для собеседования с Лилией Акентьевой", exact title match, no
+  calink.ru URL) — **confidence 0.45** after the regex fix (`interview_keywords` now fires on the
+  genitive form), still `LOW_CONFIDENCE`.
+- Regression `test_reported_non_recruiting_title_cannot_match_other_event` (mismatched title, no
+  booking marker) — unchanged, still `NO_COMPATIBLE_EVENT`; proves the booking-marker path did not
+  reopen the safety hole.
+- All-day/multi-day event alongside a real match — excluded from the pool by the ≥20h span guard;
+  no spurious `MULTIPLE_ELIGIBLE`/`UNMONITORED_COLLISION`.
+
+`tools/setup/rematch_calendar_events.py`: `title_mismatch` heuristic removed entirely (not
+recomputed) — it is now the expected shape of a correct calink match, not a false-match signal.
+`find_false_calendar_matches()` only flags `CALENDAR_EVENT_FOUND` rows whose `disk_filename` fails
+to parse at all (`filename_invalid`); `--apply` only requeues those. `tests/test_rematch_calendar_events.py`
+updated to the new semantics (a real calink-style mismatch and an exact-title match are both no
+longer findings; only an unparseable filename is).
+
+Full suite: `poetry run pytest -q` → 473 passed, 2 skipped. Scoped `pytest tests/test_matching.py
+tests/test_scheduler.py tests/test_rematch_calendar_events.py -q` → 74 passed (required one
+incidental fixture fix in `tests/test_scheduler.py::test_resume_regression_title_mismatch_persists_bounded_reason_only`:
+its `ParsedVEVENT.description` literally contained a `calink.ru` URL used only as filler, which the
+new booking-marker path would otherwise treat as a real marker and auto-match — changed to `""` to
+keep testing the intended "no booking marker" regression, not a different scenario).
+
+Out of scope, not touched: `NAME_PATTERN`/`INTERVIEW_PATTERN` keyword widening or weight changes to
+push Денис/Михаил above threshold; `FILENAME_PATTERN`; `confidence_threshold`;
+`UNMONITORED_COLLISION` multi-calendar behavior for Anton/future multi-calendar recruiters.
 
 ## 4. Meeting summary (scope)
 
