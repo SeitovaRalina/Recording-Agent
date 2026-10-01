@@ -12,13 +12,16 @@ from app.tools.calendar import ParsedVEVENT
 
 TELEMOST_PATTERN = re.compile(r"https://telemost\.360\.yandex\.ru/")
 NAME_PATTERN = re.compile(r"\(([^)]+)\)$")
-INTERVIEW_PATTERN = re.compile(r"собеседование|интервью|interview|candidate", re.IGNORECASE)
+INTERVIEW_PATTERN = re.compile(r"собеседован|интервью|interview|candidate", re.IGNORECASE)
 BOOKING_PATTERN = re.compile(r"https://(?:calink\.ru|calendly\.com|cal\.com)/", re.IGNORECASE)
 MAX_DIAGNOSTIC_CANDIDATES = 5
 MAX_DIAGNOSTIC_PAYLOAD_CHARS = 4096
 MAX_DIAGNOSTIC_TEXT_CHARS = 160
 MAX_CALENDAR_DISPLAY_NAME_CHARS = 100
 FILENAME_PATTERN = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})_(?P<body>.+)\.webm$")
+# Events spanning this long or more (all-day/multi-day calendar blocks) never enter the
+# compatible pool via either path below — a widened pool is more exposed to them.
+MAX_EVENT_SPAN_FOR_POOL = timedelta(hours=20)
 
 
 class RecordingLike(Protocol):
@@ -162,13 +165,23 @@ class InterviewMatcher:
 
         compatible_by_key: dict[tuple[object, str, str | None], ParsedVEVENT] = {}
         for event in events:
-            if normalize_title(event.summary) != parsed.normalized_title:
+            # All-day/multi-day blocks never enter the pool via either path.
+            if event.dtend_utc - event.dtstart_utc >= MAX_EVENT_SPAN_FOR_POOL:
                 continue
             if not (
                 event.dtstart_utc - timedelta(minutes=15)
                 <= parsed.start_utc
                 <= event.dtend_utc + timedelta(minutes=15)
             ):
+                continue
+            # Path 1 (default): exact normalized-title match within the time window.
+            title_matches = normalize_title(event.summary) == parsed.normalized_title
+            # Path 2 (narrow): a booking-link marker in the description independently
+            # corroborates a genuine external booking (calink/calendly/cal.com), which
+            # justifies bypassing the title check for calink-generated event summaries
+            # that never match the Telemost recording filename by construction.
+            has_booking_marker = bool(BOOKING_PATTERN.search(event.description))
+            if not title_matches and not has_booking_marker:
                 continue
             key = (event.calendar_id, event.uid, event.recurrence_id)
             compatible_by_key.setdefault(key, event)

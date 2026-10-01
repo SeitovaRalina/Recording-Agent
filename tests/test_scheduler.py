@@ -337,7 +337,10 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
             summary="Встреча на 30 минут (Иван Иванов)",
             dtstart_utc=start,
             dtend_utc=start + timedelta(hours=1),
-            description="https://calink.ru/recruiter/interview/123",
+            # No booking-link marker: pure time-window overlap with a mismatched title
+            # must not enter the compatible pool (regression for the booking-marker
+            # pool-entry path added to InterviewMatcher.score()).
+            description="",
             organizer_email="recruiter@example.com",
             attendees=[],
             raw_ics="must-not-persist",

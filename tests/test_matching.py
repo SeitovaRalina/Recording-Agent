@@ -94,10 +94,15 @@ def test_unique_exact_title_time_and_calink_auto_match() -> None:
 
 
 def test_reported_non_recruiting_title_cannot_match_other_event() -> None:
+    # No booking marker in the description: pure time-window overlap with a mismatched
+    # title must NOT be enough to enter the pool (the safety hole the booking-marker
+    # path must not reopen). `description=""` makes explicit what the default fixture
+    # value would otherwise obscure (it defaults to a calink.ru URL for convenience in
+    # other tests).
     start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
     result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
         recording("Не рекрутинг встреча", start),
-        [event(start=start, summary="Встреча на 30 минут (Иван Иванов)")],
+        [event(start=start, summary="Встреча на 30 минут (Иван Иванов)", description="")],
     )
 
     assert result.reason == ManualReviewReason.NO_COMPATIBLE_EVENT
@@ -210,3 +215,99 @@ def test_telemost_filename_timezone_is_independent_from_recruiter_local_timezone
     assert result.manual_review_required is False
     assert result.best_event is calendar_event
     assert "time_overlap" in result.signals
+
+
+def test_calink_booking_marker_pool_entry_matches_despite_mismatched_title() -> None:
+    """Real case: Четова Дарья, 2026-09-21. The calink-generated event summary and the
+    independently-generated Telemost recording filename never coincide by construction
+    (neither the generic default Telemost title nor the manually-renamed one equals the
+    event summary) — the booking-marker path (calink.ru in the description) lets the
+    event enter the pool anyway, bypassing the title check.
+    """
+    start = datetime(2026, 9, 21, 14, 44, 43, tzinfo=UTC)
+    summary = "Собеседование в Effective c Лилией Акентьевой (Четова Дарья)"
+    description = (
+        "Участник: Четова Дарья (dashachetova@gmail.com)\n"
+        "https://telemost.360.yandex.ru/j/2973463676\n"
+        "Детали встречи, отмена и перенос: "
+        "https://calink.ru/liliya-akenteva/45min/45409?code=FAtvM1"
+    )
+    calendar_event = event(start=start, summary=summary, description=description)
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+    for filename_title in (
+        "Ссылка для собеседования с Лилией Акентьевой",  # generic Telemost default name
+        "Чегова Дарья DM Junior с Лилией Акентьевой",  # manually renamed
+    ):
+        result = matcher.score(recording(filename_title, start), [calendar_event])
+
+        assert result.manual_review_required is False
+        assert result.best_event is calendar_event
+        assert result.confidence == 1.0
+        assert "booking_source_marker" in result.signals
+
+
+def test_consultation_exact_title_without_booking_marker_stays_low_confidence() -> None:
+    """Real case: Денис Васильев technical consultation. Title matches exactly (pool
+    entry via path 1) but there is no calink/calendly link and no '(Name)' suffix, so
+    the score stays below threshold. This must stay LOW_CONFIDENCE, not auto-match and
+    not NO_COMPATIBLE_EVENT. Signal weights are intentionally NOT widened for this case
+    (no recruiter confirmation it is even a candidate interview) — out of scope.
+    """
+    start = datetime(2026, 9, 30, 11, 3, 10, tzinfo=UTC)
+    title = "Консультация по инфраструктуре с Денисом Васильевым"
+    description = "https://telemost.360.yandex.ru/j/1234567890"
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
+        recording(title, start),
+        [event(start=start, summary=title, description=description)],
+    )
+
+    assert result.reason == ManualReviewReason.LOW_CONFIDENCE
+    assert result.manual_review_required is True
+    assert round(result.confidence, 2) == 0.40
+
+
+def test_bare_calink_link_title_matches_but_no_booking_marker_stays_low_confidence() -> None:
+    """Real case: 'Ссылка для собеседования с Лилией Акентьевой', 2026-09-07T19:00. This
+    calink link template puts no calink.ru URL or candidate identity in the
+    description, so BOOKING_PATTERN never fires — but the title matches exactly (path
+    1), and after the INTERVIEW_PATTERN stem fix the genitive 'собеседования' now
+    matches. Still below threshold: 0.35 (time_overlap) + 0.05 (has_telemost_url) +
+    0.05 (interview_keywords) = 0.45 < 0.7. Not a bug: this calink template carries no
+    machine-readable candidate data at all; widening NAME_PATTERN to compensate is out
+    of scope.
+    """
+    start = datetime(2026, 9, 7, 19, 0, 0, tzinfo=UTC)
+    title = "Ссылка для собеседования с Лилией Акентьевой"
+    description = "https://telemost.360.yandex.ru/j/9999999999"
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
+        recording(title, start),
+        [event(start=start, summary=title, description=description)],
+    )
+
+    assert result.reason == ManualReviewReason.LOW_CONFIDENCE
+    assert round(result.confidence, 2) == 0.45
+    assert "interview_keywords" in result.signals
+
+
+def test_all_day_event_in_pool_window_does_not_cause_spurious_collision() -> None:
+    """A same-day all-day block (span >= 20 hours) must never enter the compatible pool
+    via either path, even when it would otherwise qualify on title — otherwise a
+    recruiter's all-day OOO/placeholder entry would cause a spurious
+    MULTIPLE_ELIGIBLE/UNMONITORED_COLLISION next to every real meeting that day.
+    """
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Meeting (Ivan Ivanov)"
+    real_event = event(start=start, summary=title, calendar_id=uuid.uuid4())
+    all_day = replace(
+        real_event,
+        uid="all-day-1",
+        dtstart_utc=start.replace(hour=0, minute=0, second=0, microsecond=0),
+        dtend_utc=start.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=24),
+    )
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+    result = matcher.score(recording(title, start), [real_event, all_day])
+
+    assert result.manual_review_required is False
+    assert result.best_event is real_event
