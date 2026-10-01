@@ -269,25 +269,28 @@ interviews; the recruiter can confirm via the existing manual-review question. D
 she has many non-candidate named 1:1 meetings on the same calendar (colleagues, vendors) that must
 not start auto-matching.
 
-**Third real pattern, found 2026-10-02 after the user flagged that Lilia manually renames + files
-these herself today:** a plainer calink link (no `45min` parameter) produces an event whose summary
-is the literal generic string `Ссылка для собеседования с Лилией Акентьевой` (confirmed on her live
-calendar, 2026-09-07T19:00) — i.e. for this link type, event summary and the recording's default
-Telemost title are IDENTICAL, so the exact-title gate already passes today. It still fails to
-auto-match: the description carries only a bare Telemost link, no `calink.ru` URL, no candidate
-name/email at all — `BOOKING_PATTERN`/`NAME_PATTERN` can never fire, and there is no machine-
-readable candidate identity anywhere (not a code bug — this calink template just doesn't capture
-it; Lilia supplies the candidate from memory, which is presumably why she's renaming/filing these
-by hand right now instead of waiting on the agent). Separately, a real regex bug: `INTERVIEW_PATTERN`
-matches literal `собеседование` (nominative), but this title has `собеседования` (genitive, "для
-собеседования") — not a substring match, so `interview_keywords` never fires here even though a
-human reads it as obviously interview-related. Cheap fix: match the stem `собеседован` instead of
-the full nominative word. Worth fixing regardless, but won't by itself resolve candidate-identity
-for this link type — recommend telling Lilia to prefer her richer calink template (the one with
-`Участник: Имя (email)` + `calink.ru` URL, `/45min/` in current examples) for interviews, since
-only that one carries enough signal to fully automate; the plain-link bookings will keep landing as
-a manual-review question either way, which is still a workflow improvement over her renaming and
-filing to Synology by hand.
+**Third real pattern, found 2026-10-02, corrected 2026-10-02 after the user's follow-up:**
+`Ссылка для собеседования с Лилией Акентьевой` is the Disk-side signal — Telemost's own default
+recording title, seen on dozens of her real files. It is NOT a distinct calink calendar-event
+template. The one real calendar event sharing that exact summary (2026-09-07T19:00) is read as an
+ad-hoc/un-customized Telemost call whose generic room name was inherited into the calendar entry,
+not a second calink product config. Net effect on matching is identical either way: when a
+recording's default title happens to equal its calendar event's summary too, it passes the
+exact-title gate (path 1, unchanged) but still can't auto-match — the description carries only a
+bare Telemost link, no `calink.ru` URL, no candidate name/email — `BOOKING_PATTERN`/`NAME_PATTERN`
+never fire, and there is no machine-readable candidate identity anywhere (not a code bug; nothing
+here captures it). Separately, a real regex bug: `INTERVIEW_PATTERN` matches literal `собеседование`
+(nominative), but this title has `собеседования` (genitive, "для собеседования") — not a substring
+match, so `interview_keywords` never fires here even though a human reads it as obviously
+interview-related. Cheap fix: match the stem `собеседован` instead of the full nominative word.
+Worth fixing regardless, but won't by itself resolve candidate-identity for this case — recommend
+telling Lilia to prefer her richer calink booking (the one with `Участник: Имя (email)` +
+`calink.ru` URL, `/45min/` in current examples) for interviews, since only that one carries enough
+signal to fully automate; recordings that stay on the generic Telemost title will keep landing as a
+manual-review question either way, regardless of whether she renames the Disk file or leaves it
+untouched. Confirmed 2026-10-02: Lilia will stop renaming/manually filing recordings to Synology
+herself going forward — not required by the fix (the booking-marker path never depended on the
+filename), but removes her current manual workaround once the fix deploys.
 
 **Proposed direction (confirm in `/plan`, do not just implement):** stop treating title-equality as
 a hard pre-filter. Build the compatible-event pool from time-window overlap alone (keep the
@@ -320,9 +323,10 @@ Final confidence numbers from real prod data (`tests/test_matching.py`):
 - Денис Васильев / Михаил Кононенко consultation case (exact title match, no calink link) —
   **confidence 0.40**, `ManualReviewReason.LOW_CONFIDENCE` (not auto-matched, not
   `NO_COMPATIBLE_EVENT`). Weights not widened, per Out-of-scope.
-- Bare calink-link case ("Ссылка для собеседования с Лилией Акентьевой", exact title match, no
-  calink.ru URL) — **confidence 0.45** after the regex fix (`interview_keywords` now fires on the
-  genitive form), still `LOW_CONFIDENCE`.
+- Generic-Telemost-title case ("Ссылка для собеседования с Лилией Акентьевой" — the Disk-side
+  default recording title, not a distinct calink template — exact title match, no calink.ru URL)
+  — **confidence 0.45** after the regex fix (`interview_keywords` now fires on the genitive form),
+  still `LOW_CONFIDENCE`.
 - Regression `test_reported_non_recruiting_title_cannot_match_other_event` (mismatched title, no
   booking marker) — unchanged, still `NO_COMPATIBLE_EVENT`; proves the booking-marker path did not
   reopen the safety hole.
