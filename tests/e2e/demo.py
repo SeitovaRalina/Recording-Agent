@@ -83,7 +83,10 @@ def prepare(spot: str, *, calink: bool = False) -> None:
     if calink:
         print(f"Заголовок события:   {summary}")
         print(f"Заголовок файла:     {item.disk_name}")
-        print("Сценарий: calink-бронь — заголовки НЕ совпадают нарочно, матч идёт через booking-marker путь")
+        print(
+            "Сценарий: calink-бронь — заголовки НЕ совпадают нарочно, "
+            "матч идёт через booking-marker путь"
+        )
     print()
     print("Напишите Миле в Mattermost:  Проверь новые записи")
 
