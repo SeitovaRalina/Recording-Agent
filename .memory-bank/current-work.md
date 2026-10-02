@@ -102,6 +102,19 @@ Rolled out the same way as multi-tenancy (manual canary-build + swap, not the ca
 Not yet done: PR → `main` → CI deploy to make this the regular release (same gap as the
 multi-tenancy rollout).
 
+## calink-matching + per-recruiter matching signals on production (2026-10-02)
+
+Same manual rollout pattern again. Commit `956eba9` built by `canary-build` run 36960037539 →
+image `…@sha256:b098454e…`. At 03:26 UTC: backup
+`/var/backups/recording-agent/20261002T032648Z-956eba9…-manual.dump` (verified) → `migrate`
+(`20261001_0900 → 20261002_1000`, adds `recruiter_config.matching_signals`) → backend swapped
+(healthy). Both recruiters still active; `matching_signals` is NULL for both (pure architecture,
+no override set for anyone — see section 3 and `swarm-report/matching-signals-config-plan.md`).
+Carries, on top of the digest-toggle rollout already on prod: the calink booking-marker pool-entry
+fix (`swarm-report/calink-matching-plan.md`) and the per-recruiter matching-signals override
+column. Not yet done: PR → `main` → CI deploy (three features now ahead of `main`: multi-tenancy,
+digest-toggle, calink-matching + matching-signals).
+
 ## Next steps (as of 2026-09-29 evening)
 
 1. **Multi-tenancy first** (item 0). The 29.09 update to the lead already reports it as done, so
