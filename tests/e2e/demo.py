@@ -34,12 +34,32 @@ FOLDERS = {
 }
 
 
-def prepare(spot: str) -> None:
+def prepare(spot: str, *, calink: bool = False) -> None:
     now = datetime.now(OMSK)
     ctx = RouteCtx("DEMO", "Живая демонстрация", "demo", "—", "1")
     ctx.tag = ""  # the time suffix below keeps demo candidates unique
     candidate = f"E2E Демо Кандидатова {now:%H%M}"
-    item = ctx.interview(candidate, spot_ids=[SPOTS[spot]])
+    if calink:
+        # Reproduces the real calink shape: the calendar event summary/description carry the
+        # booking marker and candidate name; the Disk recording keeps Telemost's generic default
+        # title, which never matches the event summary by construction (the exact bug the
+        # booking-marker pool-entry path exists to handle — see matching.py/current-work.md §3).
+        summary = f"Собеседование в Effective c Ралиной Сеитовой ({candidate})"
+        description = (
+            f"Участник: {candidate} (e2e-demo@example.com)\n"
+            "https://telemost.360.yandex.ru/j/5500000000\n"
+            "Детали встречи, отмена и перенос: "
+            "https://calink.ru/e2e-demo/45min/00000?code=E2EDEMO"
+        )
+        item = ctx.interview(
+            candidate,
+            spot_ids=[SPOTS[spot]],
+            summary=summary,
+            description=description,
+            file_title="Ссылка для собеседования с Ралиной Сеитовой",
+        )
+    else:
+        item = ctx.interview(candidate, spot_ids=[SPOTS[spot]])
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(
         json.dumps(
@@ -60,6 +80,10 @@ def prepare(spot: str) -> None:
     print(f"Карточка Notion: {item.card['url'] if item.card else '—'}")
     print(f"Файл на Диске:   {item.file['path'] if item.file else '—'}")
     print(f"Ожидаемый итог:  {FOLDERS[spot]}")
+    if calink:
+        print(f"Заголовок события:   {summary}")
+        print(f"Заголовок файла:     {item.disk_name}")
+        print("Сценарий: calink-бронь — заголовки НЕ совпадают нарочно, матч идёт через booking-marker путь")
     print()
     print("Напишите Миле в Mattermost:  Проверь новые записи")
 
@@ -193,9 +217,15 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     prep = sub.add_parser("prepare")
     prep.add_argument("--spot", choices=sorted(SPOTS), default="python")
+    prep.add_argument(
+        "--calink", action="store_true", help="seed a calink-shaped mismatched-title scenario"
+    )
     go = sub.add_parser("go")
     go.add_argument("--spot", choices=sorted(SPOTS), default="python")
     go.add_argument("--force", action="store_true", help="prepare even if a check failed")
+    go.add_argument(
+        "--calink", action="store_true", help="seed a calink-shaped mismatched-title scenario"
+    )
     pre = sub.add_parser("preflight")
     pre.add_argument("--fix", action="store_true", help="park stray E2E files on Disk")
     sub.add_parser("status")
@@ -206,11 +236,11 @@ def main() -> None:
             raise SystemExit(
                 "Подготовка остановлена: исправьте пункты с !! или запустите с --force"
             )
-        prepare(args.spot)
+        prepare(args.spot, calink=args.calink)
     elif args.command == "preflight":
         raise SystemExit(0 if preflight(fix=args.fix) else 1)
     elif args.command == "prepare":
-        prepare(args.spot)
+        prepare(args.spot, calink=args.calink)
     elif args.command == "status":
         status()
     else:
