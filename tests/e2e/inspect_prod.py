@@ -13,6 +13,7 @@ Commands (all read-only; nothing is written to any service, secrets are never pr
                                           CalDAV calendars and events (title, start, links)
     synology <path> [<path> ...]          whether Synology paths exist
     mattermost --email E                  Mattermost user id and the DM channel with the bot
+    mail --email E [--env .env.X]         IMAP login check (imap.yandex.ru) + INBOX message count
 
 Credentials:
 - Notion: NOTION_TOKEN_PROD (or NOTION_TOKEN) from the local `.env`; calls go straight to Notion.
@@ -22,6 +23,9 @@ Credentials:
 - CalDAV: the backend's YANDEX_CALDAV_PASSWORDS for an onboarded recruiter, or
   `--env .env.<name>` (local file with <PREFIX>_CALDAV_APP_PASSWORD) before onboarding.
 - Synology and Mattermost: the backend container's settings.
+- Mail: not wired into the backend yet (meeting-summary feature, not built). Reads the app
+  password straight from the local `.env` (`YANDEX_MAIL_APP_PASSWORDS` JSON map, keyed by email)
+  or from `--env .env.<name>` (`<PREFIX>_MAIL_APP_PASSWORD`). Never printed.
 
 Output can contain real candidate names and meeting titles: keep it in the session, never commit
 it or paste it into shared chats.
@@ -343,6 +347,44 @@ def mattermost(email: str) -> None:
     print(_in_backend(MATTERMOST_CODE, {"email": email}))
 
 
+# ---------------------------------------------------------------------------- Mail (IMAP)
+
+
+def _mail_password(email: str, env_file: str | None) -> str:
+    if env_file:
+        values = _local_env(ROOT / env_file, r"[A-Z_]+_MAIL_APP_PASSWORD")
+        password = next(iter(values.values()), None)
+        if not password:
+            raise SystemExit(f"no *_MAIL_APP_PASSWORD in {env_file}")
+        return password
+    values = _local_env(ROOT / ".env", "YANDEX_MAIL_APP_PASSWORDS")
+    raw = values.get("YANDEX_MAIL_APP_PASSWORDS")
+    if not raw:
+        raise SystemExit("YANDEX_MAIL_APP_PASSWORDS not found in the local .env")
+    passwords = json.loads(raw)
+    password = passwords.get(email)
+    if not password:
+        raise SystemExit(f"no app password for {email!r} in YANDEX_MAIL_APP_PASSWORDS")
+    return password
+
+
+def mail(email: str, env_file: str | None) -> None:
+    import imaplib
+
+    password = _mail_password(email, env_file)
+    try:
+        with imaplib.IMAP4_SSL("imap.yandex.ru", 993, timeout=30) as conn:
+            conn.login(email, password)
+            status, mailboxes = conn.list()
+            box_count = len(mailboxes) if status == "OK" and mailboxes else 0
+            print(f"{email}: IMAP login OK, папок: {box_count}")
+            status, data = conn.select("INBOX", readonly=True)
+            count = int(data[0]) if status == "OK" and data and data[0] else 0
+            print("  INBOX: писем", count)
+    except imaplib.IMAP4.error as error:
+        print(f"{email}: IMAP login FAILED: {error}")
+
+
 # ---------------------------------------------------------------------------- CLI
 
 
@@ -369,6 +411,9 @@ def main() -> None:
     syn.add_argument("paths", nargs="+")
     mm = sub.add_parser("mattermost")
     mm.add_argument("--email", required=True)
+    ml = sub.add_parser("mail")
+    ml.add_argument("--email", required=True)
+    ml.add_argument("--env", dest="env_file")
     args = parser.parse_args()
 
     if args.command == "notion-search":
@@ -383,6 +428,8 @@ def main() -> None:
         )
     elif args.command == "synology":
         synology(args.paths)
+    elif args.command == "mail":
+        mail(args.email, args.env_file)
     else:
         mattermost(args.email)
 
