@@ -36,6 +36,7 @@ from app.scheduler.cron import (
 from app.services.canary import notion_schema_hash, notion_token_hash
 from app.services.candidate import CandidateMatchResult
 from app.services.matching import InterviewMatcher
+from app.services.recruiter_schema import default_notion_property_map
 from app.services.reviews import (
     InteractionBinding,
     InteractionBindingConflict,
@@ -336,7 +337,10 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
             summary="Встреча на 30 минут (Иван Иванов)",
             dtstart_utc=start,
             dtend_utc=start + timedelta(hours=1),
-            description="https://calink.ru/recruiter/interview/123",
+            # No booking-link marker: pure time-window overlap with a mismatched title
+            # must not enter the compatible pool (regression for the booking-marker
+            # pool-entry path added to InterviewMatcher.score()).
+            description="",
             organizer_email="recruiter@example.com",
             attendees=[],
             raw_ics="must-not-persist",
@@ -360,6 +364,126 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
     assert loaded.calendar_raw_ics is None
     assert loaded.matched_calendar_url is None
     assert loaded.last_attempted_at is not None
+
+
+@pytest.mark.anyio
+async def test_malformed_matching_signals_fails_recording_not_the_scan() -> None:
+    """Resolving a malformed `recruiter.matching_signals` raises PermissionError, which
+    `_run_found_recording` catches (same convention as the `notion_preflight` failure path) and
+    advances the recording to FAILED with `error_step="matching_signals_config"` — it must not
+    crash and must never reach the calendar lookup.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    item = found("bad-matching-signals")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar = AsyncMock()
+    broken_recruiter = recruiter()
+    broken_recruiter.matching_signals = {"booking_pattern": "("}  # invalid regex syntax
+
+    result = await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(recording_filename_timezone="UTC")),
+        None,
+        None,
+        broken_recruiter,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert result is None
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.FAILED
+    assert loaded.error_step == "matching_signals_config"
+    calendar.find_events.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_scan_recruiter_with_matching_signals_override_matches_differently_than_null() -> (
+    None
+):
+    """End-to-end proof `scan_recruiter` actually consults the resolved per-recruiter signals:
+    same recording/event fixture (the real calink case, see test_matching.py), one recruiter with
+    `matching_signals=NULL` (today's `BOOKING_PATTERN`) auto-matches via the booking-marker
+    pool-entry path; a recruiter overriding `booking_pattern` to never match stays
+    `no_compatible_event` on the identical input.
+    """
+    start = datetime(2026, 9, 21, 14, 44, 43, tzinfo=UTC)
+    summary_text = "Собеседование в Effective c Лилией Акентьевой (Четова Дарья)"
+    description = (
+        "Участник: Четова Дарья (dashachetova@gmail.com)\n"
+        "https://telemost.360.yandex.ru/j/2973463676\n"
+        "Детали встречи, отмена и перенос: "
+        "https://calink.ru/liliya-akenteva/45min/45409?code=FAtvM1"
+    )
+    filename_title = "Ссылка для собеседования с Лилией Акентьевой"
+
+    async def run_scan(recruiter_row: RecruiterConfig) -> Recording | None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        disk = AsyncMock()
+        disk.list_new.return_value = [{"path": "disk:/override-case.webm"}]
+        disk.get_metadata.return_value = {
+            "disk_file_id": "override-case",
+            "disk_path": "disk:/override-case.webm",
+            "disk_filename": f"{start:%Y-%m-%d_%H%M%S}_{filename_title}.webm",
+            "disk_created_at": start,
+        }
+        calendar = AsyncMock()
+        calendar.find_events.return_value = [
+            ParsedVEVENT(
+                uid="event-1",
+                summary=summary_text,
+                dtstart_utc=start,
+                dtend_utc=start + timedelta(hours=1),
+                description=description,
+                organizer_email="recruiter@example.com",
+                attendees=[],
+                raw_ics="raw",
+                calendar_id=uuid.uuid4(),
+                calendar_url="https://caldav.test/interviews/",
+                calendar_display_name="Interviews",
+            )
+        ]
+        matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+        await scan_recruiter(
+            recruiter_row,
+            factory,
+            disk,
+            calendar,
+            matcher,
+            Settings(scan_local_timezone="UTC"),
+            start,
+        )
+        async with factory() as session:
+            persisted = await session.scalar(select(Recording))
+        await engine.dispose()
+        return persisted
+
+    null_recruiter = recruiter()
+    overridden_recruiter = recruiter()
+    overridden_recruiter.matching_signals = {"booking_pattern": r"https://never-matches\.example/"}
+
+    null_recording = await run_scan(null_recruiter)
+    overridden_recording = await run_scan(overridden_recruiter)
+
+    assert null_recording is not None
+    assert null_recording.status == RecordingStatus.CALENDAR_EVENT_FOUND
+
+    assert overridden_recording is not None
+    assert overridden_recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert overridden_recording.manual_review_reason == "no_compatible_event"
 
 
 @pytest.mark.anyio
@@ -697,6 +821,48 @@ async def test_scheduled_scan_abort_skips_digest_and_preserves_retryable_failed_
     assert digest.status == QuestionDigestStatus.FAILED
 
 
+@pytest.mark.anyio
+async def test_digest_disabled_recruiter_still_scans_but_skips_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "user"
+    owner.mattermost_dm_channel = "dm"
+    owner.timezone = "UTC"
+    owner.daily_digest_enabled = False
+    async with factory() as session:
+        session.add(owner)
+        await session.commit()
+    scan = AsyncMock(return_value=ScanSummary())
+    monkeypatch.setattr("app.scheduler.cron.scan_recruiter", scan)
+    questions = AsyncMock()
+    now = datetime(2026, 7, 22, 18, tzinfo=UTC)
+
+    await run_due_recruiter_summaries(
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        MagicMock(),
+        Settings(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        questions,
+        now,
+    )
+    await engine.dispose()
+
+    scan.assert_awaited_once()
+    questions.build_digest.assert_awaited_once()
+    assert questions.build_digest.await_args.kwargs["send"] is False
+
+
 def test_enabled_scheduler_registers_local_dispatcher_with_misfire_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -743,7 +909,9 @@ async def test_unique_candidate_with_blank_spot_completes_after_marking_source()
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=True)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("pipeline")
@@ -1075,7 +1243,9 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found(f"restart-{initial_status.value}")
@@ -1146,7 +1316,9 @@ async def test_notion_card_update_outage_leaves_stored_recording_resumable(
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("notion-update-down")
@@ -1211,7 +1383,9 @@ async def test_resumed_synology_transfer_is_durable_and_reroutable() -> None:
     )
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("route-interview-resume")
@@ -1276,7 +1450,9 @@ async def test_concurrent_transfer_resume_has_single_side_effect_owner() -> None
     settings = Settings(notion_writes_enabled=True, yandex_source_mutation_enabled=False)
     owner.notion_preflight_token_hash = notion_token_hash(settings)
     owner.notion_preflight_database_id = owner.notion_database_id
-    owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+    owner.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     owner.notion_preflight_synthetic_page_id = "synthetic-page"
     owner.notion_preflight_completed_at = datetime.now(UTC)
     item = found("concurrent-resume")
@@ -2049,7 +2225,9 @@ async def test_transfer_failure_is_isolated_between_recruiters() -> None:
     for owner in owners:
         owner.notion_preflight_token_hash = notion_token_hash(settings)
         owner.notion_preflight_database_id = owner.notion_database_id
-        owner.notion_preflight_schema_hash = notion_schema_hash(settings)
+        owner.notion_preflight_schema_hash = notion_schema_hash(
+            default_notion_property_map(settings)
+        )
         owner.notion_preflight_synthetic_page_id = "synthetic-page"
         owner.notion_preflight_completed_at = datetime.now(UTC)
     items: list[Recording] = []

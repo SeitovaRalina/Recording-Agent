@@ -11,6 +11,7 @@ from app.services.canary import (
     notion_token_hash,
     require_notion_preflight,
 )
+from app.services.recruiter_schema import default_notion_property_map
 
 
 def test_notion_write_flag_does_not_bypass_durable_preflight() -> None:
@@ -25,7 +26,9 @@ def test_notion_write_flag_does_not_bypass_durable_preflight() -> None:
 
     recruiter.notion_preflight_token_hash = notion_token_hash(settings)
     recruiter.notion_preflight_database_id = "db"
-    recruiter.notion_preflight_schema_hash = notion_schema_hash(settings)
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     recruiter.notion_preflight_synthetic_page_id = "page"
     recruiter.notion_preflight_completed_at = datetime.now(UTC)
     require_notion_preflight(settings, recruiter)

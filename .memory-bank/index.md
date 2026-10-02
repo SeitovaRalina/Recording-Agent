@@ -37,6 +37,8 @@ Branches: `manual_review_required` (human-in-the-loop), `ignored` (not an interv
 
 ## Where to look
 
+- **Current in-flight scope, week plan, onboarding state, blockers → `.memory-bank/current-work.md` (read second)**
+- Checking production data read-only (recruiter access, calendar events, Disk files, Notion schemas) → `.memory-bank/prod-inspection.md`
 - Architecture + data flows → `.memory-bank/architecture.md`
 - Auth setup for all services → `.memory-bank/auth-flow.md`
 - Key decisions → `.memory-bank/decisions.md`

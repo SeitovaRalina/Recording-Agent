@@ -5,6 +5,7 @@ import json
 
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.recruiter_schema import NotionPropertyMap, resolve_notion_property_map
 
 
 def enforce_recruiter_scope(settings: Settings, recruiter: RecruiterConfig) -> None:
@@ -39,14 +40,28 @@ def enforce_storage_key_scope(
         raise PermissionError("Storage key is outside the recruiter test prefix")
 
 
-def notion_schema_hash(settings: Settings) -> str:
-    payload = {
-        settings.notion_name_prop: "title",
-        settings.notion_date_prop: "date",
-        settings.notion_recording_prop: "files",
-        settings.notion_contacts_prop: "formula",
-        settings.notion_project_prop: "relation",
+def notion_schema_hash(property_map: NotionPropertyMap) -> str:
+    """Hash of one recruiter's resolved Notion schema.
+
+    The global-default shape (formula contacts, relation project) produces exactly the legacy
+    payload, so preflight hashes stored before per-recruiter maps stay valid. Any other
+    project type or contacts mode adds its own entries, so changing it invalidates the preflight.
+    """
+    payload: dict[str, str] = {
+        property_map.name_prop: "title",
+        property_map.date_prop: "date",
+        property_map.recording_prop: "files",
     }
+    if property_map.contacts_mode == "formula":
+        payload[property_map.contacts_prop] = "formula"
+    else:
+        payload["@contacts_mode"] = property_map.contacts_mode
+        if property_map.contacts_mode == "relation":
+            payload[property_map.contacts_relation_prop] = "relation"
+            payload["@contacts_target_prop"] = property_map.contacts_target_prop
+    # Legacy hardcoded "relation" here; the default map inherits NOTION_PROJECT_PROP_TYPE, which
+    # is "relation" in prod, so the default shape still hashes to the legacy payload.
+    payload[property_map.project_prop] = property_map.project_prop_type
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -67,7 +82,8 @@ def require_notion_preflight(settings: Settings, recruiter: RecruiterConfig) -> 
         recruiter.notion_preflight_completed_at is not None
         and recruiter.notion_preflight_database_id == recruiter.notion_database_id
         and recruiter.notion_preflight_token_hash == notion_token_hash(settings)
-        and recruiter.notion_preflight_schema_hash == notion_schema_hash(settings)
+        and recruiter.notion_preflight_schema_hash
+        == notion_schema_hash(resolve_notion_property_map(settings, recruiter))
         and bool(recruiter.notion_preflight_synthetic_page_id)
     )
     if not valid:

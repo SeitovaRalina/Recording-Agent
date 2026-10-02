@@ -16,6 +16,7 @@ from app.db.models.notion_reassignment_proposal import (
 )
 from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.recruiter_schema import NotionPropertyMap, resolve_notion_property_map
 from app.tools.notion import NotionClient, NotionPage
 
 
@@ -36,16 +37,26 @@ class NotionReassignmentService:
         self._notion = notion
         self._settings = settings
 
+    def _props(self, recruiter: RecruiterConfig) -> NotionPropertyMap:
+        try:
+            return resolve_notion_property_map(self._settings, recruiter)
+        except PermissionError as error:
+            raise NotionReassignmentRejectedError(str(error)) from error
+
     async def resolve_targets(self, recruiter: RecruiterConfig, hint: str) -> list[NotionPage]:
+        props = self._props(recruiter)
         return await self._notion.resolve_reassignment_targets(
             recruiter.notion_database_id,
             hint,
-            name_prop=self._settings.notion_name_prop,
-            date_prop=self._settings.notion_date_prop,
-            recording_prop=self._settings.notion_recording_prop,
-            contacts_prop=self._settings.notion_contacts_prop,
-            project_prop=self._settings.notion_project_prop,
-            project_prop_type=self._settings.notion_project_prop_type,
+            name_prop=props.name_prop,
+            date_prop=props.date_prop,
+            recording_prop=props.recording_prop,
+            contacts_prop=props.contacts_prop,
+            project_prop=props.project_prop,
+            project_prop_type=props.project_prop_type,
+            contacts_mode=props.contacts_mode,
+            contacts_relation_prop=props.contacts_relation_prop,
+            contacts_target_prop=props.contacts_target_prop,
         )
 
     async def propose(
@@ -53,18 +64,16 @@ class NotionReassignmentService:
         session: AsyncSession,
         *,
         recording: Recording,
+        recruiter: RecruiterConfig,
         recruiter_user_id: str,
         dm_channel_id: str,
         target: NotionPage,
     ) -> ReassignmentProposalResult:
         if not recording.notion_page_id or not recording.synology_share_url:
             raise NotionReassignmentRejectedError("Recording lacks an active Notion link")
-        source = await self._notion.get_recording_field(
-            recording.notion_page_id, self._settings.notion_recording_prop
-        )
-        target_snapshot = await self._notion.get_recording_field(
-            target.id, self._settings.notion_recording_prop
-        )
+        recording_prop = self._props(recruiter).recording_prop
+        source = await self._notion.get_recording_field(recording.notion_page_id, recording_prop)
+        target_snapshot = await self._notion.get_recording_field(target.id, recording_prop)
         capability = secrets.token_urlsafe(32)
         expiry = datetime.now(UTC) + timedelta(seconds=self._settings.review_token_ttl_seconds)
         proposal = NotionReassignmentProposal(
@@ -88,6 +97,7 @@ class NotionReassignmentService:
         session: AsyncSession,
         *,
         proposal_id: uuid.UUID,
+        recruiter: RecruiterConfig,
         recruiter_user_id: str,
         dm_channel_id: str,
         capability: str,
@@ -125,15 +135,14 @@ class NotionReassignmentService:
             raise NotionReassignmentRejectedError(
                 "Recording changed; create a new reassignment proposal"
             )
+        if recording.disk_owner_email != recruiter.email:
+            raise NotionReassignmentRejectedError("Recording not found")
+        recording_prop = self._props(recruiter).recording_prop
         target_written = (
             proposal.result is not None and proposal.result.get("phase") == "target_written"
         )
-        source = await self._notion.get_recording_field(
-            proposal.source_page_id, self._settings.notion_recording_prop
-        )
-        target = await self._notion.get_recording_field(
-            proposal.target_page_id, self._settings.notion_recording_prop
-        )
+        source = await self._notion.get_recording_field(proposal.source_page_id, recording_prop)
+        target = await self._notion.get_recording_field(proposal.target_page_id, recording_prop)
         if not target_written and (
             source != proposal.source_snapshot or target != proposal.target_snapshot
         ):
@@ -154,12 +163,12 @@ class NotionReassignmentService:
         if not target_written:
             await self._notion.replace_recording_link(
                 proposal.target_page_id,
-                recording_prop=self._settings.notion_recording_prop,
+                recording_prop=recording_prop,
                 filename=filename,
                 url=recording.synology_share_url or "",
             )
             verified = await self._notion.get_recording_field(
-                proposal.target_page_id, self._settings.notion_recording_prop
+                proposal.target_page_id, recording_prop
             )
             if not _has_url(verified, recording.synology_share_url or ""):
                 raise NotionReassignmentRejectedError(
@@ -168,7 +177,7 @@ class NotionReassignmentService:
             proposal.result = {"phase": "target_written", "target_page_id": proposal.target_page_id}
             await session.commit()
         await self._notion.clear_recording_link(
-            proposal.source_page_id, recording_prop=self._settings.notion_recording_prop
+            proposal.source_page_id, recording_prop=recording_prop
         )
         recording.notion_page_id = proposal.target_page_id
         recording.version += 1

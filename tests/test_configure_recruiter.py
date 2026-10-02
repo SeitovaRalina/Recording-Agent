@@ -6,19 +6,24 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db.models.recruiter_calendar import RecruiterCalendar
+from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash
+from app.services.recruiter_schema import default_notion_property_map
 from app.tools.notion import NotionClient, NotionDatabaseInspection, NotionDataSourceSchema
 from tools.setup.configure_recruiter import (
     DatabaseInspection,
     NotionInspector,
+    _storage_base_folder,
     activate_recruiter,
     configure_recruiter,
     parse_notion_database_id,
     preflight_recruiter,
     preflight_recruiter_notion,
+    set_daily_digest,
 )
 
 
@@ -63,6 +68,21 @@ async def test_notion_inspector_returns_real_title_with_single_probe() -> None:
     assert inspection.property_types["Name"] == "title"
     assert database_route.call_count == 1
     assert schema_route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "prefix", "expected"),
+    [
+        ("synology", "/Recruiting-NE/2. Interviews/", "/Recruiting-NE/2. Interviews"),
+        ("synology", "Recruiting-NE/2. Interviews", "/Recruiting-NE/2. Interviews"),
+        ("minio", "/test-prefix/", "test-prefix"),
+    ],
+)
+def test_storage_base_folder_is_absolute_only_for_synology(
+    provider: str, prefix: str, expected: str
+) -> None:
+    settings = Settings.model_construct(storage_provider=provider)
+    assert _storage_base_folder(settings, prefix) == expected
 
 
 def test_parse_explicit_notion_target() -> None:
@@ -111,6 +131,31 @@ async def test_bootstrap_creates_inactive_explicit_recruiter(session: object) ->
     assert recruiter.timezone == "Asia/Omsk"
     assert recruiter.mattermost_dm_channel == "dm-channel"
     inspector.inspect.assert_awaited_once()
+    assert recruiter.daily_digest_enabled is True
+
+
+@pytest.mark.anyio
+async def test_set_daily_digest_toggles_existing_active_recruiter(session: AsyncSession) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="/root",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    disabled = await set_daily_digest(session, recruiter_email="R@example.com", enabled=False)
+    assert disabled.daily_digest_enabled is False
+
+    enabled = await set_daily_digest(session, recruiter_email="r@example.com", enabled=True)
+    assert enabled.daily_digest_enabled is True
+
+
+@pytest.mark.anyio
+async def test_set_daily_digest_rejects_unknown_recruiter(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        await set_daily_digest(session, recruiter_email="missing@example.com", enabled=False)
 
 
 @pytest.mark.anyio
@@ -324,7 +369,9 @@ async def test_activation_fails_closed_then_activates_after_all_preflights(
 
     recruiter.notion_preflight_token_hash = notion_token_hash(settings)
     recruiter.notion_preflight_database_id = database_id
-    recruiter.notion_preflight_schema_hash = notion_schema_hash(settings)
+    recruiter.notion_preflight_schema_hash = notion_schema_hash(
+        default_notion_property_map(settings)
+    )
     recruiter.notion_preflight_synthetic_page_id = "synthetic-page"
     recruiter.notion_preflight_completed_at = datetime.now(UTC)
     session.add(  # type: ignore[attr-defined]

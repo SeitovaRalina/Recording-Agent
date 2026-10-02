@@ -582,7 +582,10 @@ async def resolve_notion_reassignment(
     recording = await session.get(Recording, recording_id)
     if recording is None or recording.disk_owner_email != recruiter.email:
         raise HTTPException(status_code=404, detail="Recording not found")
-    pages = await _notion_reassignment_service(request).resolve_targets(recruiter, body.hint)
+    try:
+        pages = await _notion_reassignment_service(request).resolve_targets(recruiter, body.hint)
+    except NotionReassignmentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return ReassignmentResolveResponse(
         items=[
             ReassignmentTargetItem(
@@ -612,15 +615,19 @@ async def propose_notion_reassignment(
     recording = await session.get(Recording, recording_id)
     if recording is None or recording.disk_owner_email != recruiter.email:
         raise HTTPException(status_code=404, detail="Recording not found")
-    pages = await _notion_reassignment_service(request).resolve_targets(
-        recruiter, body.target_page_id
-    )
+    try:
+        pages = await _notion_reassignment_service(request).resolve_targets(
+            recruiter, body.target_page_id
+        )
+    except NotionReassignmentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     if len(pages) != 1 or pages[0].id != body.target_page_id:
         raise HTTPException(status_code=409, detail="Target Notion card is not a bounded candidate")
     try:
         proposal = await _notion_reassignment_service(request).propose(
             session,
             recording=recording,
+            recruiter=recruiter,
             recruiter_user_id=body.recruiter_user_id,
             dm_channel_id=body.mattermost_dm_channel_id,
             target=pages[0],
@@ -650,10 +657,14 @@ async def confirm_notion_reassignment(
     session: Session,
     request: Request,
 ) -> RecordingRerouteResponse:
+    recruiter = await _bound_recruiter(
+        session, body.recruiter_user_id, body.mattermost_dm_channel_id
+    )
     try:
         recording = await _notion_reassignment_service(request).confirm(
             session,
             proposal_id=proposal_id,
+            recruiter=recruiter,
             recruiter_user_id=body.recruiter_user_id,
             dm_channel_id=body.mattermost_dm_channel_id,
             capability=body.capability.get_secret_value(),

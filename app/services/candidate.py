@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.recruiter_schema import resolve_notion_property_map
 from app.tools.notion import NotionClient, NotionPage, NotionRelationChoice
 
 MAX_CANDIDATE_CHOICES = 10
@@ -46,16 +47,20 @@ class CandidateService:
         event_date = recording.calendar_dtstart.astimezone(
             ZoneInfo(self._settings.scan_local_timezone)
         ).date()
+        props = resolve_notion_property_map(self._settings, recruiter)
         pages = await self._notion.search_pages(
             recruiter.notion_database_id,
             match.group(1).strip(),
             event_date,
-            self._settings.notion_name_prop,
-            self._settings.notion_date_prop,
-            self._settings.notion_recording_prop,
-            self._settings.notion_project_prop,
-            self._settings.notion_project_prop_type,
-            self._settings.notion_contacts_prop,
+            props.name_prop,
+            props.date_prop,
+            props.recording_prop,
+            props.project_prop,
+            props.project_prop_type,
+            props.contacts_prop,
+            contacts_mode=props.contacts_mode,
+            contacts_relation_prop=props.contacts_relation_prop,
+            contacts_target_prop=props.contacts_target_prop,
         )
         if not pages:
             return CandidateMatchResult(reason="no_candidate_found", candidates=[])

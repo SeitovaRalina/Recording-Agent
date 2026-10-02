@@ -17,6 +17,7 @@ from app.config import Settings
 from app.db.models.recording import Recording
 from app.db.models.recruiter_config import RecruiterConfig
 from app.db.models.storage_destination import StorageDestination
+from app.services.recruiter_schema import resolve_synology_roots
 from app.services.storage import StorageBackend, StreamingUnsupportedError
 from app.tools.disk import DISK_API_BASE, DiskScanner
 from app.tools.synology import SynologyAPIError, SynologyBackend
@@ -50,9 +51,7 @@ class TransferService:
         self._disk = disk
         self._storage = storage
         self._client = client
-        self._synology_interview_roots = (
-            settings.synology_interview_roots if settings is not None else ()
-        )
+        self._settings = settings
 
     async def transfer(
         self,
@@ -76,7 +75,7 @@ class TransferService:
                 raise TransferError("destination", ValueError("storage destination is unavailable"))
             try:
                 folder, root = _canonical_allowed_destination(
-                    destination.canonical_path, self._synology_interview_roots
+                    destination.canonical_path, resolve_synology_roots(self._settings, recruiter)
                 )
                 await self._storage.validate_existing_directory_under_root(root, folder)
             except (SynologyAPIError, ValueError) as error:

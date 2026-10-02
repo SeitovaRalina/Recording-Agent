@@ -37,6 +37,7 @@ from app.services.matching import (
 )
 from app.services.pipeline_trace import safe_url, trace
 from app.services.question_queue import QuestionQueueService
+from app.services.recruiter_schema import resolve_matching_signals, resolve_notion_property_map
 from app.services.reviews import InteractionBinding, InteractionBindingConflict, ReviewService
 from app.services.routing_jobs import RoutingJobRejectedError, RoutingJobService
 from app.services.status import StatusService
@@ -52,9 +53,9 @@ SUMMARY_LOCAL_HOUR = 18
 SUMMARY_LOCAL_MINUTE = 0
 SUMMARY_CLAIM_TTL = timedelta(minutes=15)
 NOTION_TEMPORARILY_UNAVAILABLE = "notion_temporarily_unavailable"
-_SCAN_LOCKS: WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
-] = WeakKeyDictionary()
+_SCAN_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    WeakKeyDictionary()
+)
 
 TRANSFER_RESUMABLE_STATUSES = (
     RecordingStatus.CALENDAR_EVENT_FOUND,
@@ -223,7 +224,13 @@ async def _scan_recruiter_unlocked(
     for recording_id in recording_ids:
         try:
             result = await _resume_found_recording(
-                recording_id, session_factory, cal, matcher, active_status, active_settings
+                recording_id,
+                session_factory,
+                cal,
+                matcher,
+                active_status,
+                active_settings,
+                recruiter,
             )
             if result is not None:
                 if recording_id not in summary.recording_ids:
@@ -342,19 +349,13 @@ async def _validate_offline_interaction_binding(
                 Recording.disk_owner_email == recruiter.email,
                 ManualReview.status == ManualReviewStatus.PENDING,
                 or_(
-                    ManualReview.recruiter_user_id.is_distinct_from(
-                        binding.recruiter_user_id
-                    ),
-                    ManualReview.mattermost_channel_id.is_distinct_from(
-                        binding.dm_channel_id
-                    ),
+                    ManualReview.recruiter_user_id.is_distinct_from(binding.recruiter_user_id),
+                    ManualReview.mattermost_channel_id.is_distinct_from(binding.dm_channel_id),
                 ),
             )
         )
     if conflicting is not None:
-        raise InteractionBindingConflict(
-            "Pending question belongs to another interaction"
-        )
+        raise InteractionBindingConflict("Pending question belongs to another interaction")
 
 
 async def _resume_transfer_recording(
@@ -856,10 +857,11 @@ async def _run_transfer_recording(
         try:
             if recording.calendar_dtstart is None:
                 raise ValueError("Matched calendar date is missing")
+            notion_props = resolve_notion_property_map(settings, recruiter)
             await notion.update_page_interview(
                 page.id,
-                date_prop=settings.notion_date_prop,
-                recording_prop=settings.notion_recording_prop,
+                date_prop=notion_props.date_prop,
+                recording_prop=notion_props.recording_prop,
                 event_date=recording.calendar_dtstart.astimezone(
                     ZoneInfo(settings.scan_local_timezone)
                 ).date(),
@@ -1086,10 +1088,11 @@ async def _resume_committed_transfer_steps(
         try:
             if recording.calendar_dtstart is None:
                 raise ValueError("Matched calendar date is missing")
+            notion_props = resolve_notion_property_map(settings, recruiter)
             await notion.update_page_interview(
                 cast(str, recording.notion_page_id),
-                date_prop=settings.notion_date_prop,
-                recording_prop=settings.notion_recording_prop,
+                date_prop=notion_props.date_prop,
+                recording_prop=notion_props.recording_prop,
                 event_date=recording.calendar_dtstart.astimezone(
                     ZoneInfo(settings.scan_local_timezone)
                 ).date(),
@@ -1224,6 +1227,7 @@ async def _resume_found_recording(
     matcher: InterviewMatcher,
     status: StatusService | None = None,
     settings: Settings | None = None,
+    recruiter: RecruiterConfig | None = None,
 ) -> MatchResult | None:
     lease_token = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -1249,7 +1253,7 @@ async def _resume_found_recording(
         return None
     try:
         return await _run_found_recording(
-            recording_id, session_factory, cal, matcher, status, settings
+            recording_id, session_factory, cal, matcher, status, settings, recruiter
         )
     finally:
         async with session_factory() as session:
@@ -1271,12 +1275,29 @@ async def _run_found_recording(
     matcher: InterviewMatcher,
     status: StatusService | None = None,
     settings: Settings | None = None,
+    recruiter: RecruiterConfig | None = None,
 ) -> MatchResult | None:
     active_status = status or StatusService()
     active_settings = settings or get_settings()
+    try:
+        signals = resolve_matching_signals(recruiter)
+        signals_error: PermissionError | None = None
+    except PermissionError as error:
+        signals = None
+        signals_error = error
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
+            return None
+        if signals_error is not None:
+            await active_status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="matching_signals_config",
+                error_message=str(signals_error),
+            )
+            await session.commit()
             return None
         try:
             parsed = matcher.parse_filename(recording.disk_filename)
@@ -1293,7 +1314,7 @@ async def _run_found_recording(
                 calendar_window_end=recording_time + timedelta(hours=2),
             )
         except (ValueError, KeyError):
-            result = matcher.score(recording, [])
+            result = matcher.score(recording, [], signals=signals)
             await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
@@ -1336,7 +1357,7 @@ async def _run_found_recording(
             await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
-        result = matcher.score(recording, events)
+        result = matcher.score(recording, events, signals=signals)
         trace(
             active_settings,
             "pipeline.calendar_match.decision",
@@ -1673,6 +1694,7 @@ async def run_due_recruiter_summaries(
                     recruiter_user_id=recruiter.mattermost_user_id,
                     dm_channel_id=recruiter.mattermost_dm_channel,
                     local_date=local_date,
+                    send=recruiter.daily_digest_enabled,
                 )
                 await session.commit()
         except Exception:

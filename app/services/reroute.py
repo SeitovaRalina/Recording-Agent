@@ -14,6 +14,7 @@ from app.db.models.recording_reroute import RecordingReroute, RerouteStatus
 from app.db.models.recording_storage_artifact import RecordingStorageArtifact
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.destinations import DestinationService
+from app.services.recruiter_schema import resolve_notion_property_map, resolve_synology_roots
 from app.services.storage import StorageCollisionError
 from app.tools.notion import NotionClient
 from app.tools.synology import SynologyBackend
@@ -118,7 +119,8 @@ class RerouteService:
         session.add(operation)
         await session.commit()
         try:
-            roots = self._settings.synology_interview_roots
+            roots = resolve_synology_roots(self._settings, recruiter)
+            recording_prop = resolve_notion_property_map(self._settings, recruiter).recording_prop
             root = _allowed_root(roots, artifact.file_path)
             target_root = _allowed_root(roots, destination.canonical_path)
             if operation.status == RerouteStatus.PENDING:
@@ -179,12 +181,12 @@ class RerouteService:
             if operation.status == RerouteStatus.LINKED:
                 await self._notion.replace_recording_link(
                     recording.notion_page_id,
-                    recording_prop=self._settings.notion_recording_prop,
+                    recording_prop=recording_prop,
                     filename=filename,
                     url=url,
                 )
                 current = await self._notion.get_recording_field(
-                    recording.notion_page_id, self._settings.notion_recording_prop
+                    recording.notion_page_id, recording_prop
                 )
                 if not _field_has_exact_url(current, url):
                     raise RerouteRejectedError(
