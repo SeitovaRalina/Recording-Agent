@@ -117,13 +117,18 @@ def normalize_synology_roots(value: Any) -> tuple[str, ...]:
     return Settings.validate_synology_interview_roots(tuple(parsed))
 
 
-# A parenthesized group that itself contains an unescaped '+'/'*' quantifier, immediately
-# followed by another '+'/'*'/'{...}' quantifier — the classic catastrophic-backtracking shape
-# (e.g. "(a+)+", "(a*)*", "([a-zA-Z]+)*"). Flat (non-nested) groups only; this is a heuristic,
+# A parenthesized group immediately followed by another '+'/'*'/'{...}' quantifier, whose own
+# content either (a) contains its own unescaped '+'/'*' quantifier (e.g. "(a+)+", "(a*)*",
+# "([a-zA-Z]+)*") or (b) contains top-level alternation (e.g. "(a|a)*", "(a|aa)*") — the two
+# classic catastrophic-backtracking shapes. Flat (non-nested) groups only; this is a heuristic,
 # not an exhaustive ReDoS detector, proportionate to the threat model (an authenticated
-# operator's CLI typo, not adversarial input).
+# operator's CLI typo, not adversarial input). Alternation under a quantifier is flagged even
+# when the alternatives are disjoint (e.g. "(cat|dog)+" is actually safe) — a false positive is
+# cheap here since nothing uses this override today; a genuine ambiguous-overlap case ("(a|a)*")
+# is not.
 _NESTED_QUANTIFIER_RE = re.compile(r"\(([^()]*)\)(?:[+*]|\{\d+(?:,\d*)?\})")
 _UNESCAPED_QUANTIFIER_RE = re.compile(r"(?<!\\)[+*]")
+_UNESCAPED_ALTERNATION_RE = re.compile(r"(?<!\\)\|")
 
 
 def reject_dangerous_regex(value: str) -> str:
@@ -139,11 +144,12 @@ def reject_dangerous_regex(value: str) -> str:
     except re.error as error:
         raise ValueError(f"Invalid regular expression {value!r}: {error}") from error
     for match in _NESTED_QUANTIFIER_RE.finditer(value):
-        if _UNESCAPED_QUANTIFIER_RE.search(match.group(1)):
+        content = match.group(1)
+        if _UNESCAPED_QUANTIFIER_RE.search(content) or _UNESCAPED_ALTERNATION_RE.search(content):
             raise ValueError(
-                f"Regular expression {value!r} rejected: a group containing its own '+'/'*' "
-                "quantifier followed by another quantifier risks catastrophic backtracking "
-                "(e.g. '(a+)+')"
+                f"Regular expression {value!r} rejected: a quantified group containing its own "
+                "quantifier or alternation risks catastrophic backtracking "
+                "(e.g. '(a+)+', '(a|a)*')"
             )
     return value
 

@@ -286,7 +286,9 @@ def test_partial_matching_signals_overrides_only_given_field() -> None:
     assert resolved.interview_pattern.pattern == INTERVIEW_PATTERN.pattern
 
 
-@pytest.mark.parametrize("pattern", ["(a+)+", "(a*)*", "([a-zA-Z]+)*"])
+@pytest.mark.parametrize(
+    "pattern", ["(a+)+", "(a*)*", "([a-zA-Z]+)*", "(a|a)*", "(a|aa)*", "(a|a)+"]
+)
 def test_reject_dangerous_regex_rejects_classic_catastrophic_backtracking_shapes(
     pattern: str,
 ) -> None:
