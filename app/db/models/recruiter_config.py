@@ -37,6 +37,10 @@ class RecruiterConfig(Base):
     notion_property_map: Mapped[dict[str, object] | None] = mapped_column(JSON)
     # NULL/empty means "inherit Settings.synology_interview_roots".
     synology_interview_roots: Mapped[list[str] | None] = mapped_column(JSON)
+    # NULL means "inherit app.services.matching's compiled NAME_PATTERN/INTERVIEW_PATTERN/
+    # BOOKING_PATTERN defaults"; any subset of MatchingSignalsOverrides keys overrides only those
+    # fields. See app/services/recruiter_schema.py:resolve_matching_signals.
+    matching_signals: Mapped[dict[str, object] | None] = mapped_column(JSON)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )

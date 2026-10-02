@@ -77,6 +77,25 @@ NULL means "inherit the global `Settings` value", so existing rows need no backf
   stripped, deduplicated). NULL or empty inherits `Settings.synology_interview_roots`. This is
   separate from `synology_base_folder`, the default upload prefix.
 
+A third nullable JSON column, `matching_signals`, makes `InterviewMatcher`'s regex signals
+per-recruiter, following the same NULL-inherits/per-field-merge convention:
+
+- `matching_signals` — any subset of `name_pattern`, `interview_pattern`, `booking_pattern`
+  (regex source strings, not compiled patterns). A missing key falls back to
+  `app/services/matching.py`'s compiled `NAME_PATTERN`/`INTERVIEW_PATTERN`/`BOOKING_PATTERN`
+  constants (not a `Settings` field — this column's defaults live in `matching.py`). Each
+  overridden pattern is validated by `app/services/recruiter_schema.py:reject_dangerous_regex`
+  for both regex syntax (`re.compile`) and a static heuristic that rejects classic
+  catastrophic-backtracking shapes (a parenthesized group containing its own `+`/`*` quantifier,
+  itself followed by another `+`/`*`/`{...}`, e.g. `(a+)+`). **An override that doesn't embed
+  `(?i)` loses the implicit case-insensitivity the global `INTERVIEW_PATTERN`/`BOOKING_PATTERN`
+  have today** — a real behavior difference, not a silent surprise, for whoever writes an
+  override. Set or clear it with
+  `configure_recruiter.py set-matching-signals --email <email> --json <inline-or-@file>|--clear`;
+  unknown keys or invalid/dangerous patterns are rejected before the row is written. A malformed
+  stored value (e.g. reached via a raw DB edit) raises `PermissionError` at resolve time, the same
+  convention as a malformed `notion_property_map`.
+
 The stored Notion preflight schema hash is computed from the recruiter's resolved map, so changing
 one recruiter's map invalidates only that recruiter's preflight. The global-default map hashes to
 the same value as before per-recruiter maps existed.

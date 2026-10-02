@@ -1,18 +1,25 @@
-"""Per-recruiter Notion property map and Synology interview roots.
+"""Per-recruiter Notion property map, Synology interview roots, and matching signals.
 
-Each recruiter row may override the global `Settings.notion_*` property names and
-`Settings.synology_interview_roots`. A NULL column means "inherit the global value"; a partial
-Notion map overrides only the keys it sets (per-field fallback).
+Each recruiter row may override the global `Settings.notion_*` property names,
+`Settings.synology_interview_roots`, and the `app.services.matching` regex signals. A NULL
+column means "inherit the global value"; a partial map overrides only the keys it sets
+(per-field fallback).
+
+`resolve_matching_signals` deliberately deviates from the `resolve_notion_property_map`/
+`resolve_synology_roots` precedent by taking no `settings` argument: its defaults live in
+`app.services.matching` module constants (`DEFAULT_MATCHING_SIGNALS`), not a `Settings` field.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
+from app.services.matching import DEFAULT_MATCHING_SIGNALS, MatchingSignals
 
 ContactsMode = Literal["none", "formula", "relation"]
 ProjectPropType = Literal["rich_text", "relation"]
@@ -108,6 +115,98 @@ def normalize_synology_roots(value: Any) -> tuple[str, ...]:
     """Same JSON-or-CSV parsing and absolute/rstrip/dedupe rules as `Settings`."""
     parsed = Settings.parse_synology_interview_roots(value)
     return Settings.validate_synology_interview_roots(tuple(parsed))
+
+
+# A parenthesized group that itself contains an unescaped '+'/'*' quantifier, immediately
+# followed by another '+'/'*'/'{...}' quantifier — the classic catastrophic-backtracking shape
+# (e.g. "(a+)+", "(a*)*", "([a-zA-Z]+)*"). Flat (non-nested) groups only; this is a heuristic,
+# not an exhaustive ReDoS detector, proportionate to the threat model (an authenticated
+# operator's CLI typo, not adversarial input).
+_NESTED_QUANTIFIER_RE = re.compile(r"\(([^()]*)\)(?:[+*]|\{\d+(?:,\d*)?\})")
+_UNESCAPED_QUANTIFIER_RE = re.compile(r"(?<!\\)[+*]")
+
+
+def reject_dangerous_regex(value: str) -> str:
+    """Validate regex syntax and reject classic catastrophic-backtracking shapes.
+
+    This is the single validation choke point: both the `set-matching-signals` CLI write path
+    (via `merge_matching_signals`/`MatchingSignalsOverrides`) and every `resolve_matching_signals`
+    read go through it, so a pattern that somehow reached the DB via a raw edit is still caught at
+    resolve time, not silently accepted.
+    """
+    try:
+        re.compile(value)
+    except re.error as error:
+        raise ValueError(f"Invalid regular expression {value!r}: {error}") from error
+    for match in _NESTED_QUANTIFIER_RE.finditer(value):
+        if _UNESCAPED_QUANTIFIER_RE.search(match.group(1)):
+            raise ValueError(
+                f"Regular expression {value!r} rejected: a group containing its own '+'/'*' "
+                "quantifier followed by another quantifier risks catastrophic backtracking "
+                "(e.g. '(a+)+')"
+            )
+    return value
+
+
+class MatchingSignalsOverrides(BaseModel):
+    """Shape of `recruiter_config.matching_signals`: any subset of MatchingSignals keys.
+
+    Values are regex source strings, not compiled patterns. Unlike the global
+    `INTERVIEW_PATTERN`/`BOOKING_PATTERN` constants, an override is compiled with no implicit
+    flags — an override that doesn't embed `(?i)` loses case-insensitivity.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name_pattern: str | None = None
+    interview_pattern: str | None = None
+    booking_pattern: str | None = None
+
+    @field_validator("name_pattern", "interview_pattern", "booking_pattern")
+    @classmethod
+    def validate_safe_regex(cls, value: str | None) -> str | None:
+        return reject_dangerous_regex(value) if value is not None else value
+
+
+def merge_matching_signals(overrides: dict[str, Any] | None) -> MatchingSignals:
+    """Validate `overrides` and merge them key-by-key over `DEFAULT_MATCHING_SIGNALS`."""
+    if not overrides:
+        return DEFAULT_MATCHING_SIGNALS
+    parsed = MatchingSignalsOverrides.model_validate(overrides)
+    return MatchingSignals(
+        name_pattern=(
+            re.compile(parsed.name_pattern)
+            if parsed.name_pattern is not None
+            else DEFAULT_MATCHING_SIGNALS.name_pattern
+        ),
+        interview_pattern=(
+            re.compile(parsed.interview_pattern)
+            if parsed.interview_pattern is not None
+            else DEFAULT_MATCHING_SIGNALS.interview_pattern
+        ),
+        booking_pattern=(
+            re.compile(parsed.booking_pattern)
+            if parsed.booking_pattern is not None
+            else DEFAULT_MATCHING_SIGNALS.booking_pattern
+        ),
+    )
+
+
+def resolve_matching_signals(recruiter: RecruiterConfig | None) -> MatchingSignals:
+    """Recruiter-specific matching signals; NULL column (or no recruiter) means global defaults.
+
+    A malformed stored value is recruiter misconfiguration: it raises PermissionError, the type
+    callers already handle for recruiter scope/preflight failures (see
+    `resolve_notion_property_map`). Unlike that function, this takes no `settings` argument —
+    defaults live in `app.services.matching` module constants, not a `Settings` field.
+    """
+    raw = recruiter.matching_signals if recruiter is not None else None
+    if raw is not None and not isinstance(raw, dict):
+        raise PermissionError("Recruiter matching_signals must be a JSON object")
+    try:
+        return merge_matching_signals(raw)
+    except ValidationError as error:
+        raise PermissionError("Recruiter matching_signals is invalid") from error
 
 
 def resolve_synology_roots(

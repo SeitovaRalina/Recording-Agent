@@ -37,7 +37,7 @@ from app.services.matching import (
 )
 from app.services.pipeline_trace import safe_url, trace
 from app.services.question_queue import QuestionQueueService
-from app.services.recruiter_schema import resolve_notion_property_map
+from app.services.recruiter_schema import resolve_matching_signals, resolve_notion_property_map
 from app.services.reviews import InteractionBinding, InteractionBindingConflict, ReviewService
 from app.services.routing_jobs import RoutingJobRejectedError, RoutingJobService
 from app.services.status import StatusService
@@ -224,7 +224,13 @@ async def _scan_recruiter_unlocked(
     for recording_id in recording_ids:
         try:
             result = await _resume_found_recording(
-                recording_id, session_factory, cal, matcher, active_status, active_settings
+                recording_id,
+                session_factory,
+                cal,
+                matcher,
+                active_status,
+                active_settings,
+                recruiter,
             )
             if result is not None:
                 if recording_id not in summary.recording_ids:
@@ -1221,6 +1227,7 @@ async def _resume_found_recording(
     matcher: InterviewMatcher,
     status: StatusService | None = None,
     settings: Settings | None = None,
+    recruiter: RecruiterConfig | None = None,
 ) -> MatchResult | None:
     lease_token = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -1246,7 +1253,7 @@ async def _resume_found_recording(
         return None
     try:
         return await _run_found_recording(
-            recording_id, session_factory, cal, matcher, status, settings
+            recording_id, session_factory, cal, matcher, status, settings, recruiter
         )
     finally:
         async with session_factory() as session:
@@ -1268,12 +1275,29 @@ async def _run_found_recording(
     matcher: InterviewMatcher,
     status: StatusService | None = None,
     settings: Settings | None = None,
+    recruiter: RecruiterConfig | None = None,
 ) -> MatchResult | None:
     active_status = status or StatusService()
     active_settings = settings or get_settings()
+    try:
+        signals = resolve_matching_signals(recruiter)
+        signals_error: PermissionError | None = None
+    except PermissionError as error:
+        signals = None
+        signals_error = error
     async with session_factory() as session:
         recording = await session.get(Recording, recording_id)
         if recording is None or recording.status != RecordingStatus.FOUND:
+            return None
+        if signals_error is not None:
+            await active_status.advance(
+                session,
+                recording,
+                RecordingStatus.FAILED,
+                error_step="matching_signals_config",
+                error_message=str(signals_error),
+            )
+            await session.commit()
             return None
         try:
             parsed = matcher.parse_filename(recording.disk_filename)
@@ -1290,7 +1314,7 @@ async def _run_found_recording(
                 calendar_window_end=recording_time + timedelta(hours=2),
             )
         except (ValueError, KeyError):
-            result = matcher.score(recording, [])
+            result = matcher.score(recording, [], signals=signals)
             await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
@@ -1333,7 +1357,7 @@ async def _run_found_recording(
             await _apply_match_result(session, recording, result, active_status)
             await session.commit()
             return result
-        result = matcher.score(recording, events)
+        result = matcher.score(recording, events, signals=signals)
         trace(
             active_settings,
             "pipeline.calendar_match.decision",

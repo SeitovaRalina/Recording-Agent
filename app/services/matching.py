@@ -24,6 +24,28 @@ FILENAME_PATTERN = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})_(?P
 MAX_EVENT_SPAN_FOR_POOL = timedelta(hours=20)
 
 
+@dataclass(frozen=True)
+class MatchingSignals:
+    """The three regex signals `InterviewMatcher` consults; per-recruiter overridable.
+
+    `NULL` on `recruiter_config.matching_signals` resolves to `DEFAULT_MATCHING_SIGNALS`, built
+    from the module-level `NAME_PATTERN`/`INTERVIEW_PATTERN`/`BOOKING_PATTERN` constants below,
+    which stay the single source of truth for global behavior. See
+    `app/services/recruiter_schema.py` for the override/merge/resolve machinery.
+    """
+
+    name_pattern: re.Pattern[str]
+    interview_pattern: re.Pattern[str]
+    booking_pattern: re.Pattern[str]
+
+
+DEFAULT_MATCHING_SIGNALS = MatchingSignals(
+    name_pattern=NAME_PATTERN,
+    interview_pattern=INTERVIEW_PATTERN,
+    booking_pattern=BOOKING_PATTERN,
+)
+
+
 class RecordingLike(Protocol):
     disk_filename: str
     disk_created_at: datetime | None
@@ -126,7 +148,7 @@ class InterviewMatcher:
         return parse_recording_filename(filename, self._settings.recording_filename_timezone)
 
     def _score_event(
-        self, recording_start: datetime, event: ParsedVEVENT
+        self, recording_start: datetime, event: ParsedVEVENT, active_signals: MatchingSignals
     ) -> tuple[float, list[str]]:
         score = 0.0
         signals: list[str] = []
@@ -140,18 +162,24 @@ class InterviewMatcher:
         ):
             score += 0.35
             signals.append("time_overlap")
-        if NAME_PATTERN.search(event.summary):
+        if active_signals.name_pattern.search(event.summary):
             score += 0.25
             signals.append("name_in_summary")
-        if INTERVIEW_PATTERN.search(event.summary):
+        if active_signals.interview_pattern.search(event.summary):
             score += 0.05
             signals.append("interview_keywords")
-        if BOOKING_PATTERN.search(event.description):
+        if active_signals.booking_pattern.search(event.description):
             score += 0.30
             signals.append("booking_source_marker")
         return min(round(score, 2), 1.0), signals
 
-    def score(self, recording: RecordingLike, events: list[ParsedVEVENT]) -> MatchResult:
+    def score(
+        self,
+        recording: RecordingLike,
+        events: list[ParsedVEVENT],
+        signals: MatchingSignals | None = None,
+    ) -> MatchResult:
+        active_signals = signals or DEFAULT_MATCHING_SIGNALS
         try:
             parsed = parse_recording_filename(
                 recording.disk_filename, self._settings.recording_filename_timezone
@@ -180,7 +208,7 @@ class InterviewMatcher:
             # corroborates a genuine external booking (calink/calendly/cal.com), which
             # justifies bypassing the title check for calink-generated event summaries
             # that never match the Telemost recording filename by construction.
-            has_booking_marker = bool(BOOKING_PATTERN.search(event.description))
+            has_booking_marker = bool(active_signals.booking_pattern.search(event.description))
             if not title_matches and not has_booking_marker:
                 continue
             key = (event.calendar_id, event.uid, event.recurrence_id)
@@ -198,18 +226,18 @@ class InterviewMatcher:
         if unmonitored:
             return self._manual(ManualReviewReason.UNMONITORED_COLLISION, candidates=candidates)
         event = eligible[0]
-        confidence, signals = self._score_event(parsed.start_utc, event)
+        confidence, matched_signals = self._score_event(parsed.start_utc, event, active_signals)
         if confidence < self._settings.confidence_threshold:
             return self._manual(
                 ManualReviewReason.LOW_CONFIDENCE,
                 confidence=confidence,
-                signals=signals,
+                signals=matched_signals,
                 candidates=candidates,
             )
         return MatchResult(
             best_event=event,
             confidence=confidence,
-            signals=signals,
+            signals=matched_signals,
             manual_review_required=False,
         )
 

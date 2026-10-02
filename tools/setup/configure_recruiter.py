@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -21,10 +23,12 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
 from app.services.recruiter_schema import (
     ContactsMode,
+    MatchingSignalsOverrides,
     NotionPropertyMap,
     NotionPropertyOverrides,
     ProjectPropType,
     default_notion_property_map,
+    merge_matching_signals,
     merge_notion_property_map,
     normalize_synology_roots,
     resolve_notion_property_map,
@@ -353,6 +357,36 @@ async def set_daily_digest(
     return recruiter
 
 
+async def set_matching_signals(
+    session: AsyncSession,
+    *,
+    recruiter_email: str,
+    overrides: dict[str, Any] | None,
+) -> RecruiterConfig:
+    """Set or clear an existing recruiter's `matching_signals` override (active or inactive).
+
+    `overrides` goes through `merge_matching_signals` (regex syntax + the dangerous-pattern
+    static complexity heuristic) before being persisted — the only sanctioned way to populate
+    the column until a real second recruiter scheme needs it. `None`/`{}` clears the override
+    (inherit `app.services.matching`'s global defaults).
+    """
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email.strip().casefold())
+    )
+    if recruiter is None:
+        raise ValueError("Recruiter config not found")
+    if overrides:
+        merge_matching_signals(overrides)  # raises ValidationError on bad/dangerous regex
+        stored: dict[str, Any] | None = MatchingSignalsOverrides.model_validate(
+            overrides
+        ).model_dump(exclude_none=True)
+    else:
+        stored = None
+    recruiter.matching_signals = stored
+    await session.commit()
+    return recruiter
+
+
 async def _inactive_recruiter(session: AsyncSession, recruiter_email: str) -> RecruiterConfig:
     recruiter = await session.scalar(
         select(RecruiterConfig).where(
@@ -476,6 +510,15 @@ async def _run(args: argparse.Namespace) -> None:
                         )
                         state = recruiter.daily_digest_enabled
                         print(f"{recruiter.email}: daily_digest_enabled={state}")
+                    elif args.command == "set-matching-signals":
+                        overrides = matching_signals_overrides_from_args(args)
+                        prompt = "Clear" if overrides is None else "Set"
+                        if input(f"{prompt} matching signals override? [yes/no] ").strip() != "yes":
+                            raise ValueError("Operator confirmation is required")
+                        recruiter = await set_matching_signals(
+                            session, recruiter_email=args.email, overrides=overrides
+                        )
+                        print(f"{recruiter.email}: matching_signals={recruiter.matching_signals}")
         finally:
             await engine.dispose()
 
@@ -501,6 +544,21 @@ def notion_overrides_from_args(args: argparse.Namespace) -> dict[str, Any] | Non
         if getattr(args, flag, None) is not None
     }
     return overrides or None
+
+
+def matching_signals_overrides_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    """`--clear` means no override (inherit global defaults); `--json` is inline or `@file`."""
+    if getattr(args, "clear", False):
+        return None
+    raw = args.json
+    text = Path(raw[1:]).read_text(encoding="utf-8") if raw.startswith("@") else raw
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Invalid JSON for matching signals: {error}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("Matching signals JSON must be an object")
+    return parsed or None
 
 
 def synology_roots_from_args(args: argparse.Namespace) -> list[str] | None:
@@ -543,6 +601,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_digest.add_argument("--email", required=True)
     set_digest.add_argument("--state", required=True, choices=["enabled", "disabled"])
+    set_matching_signals_parser = commands.add_parser(
+        "set-matching-signals",
+        help="Set or clear an existing recruiter's matching signals override",
+    )
+    set_matching_signals_parser.add_argument("--email", required=True)
+    matching_signals_group = set_matching_signals_parser.add_mutually_exclusive_group(required=True)
+    matching_signals_group.add_argument(
+        "--json", help="Inline JSON object of overrides, or @path/to/file.json"
+    )
+    matching_signals_group.add_argument(
+        "--clear", action="store_true", help="Clear the override (inherit global defaults)"
+    )
     return parser
 
 
