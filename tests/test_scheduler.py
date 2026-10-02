@@ -367,6 +367,126 @@ async def test_resume_regression_title_mismatch_persists_bounded_reason_only() -
 
 
 @pytest.mark.anyio
+async def test_malformed_matching_signals_fails_recording_not_the_scan() -> None:
+    """Resolving a malformed `recruiter.matching_signals` raises PermissionError, which
+    `_run_found_recording` catches (same convention as the `notion_preflight` failure path) and
+    advances the recording to FAILED with `error_step="matching_signals_config"` — it must not
+    crash and must never reach the calendar lookup.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    item = found("bad-matching-signals")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+    calendar = AsyncMock()
+    broken_recruiter = recruiter()
+    broken_recruiter.matching_signals = {"booking_pattern": "("}  # invalid regex syntax
+
+    result = await _resume_found_recording(
+        recording_id,
+        factory,
+        calendar,
+        InterviewMatcher(Settings(recording_filename_timezone="UTC")),
+        None,
+        None,
+        broken_recruiter,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert result is None
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.FAILED
+    assert loaded.error_step == "matching_signals_config"
+    calendar.find_events.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_scan_recruiter_with_matching_signals_override_matches_differently_than_null() -> (
+    None
+):
+    """End-to-end proof `scan_recruiter` actually consults the resolved per-recruiter signals:
+    same recording/event fixture (the real calink case, see test_matching.py), one recruiter with
+    `matching_signals=NULL` (today's `BOOKING_PATTERN`) auto-matches via the booking-marker
+    pool-entry path; a recruiter overriding `booking_pattern` to never match stays
+    `no_compatible_event` on the identical input.
+    """
+    start = datetime(2026, 9, 21, 14, 44, 43, tzinfo=UTC)
+    summary_text = "Собеседование в Effective c Лилией Акентьевой (Четова Дарья)"
+    description = (
+        "Участник: Четова Дарья (dashachetova@gmail.com)\n"
+        "https://telemost.360.yandex.ru/j/2973463676\n"
+        "Детали встречи, отмена и перенос: "
+        "https://calink.ru/liliya-akenteva/45min/45409?code=FAtvM1"
+    )
+    filename_title = "Ссылка для собеседования с Лилией Акентьевой"
+
+    async def run_scan(recruiter_row: RecruiterConfig) -> Recording | None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        disk = AsyncMock()
+        disk.list_new.return_value = [{"path": "disk:/override-case.webm"}]
+        disk.get_metadata.return_value = {
+            "disk_file_id": "override-case",
+            "disk_path": "disk:/override-case.webm",
+            "disk_filename": f"{start:%Y-%m-%d_%H%M%S}_{filename_title}.webm",
+            "disk_created_at": start,
+        }
+        calendar = AsyncMock()
+        calendar.find_events.return_value = [
+            ParsedVEVENT(
+                uid="event-1",
+                summary=summary_text,
+                dtstart_utc=start,
+                dtend_utc=start + timedelta(hours=1),
+                description=description,
+                organizer_email="recruiter@example.com",
+                attendees=[],
+                raw_ics="raw",
+                calendar_id=uuid.uuid4(),
+                calendar_url="https://caldav.test/interviews/",
+                calendar_display_name="Interviews",
+            )
+        ]
+        matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+        await scan_recruiter(
+            recruiter_row,
+            factory,
+            disk,
+            calendar,
+            matcher,
+            Settings(scan_local_timezone="UTC"),
+            start,
+        )
+        async with factory() as session:
+            persisted = await session.scalar(select(Recording))
+        await engine.dispose()
+        return persisted
+
+    null_recruiter = recruiter()
+    overridden_recruiter = recruiter()
+    overridden_recruiter.matching_signals = {"booking_pattern": r"https://never-matches\.example/"}
+
+    null_recording = await run_scan(null_recruiter)
+    overridden_recording = await run_scan(overridden_recruiter)
+
+    assert null_recording is not None
+    assert null_recording.status == RecordingStatus.CALENDAR_EVENT_FOUND
+
+    assert overridden_recording is not None
+    assert overridden_recording.status == RecordingStatus.MANUAL_REVIEW_REQUIRED
+    assert overridden_recording.manual_review_reason == "no_compatible_event"
+
+
+@pytest.mark.anyio
 async def test_persistence_failure_is_counted_in_recruiter_summary() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

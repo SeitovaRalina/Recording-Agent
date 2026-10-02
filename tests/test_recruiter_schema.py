@@ -8,6 +8,12 @@ from app.config import Settings
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import notion_schema_hash, notion_token_hash, require_notion_preflight
 from app.services.destinations import DestinationRejectedError, DestinationService
+from app.services.matching import (
+    BOOKING_PATTERN,
+    DEFAULT_MATCHING_SIGNALS,
+    INTERVIEW_PATTERN,
+    NAME_PATTERN,
+)
 from app.services.notion_reassignment import (
     NotionReassignmentRejectedError,
     NotionReassignmentService,
@@ -15,7 +21,10 @@ from app.services.notion_reassignment import (
 from app.services.recruiter_schema import (
     NotionPropertyMap,
     default_notion_property_map,
+    merge_matching_signals,
     merge_notion_property_map,
+    reject_dangerous_regex,
+    resolve_matching_signals,
     resolve_notion_property_map,
     resolve_synology_roots,
 )
@@ -31,6 +40,7 @@ def _recruiter(
     email: str = "r@example.com",
     notion_property_map: dict[str, object] | None = None,
     synology_interview_roots: list[str] | None = None,
+    matching_signals: dict[str, object] | None = None,
 ) -> RecruiterConfig:
     return RecruiterConfig(
         email=email,
@@ -38,6 +48,7 @@ def _recruiter(
         synology_base_folder="test",
         notion_property_map=notion_property_map,
         synology_interview_roots=synology_interview_roots,
+        matching_signals=matching_signals,
     )
 
 
@@ -250,3 +261,77 @@ async def test_reassignment_maps_malformed_map_to_typed_rejection() -> None:
     with pytest.raises(NotionReassignmentRejectedError, match="notion_property_map is invalid"):
         await service.resolve_targets(recruiter, "hint")
     notion.resolve_reassignment_targets.assert_not_awaited()
+
+
+def test_null_matching_signals_resolves_to_todays_compiled_defaults() -> None:
+    resolved = resolve_matching_signals(_recruiter())
+
+    assert resolved is DEFAULT_MATCHING_SIGNALS
+    assert resolved.name_pattern.pattern == NAME_PATTERN.pattern
+    assert resolved.interview_pattern.pattern == INTERVIEW_PATTERN.pattern
+    assert resolved.interview_pattern.flags == INTERVIEW_PATTERN.flags
+    assert resolved.booking_pattern.pattern == BOOKING_PATTERN.pattern
+    assert resolved.booking_pattern.flags == BOOKING_PATTERN.flags
+    assert resolve_matching_signals(None) is resolved
+    assert resolve_matching_signals(_recruiter(matching_signals={})) is resolved
+
+
+def test_partial_matching_signals_overrides_only_given_field() -> None:
+    resolved = resolve_matching_signals(
+        _recruiter(matching_signals={"booking_pattern": r"https://custom-booking\.example/"})
+    )
+
+    assert resolved.booking_pattern.pattern == r"https://custom-booking\.example/"
+    assert resolved.name_pattern.pattern == NAME_PATTERN.pattern
+    assert resolved.interview_pattern.pattern == INTERVIEW_PATTERN.pattern
+
+
+@pytest.mark.parametrize("pattern", ["(a+)+", "(a*)*", "([a-zA-Z]+)*"])
+def test_reject_dangerous_regex_rejects_classic_catastrophic_backtracking_shapes(
+    pattern: str,
+) -> None:
+    with pytest.raises(ValueError, match="catastrophic backtracking"):
+        reject_dangerous_regex(pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"собеседован|интервью", r"(?i)calink\.ru", r"(abc)+", r"[a-z]+", r"(ab)+c"]
+)
+def test_reject_dangerous_regex_accepts_benign_patterns(pattern: str) -> None:
+    assert reject_dangerous_regex(pattern) == pattern
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"name_pattern": "("},
+        {"booking_pattern": "(a+)+"},
+        {"interview_pattern": "(a*)*"},
+        {"name_pattern": "([a-zA-Z]+)*"},
+        {"unknown_key": "x"},
+    ],
+)
+def test_invalid_or_dangerous_matching_signals_are_rejected_at_write_time(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        merge_matching_signals(overrides)
+
+
+@pytest.mark.parametrize("overrides", [{"name_pattern": "("}, {"booking_pattern": "(a+)+"}])
+def test_invalid_or_dangerous_matching_signals_are_rejected_at_read_time(
+    overrides: dict[str, object],
+) -> None:
+    recruiter = _recruiter(matching_signals=overrides)
+
+    with pytest.raises(PermissionError, match="matching_signals"):
+        resolve_matching_signals(recruiter)
+
+
+@pytest.mark.parametrize("raw", [["x"], "pattern", 5])
+def test_non_dict_matching_signals_is_recruiter_misconfiguration(raw: object) -> None:
+    recruiter = _recruiter()
+    recruiter.matching_signals = raw  # type: ignore[assignment]
+
+    with pytest.raises(PermissionError, match="matching_signals"):
+        resolve_matching_signals(recruiter)

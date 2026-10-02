@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,7 @@ import pytest
 
 from app.config import Settings
 from app.services.matching import (
+    DEFAULT_MATCHING_SIGNALS,
     InterviewMatcher,
     ManualReviewReason,
     normalize_title,
@@ -288,6 +290,39 @@ def test_bare_calink_link_title_matches_but_no_booking_marker_stays_low_confiden
     assert result.reason == ManualReviewReason.LOW_CONFIDENCE
     assert round(result.confidence, 2) == 0.45
     assert "interview_keywords" in result.signals
+
+
+def test_explicit_signals_argument_actually_changes_the_calink_outcome() -> None:
+    """Proves `score()` consults the passed `signals`, not just the module defaults: the real
+    calink fixture auto-matches via the booking-marker pool-entry path under
+    `DEFAULT_MATCHING_SIGNALS`, but swapping in a `booking_pattern` that never matches the same
+    description drops the event out of the compatible pool entirely (title still mismatches).
+    """
+    start = datetime(2026, 9, 21, 14, 44, 43, tzinfo=UTC)
+    summary = "Собеседование в Effective c Лилией Акентьевой (Четова Дарья)"
+    description = (
+        "Участник: Четова Дарья (dashachetova@gmail.com)\n"
+        "https://telemost.360.yandex.ru/j/2973463676\n"
+        "Детали встречи, отмена и перенос: "
+        "https://calink.ru/liliya-akenteva/45min/45409?code=FAtvM1"
+    )
+    calendar_event = event(start=start, summary=summary, description=description)
+    filename_title = "Ссылка для собеседования с Лилией Акентьевой"
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+    default_result = matcher.score(recording(filename_title, start), [calendar_event])
+    custom_signals = replace(
+        DEFAULT_MATCHING_SIGNALS,
+        booking_pattern=re.compile(r"https://never-matches\.example/"),
+    )
+    custom_result = matcher.score(
+        recording(filename_title, start), [calendar_event], custom_signals
+    )
+
+    assert default_result.manual_review_required is False
+    assert default_result.confidence == 1.0
+    assert custom_result.manual_review_required is True
+    assert custom_result.reason == ManualReviewReason.NO_COMPATIBLE_EVENT
 
 
 def test_all_day_event_in_pool_window_does_not_cause_spurious_collision() -> None:
