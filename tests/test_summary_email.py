@@ -18,7 +18,9 @@ from app.services.summary_email import (
 from app.tools.mail_imap import MailIMAPAuthError, MailIMAPConnectionError, MailMessage
 
 
-def _recording() -> Recording:
+def _recording(
+    *, telemost_url: str | None = "https://telemost.360.yandex.ru/j/9589671710"
+) -> Recording:
     return Recording(
         disk_file_id="rec-1",
         disk_path="disk:/rec-1.webm",
@@ -26,6 +28,7 @@ def _recording() -> Recording:
         disk_owner_email="r@example.com",
         candidate_name="Ivan Ivanov",
         candidate_email="ivan@candidate.test",
+        calendar_telemost_url=telemost_url,
         found_at=datetime(2026, 10, 1, tzinfo=UTC),
     )
 
@@ -105,6 +108,37 @@ async def test_find_returns_unavailable_when_password_is_missing() -> None:
     result = await service.find(_recording(), _recruiter())
 
     assert result.outcome == SummaryEmailOutcome.UNAVAILABLE
+
+
+@pytest.mark.anyio
+async def test_find_returns_unavailable_when_no_telemost_url_was_parsed() -> None:
+    """Regression: matching is by the exact Telemost call link in the email body against
+    Recording.calendar_telemost_url (found live — the real "Хранитель встреч" email's Subject
+    is the meeting's own title, not the candidate name, so subject/candidate-name matching was
+    wrong). With no link ever parsed from the calendar event, there is no reliable key at all —
+    this is permanent, not a reason to keep retrying."""
+    service = SummaryEmailService(_settings(), client=FakeClient([_message()]))
+
+    result = await service.find(_recording(telemost_url=None), _recruiter())
+
+    assert result.outcome == SummaryEmailOutcome.UNAVAILABLE
+
+
+@pytest.mark.anyio
+async def test_find_searches_by_telemost_keeper_sender_and_call_link() -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingClient(FakeClient):
+        async def search_inbox(self, **kwargs: object) -> list[MailMessage]:
+            captured.update(kwargs)
+            return await super().search_inbox(**kwargs)
+
+    service = SummaryEmailService(_settings(), client=CapturingClient([_message()]))
+
+    await service.find(_recording(), _recruiter())
+
+    assert captured["from_contains"] == "keeper@telemost.yandex.ru"
+    assert captured["body_contains"] == "https://telemost.360.yandex.ru/j/9589671710"
 
 
 @pytest.mark.anyio

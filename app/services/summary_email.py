@@ -19,6 +19,15 @@ from app.tools.mail_imap import MailIMAPClient, MailIMAPError, MailMessage
 
 _MAX_AMBIGUOUS_CANDIDATES = 10
 
+# Telemost's own "meeting keeper" always sends the summary from this fixed address — found
+# live against a real mailbox (tests/e2e scratch inspection), confirmed by its Subject shape
+# ("Конспект встречи «<meeting title>» от DD.MM.YYYY") and a DKIM-signed d=telemost.yandex.ru.
+# The reliable match key is NOT the subject (that's the meeting's own title, not the candidate
+# name) but the exact Telemost call link the email body states under "Ссылка на встречу: " —
+# the same link app/services/matching.py's TELEMOST_PATTERN already parses out of the calendar
+# event description into `Recording.calendar_telemost_url`.
+TELEMOST_KEEPER_SENDER = "keeper@telemost.yandex.ru"
+
 
 class SummaryEmailOutcome(StrEnum):
     FOUND = "found"
@@ -49,14 +58,20 @@ class SummaryEmailService:
         password = self._settings.yandex_mail_app_passwords.get(recruiter.email)
         if password is None or not password.get_secret_value():
             return SummaryEmailResult(SummaryEmailOutcome.UNAVAILABLE)
+        telemost_url = recording.calendar_telemost_url
+        if not telemost_url:
+            # No Telemost link was ever parsed from this event's calendar description, so
+            # there is no reliable key to match a summary email against — never found, not a
+            # transient condition that a retry could fix.
+            return SummaryEmailResult(SummaryEmailOutcome.UNAVAILABLE)
         since = recording.calendar_dtstart or recording.found_at
         try:
             messages = await self._client.search_inbox(
                 username=recruiter.email,
                 password=password.get_secret_value(),
                 since=since,
-                from_contains=recording.candidate_email,
-                subject_contains=self._subject_hint(recording),
+                from_contains=TELEMOST_KEEPER_SENDER,
+                body_contains=telemost_url,
             )
         except MailIMAPError as error:
             # A transient (connection) failure is worth retrying later; a non-transient one
@@ -101,11 +116,6 @@ class SummaryEmailService:
             )
         except MailIMAPError:
             return None
-
-    @staticmethod
-    def _subject_hint(recording: Recording) -> str | None:
-        name = recording.candidate_name
-        return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 def search_deadline_exceeded(recording: Recording, *, now: datetime) -> bool:

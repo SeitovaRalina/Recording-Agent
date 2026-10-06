@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import email as email_lib
+import html as html_lib
 import imaplib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_STYLE_SCRIPT_RE = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_BLANK_LINES_RE = re.compile(r"[ \t]*\n[ \t]*\n+")
+_TRAILING_SPACE_RE = re.compile(r"[ \t]+")
 
 IMAP_SOCKET_TIMEOUT_SECONDS = 30
 _MAX_MESSAGES_PER_SEARCH = 25
@@ -126,7 +133,7 @@ class MailIMAPClient:
         password: str,
         since: datetime,
         from_contains: str | None = None,
-        subject_contains: str | None = None,
+        body_contains: str | None = None,
     ) -> list[MailMessage]:
         return await asyncio.to_thread(
             self._search_inbox_sync,
@@ -134,7 +141,7 @@ class MailIMAPClient:
             password,
             since,
             from_contains,
-            subject_contains,
+            body_contains,
         )
 
     def _search_inbox_sync(
@@ -143,7 +150,7 @@ class MailIMAPClient:
         password: str,
         since: datetime,
         from_contains: str | None,
-        subject_contains: str | None,
+        body_contains: str | None,
     ) -> list[MailMessage]:
         try:
             connection = imaplib.IMAP4_SSL(
@@ -162,10 +169,12 @@ class MailIMAPClient:
                     raise MailIMAPSearchError("IMAP INBOX select failed")
                 # IMAP SEARCH criteria are sent through imaplib's command encoder, which is
                 # hardcoded to ASCII (imaplib.IMAP4._encoding) regardless of any CHARSET
-                # argument — a non-ASCII criterion (a Cyrillic candidate name in
-                # `subject_contains`) raises UnicodeEncodeError deep inside imaplib, not a
-                # catchable imaplib.IMAP4.error. `from_contains` is an email address (ASCII) and
-                # stays server-side; `subject_contains` is matched client-side below instead.
+                # argument — a non-ASCII criterion raises UnicodeEncodeError deep inside
+                # imaplib, not a catchable imaplib.IMAP4.error. `from_contains` is Telemost's
+                # fixed sender address (ASCII) and stays server-side; `body_contains` (the
+                # exact calendar_telemost_url to match, e.g. may contain nothing non-ASCII but
+                # is matched client-side anyway since IMAP has no body-substring search worth
+                # trusting).
                 criteria: list[str] = ["SINCE", since.astimezone(UTC).strftime("%d-%b-%Y")]
                 if from_contains:
                     criteria += ["FROM", _imap_literal(from_contains)]
@@ -176,13 +185,12 @@ class MailIMAPClient:
                 if status != "OK":
                     raise MailIMAPSearchError("IMAP search failed")
                 ids = data[0].split() if data and data[0] else []
-                needle = subject_contains.casefold() if subject_contains else None
                 messages: list[MailMessage] = []
                 for raw_id in ids[-_MAX_MESSAGES_PER_SEARCH:]:
                     message = self._fetch_message(connection, raw_id)
                     if message is None:
                         continue
-                    if needle is not None and needle not in message.subject.casefold():
+                    if body_contains is not None and body_contains not in message.body:
                         continue
                     messages.append(message)
                 return messages
@@ -260,15 +268,38 @@ def _parse_date(value: object) -> datetime:
 
 
 def _extract_body(parsed: email_lib.message.Message) -> str:
+    """Prefer an inline (no-filename) text/plain part; fall back to the inline HTML body,
+    converted to plain text. A text/plain part WITH a filename is an attachment (Telemost's
+    "Хранитель встреч" sends the full call transcript this way) and is deliberately never
+    read — the user asked only for what the email itself shows, which is the inline HTML
+    summary (title, meeting link, "Задачи"/"Тема N" sections), not the raw transcript.
+    """
     if parsed.is_multipart():
         for part in parsed.walk():
             if part.get_content_type() == "text/plain" and not part.get_filename():
                 return _decode_payload(part)
         for part in parsed.walk():
             if part.get_content_type() == "text/html" and not part.get_filename():
-                return _decode_payload(part)
+                return _html_to_text(_decode_payload(part))
         return ""
+    if parsed.get_content_type() == "text/html":
+        return _html_to_text(_decode_payload(parsed))
     return _decode_payload(parsed)
+
+
+def _html_to_text(markup: str) -> str:
+    """Strip an HTML email body down to its visible text.
+
+    No HTML parser dependency: style/script blocks are dropped first (their content is never
+    visible text), every remaining tag is stripped (this also removes `<img src="data:...">`
+    attributes — they are inside the tag, not text content), entities are unescaped, and
+    collapsed blank lines keep the result readable for an LLM summarizer.
+    """
+    without_style = _STYLE_SCRIPT_RE.sub(" ", markup)
+    without_tags = _TAG_RE.sub(" ", without_style)
+    unescaped = html_lib.unescape(without_tags)
+    collapsed = _TRAILING_SPACE_RE.sub(" ", unescaped)
+    return _BLANK_LINES_RE.sub("\n\n", collapsed).strip()
 
 
 def _decode_payload(part: email_lib.message.Message) -> str:

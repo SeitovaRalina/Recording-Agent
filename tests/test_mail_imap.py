@@ -124,19 +124,20 @@ async def test_search_inbox_returns_empty_list_when_no_match(
 
 
 @pytest.mark.anyio
-async def test_search_inbox_filters_cyrillic_subject_client_side(
+async def test_search_inbox_filters_by_body_contains_client_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: imaplib encodes SEARCH criteria as ASCII internally (imaplib._encoding),
-    so a Cyrillic candidate name passed as a SEARCH criterion raises UnicodeEncodeError deep
-    inside the real client — not caught by imaplib.IMAP4.error. Found via live E2E against a
-    real Yandex mailbox (summary_email_search_attempts advanced but never found a real,
-    already-delivered message). Fix: never send subject_contains to IMAP SEARCH; filter the
-    fetched candidates by subject client-side instead."""
+    """body_contains (the exact Telemost call link to match) is never sent to IMAP SEARCH —
+    only FROM/SINCE are (see test_search_inbox_only_sends_ascii_criteria) — it is matched
+    against each fetched candidate's body in Python, so it is also safe for Cyrillic content."""
     matching = _raw_message(
-        "<msg-1@mail>", "Конспект встречи: E2E Демо Кандидатова 1228", "hr@example.com"
+        "<msg-1@mail>", "Конспект встречи «Собеседование»", "keeper@telemost.yandex.ru",
+        body="Ссылка на встречу: https://telemost.360.yandex.ru/j/9589671710\n\nКонспект...",
     )
-    other = _raw_message("<msg-2@mail>", "Другое письмо", "hr@example.com")
+    other = _raw_message(
+        "<msg-2@mail>", "Конспект встречи «Другая встреча»", "keeper@telemost.yandex.ru",
+        body="Ссылка на встречу: https://telemost.360.yandex.ru/j/0000000000\n\nДругое",
+    )
 
     def factory(host: str, port: int, timeout: float | None = None) -> FakeIMAP4SSL:
         return FakeIMAP4SSL(
@@ -154,7 +155,8 @@ async def test_search_inbox_filters_cyrillic_subject_client_side(
         username="r@example.com",
         password="x",
         since=datetime.now(UTC),
-        subject_contains="E2E Демо Кандидатова 1228",
+        from_contains="keeper@telemost.yandex.ru",
+        body_contains="https://telemost.360.yandex.ru/j/9589671710",
     )
 
     assert len(messages) == 1
@@ -163,7 +165,63 @@ async def test_search_inbox_filters_cyrillic_subject_client_side(
     assert all(part.isascii() for part in criteria), (
         f"non-ASCII criterion would crash real imaplib: {criteria!r}"
     )
-    assert "SUBJECT" not in criteria
+    assert criteria == ("SINCE", since_date(), "FROM", '"keeper@telemost.yandex.ru"')
+
+
+def since_date() -> str:
+    return datetime.now(UTC).strftime("%d-%b-%Y")
+
+
+@pytest.mark.anyio
+async def test_html_only_body_is_stripped_to_plain_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Telemost's "Хранитель встреч" sends the real summary as an inline
+    multipart/related text/html body (styled, with an embedded base64 image) plus a separate
+    text/plain ATTACHMENT (the full call transcript, filename set) that the user explicitly
+    does not want read. _extract_body must skip the filenamed attachment, fall through to the
+    inline HTML, and strip it down to plain text — not return raw markup."""
+    message = EmailMessage()
+    message["Message-Id"] = "<html-only@mail>"
+    message["Subject"] = "Конспект встречи «Воркшоп»"
+    message["From"] = "keeper@telemost.yandex.ru"
+    message["Date"] = "Tue, 06 Oct 2026 10:00:00 +0000"
+    message.make_mixed()
+    related = EmailMessage()
+    related.make_related()
+    html_part = EmailMessage()
+    html_part.set_content(
+        "<body><style>.x{color:red}</style>"
+        "<p>Ссылка на встречу: https://telemost.360.yandex.ru/j/123 &amp; детали</p>"
+        '<img src="data:image/png;base64,AAAA"></body>',
+        subtype="html",
+    )
+    related.attach(html_part)
+    message.attach(related)
+    attachment = EmailMessage()
+    attachment.set_content("full transcript, not to be read")
+    attachment.add_header(
+        "Content-Disposition", "attachment", filename="2026-10-06 транскрипт.txt"
+    )
+    message.attach(attachment)
+    raw = message.as_bytes()
+
+    def factory(host: str, port: int, timeout: float | None = None) -> FakeIMAP4SSL:
+        return FakeIMAP4SSL(host, port, timeout, search_ids=(b"1",), messages={b"1": raw})
+
+    monkeypatch.setattr("app.tools.mail_imap.imaplib.IMAP4_SSL", factory)
+
+    client = MailIMAPClient("imap.example.test")
+    messages = await client.search_inbox(
+        username="r@example.com", password="x", since=datetime.now(UTC)
+    )
+
+    assert len(messages) == 1
+    body = messages[0].body
+    assert "https://telemost.360.yandex.ru/j/123" in body
+    assert "&" in body and "&amp;" not in body
+    assert "<" not in body and "data:image" not in body
+    assert "full transcript" not in body
 
 
 @pytest.mark.anyio
