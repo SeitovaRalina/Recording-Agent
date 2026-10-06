@@ -94,7 +94,7 @@ async def test_search_inbox_returns_parsed_messages(monkeypatch: pytest.MonkeyPa
 
     client = MailIMAPClient("imap.example.test")
     messages = await client.search_inbox(
-        username="r@example.com", password="secret", since=datetime.now(UTC)
+        username="r@example.com", password="x", since=datetime.now(UTC)
     )
 
     assert len(messages) == 1
@@ -115,7 +115,7 @@ async def test_search_inbox_returns_empty_list_when_no_match(
 
     client = MailIMAPClient("imap.example.test")
     messages = await client.search_inbox(
-        username="r@example.com", password="secret", since=datetime.now(UTC)
+        username="r@example.com", password="x", since=datetime.now(UTC)
     )
 
     assert messages == []
@@ -162,7 +162,7 @@ async def test_fetch_by_message_id_returns_none_when_absent(
 
     client = MailIMAPClient("imap.example.test")
     message = await client.fetch_by_message_id(
-        username="r@example.com", password="secret", message_id="<missing@mail>"
+        username="r@example.com", password="x", message_id="<missing@mail>"
     )
 
     assert message is None
@@ -181,7 +181,7 @@ async def test_fetch_by_message_id_returns_the_full_body(
 
     client = MailIMAPClient("imap.example.test")
     message = await client.fetch_by_message_id(
-        username="r@example.com", password="secret", message_id="<msg-2@mail>"
+        username="r@example.com", password="x", message_id="<msg-2@mail>"
     )
 
     assert message is not None
