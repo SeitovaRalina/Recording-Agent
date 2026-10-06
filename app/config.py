@@ -48,6 +48,23 @@ class Settings(BaseSettings):
         default_factory=dict,
         validation_alias=AliasChoices("yandex_caldav_passwords", "YANDEX_CALDAV_PASSWORDS"),
     )
+    yandex_mail_app_passwords: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("yandex_mail_app_passwords", "YANDEX_MAIL_APP_PASSWORDS"),
+    )
+    summary_email_imap_host: str = Field(
+        default="imap.yandex.ru",
+        validation_alias=AliasChoices("summary_email_imap_host", "SUMMARY_EMAIL_IMAP_HOST"),
+    )
+    summary_email_search_timeout_seconds: int = Field(
+        default=86400,
+        ge=60,
+        le=604800,
+        validation_alias=AliasChoices(
+            "summary_email_search_timeout_seconds", "SUMMARY_EMAIL_SEARCH_TIMEOUT_SECONDS"
+        ),
+        description="Deadline for best-effort summary-email retries after notion_updated.",
+    )
     scan_hour: int = Field(default=2, validation_alias=AliasChoices("scan_hour", "SCAN_HOUR"))
     scan_minute: int = Field(default=0, validation_alias=AliasChoices("scan_minute", "SCAN_MINUTE"))
     scan_ignore_before_today: bool = Field(
@@ -168,7 +185,12 @@ class Settings(BaseSettings):
             raise ValueError("NOTION_PROXY_URL must be a valid HTTP proxy URL")
         return SecretStr(url)
 
-    @field_validator("yandex_refresh_tokens", "yandex_caldav_passwords", mode="before")
+    @field_validator(
+        "yandex_refresh_tokens",
+        "yandex_caldav_passwords",
+        "yandex_mail_app_passwords",
+        mode="before",
+    )
     @classmethod
     def parse_string_mapping(cls, value: Any) -> Any:
         if isinstance(value, str):
