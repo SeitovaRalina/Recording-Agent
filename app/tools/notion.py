@@ -139,6 +139,22 @@ class NotionUpdateError(NotionAPIError):
     pass
 
 
+class NotionPageArchivedError(NotionAPIError):
+    """The target page is archived/trashed; Notion rejects block and comment writes on it."""
+
+
+class NotionCommentForbiddenError(NotionAPIError):
+    """The Connection has no comment permission on this page (grant it manually in Notion)."""
+
+
+class NotionBlockError(NotionAPIError):
+    pass
+
+
+class NotionCommentError(NotionAPIError):
+    pass
+
+
 @dataclass(frozen=True)
 class NotionRelationChoice:
     id: str
@@ -545,6 +561,110 @@ class NotionClient:
             date_property=date_prop,
             recording_property=recording_prop,
         )
+
+    async def append_toggle_block(self, page_id: str, title: str, paragraphs: list[str]) -> None:
+        """Append one toggle block titled `title` with `paragraphs` as plain child paragraphs.
+
+        Content strings are never passed to `trace()` (see `app/services/pipeline_trace.py`);
+        only `page_id` is traced.
+        """
+        self._trace("notion.toggle_block.start", page_id=page_id)
+        body = {
+            "children": [
+                {
+                    "object": "block",
+                    "type": "toggle",
+                    "toggle": {
+                        "rich_text": [{"type": "text", "text": {"content": title[:2000]}}],
+                        "children": [
+                            {
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": {
+                                    "rich_text": [
+                                        {"type": "text", "text": {"content": paragraph[:2000]}}
+                                    ]
+                                },
+                            }
+                            for paragraph in paragraphs
+                        ],
+                    },
+                }
+            ]
+        }
+        try:
+            response = await self._client.patch(
+                f"{NOTION_API_BASE}/blocks/{page_id}/children", headers=self._headers, json=body
+            )
+        except httpx.RequestError:
+            raise NotionBlockError("Notion toggle block transport failed", transient=True) from None
+        self._raise_write_error(
+            response,
+            error_cls=NotionBlockError,
+            forbidden_cls=NotionForbiddenError,
+            operation="toggle block append",
+        )
+        self._trace("notion.toggle_block.success", page_id=page_id)
+
+    async def create_comment(self, page_id: str, text: str) -> None:
+        """Create one comment on `page_id`. `text` is never passed to `trace()`."""
+        self._trace("notion.comment.start", page_id=page_id)
+        body = {
+            "parent": {"page_id": page_id},
+            "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+        }
+        try:
+            response = await self._client.post(
+                f"{NOTION_API_BASE}/comments", headers=self._headers, json=body
+            )
+        except httpx.RequestError:
+            raise NotionCommentError("Notion comment transport failed", transient=True) from None
+        self._raise_write_error(
+            response,
+            error_cls=NotionCommentError,
+            forbidden_cls=NotionCommentForbiddenError,
+            operation="comment creation",
+        )
+        self._trace("notion.comment.success", page_id=page_id)
+
+    @classmethod
+    def _raise_write_error(
+        cls,
+        response: httpx.Response,
+        *,
+        error_cls: type[NotionAPIError],
+        forbidden_cls: type[NotionAPIError],
+        operation: str,
+    ) -> None:
+        if response.status_code == 401:
+            raise NotionAuthError("Notion authentication failed")
+        if not response.is_error:
+            return
+        detail = cls._error_detail(response)
+        if cls._looks_archived(response, detail):
+            raise NotionPageArchivedError(f"Notion page is archived; {operation} was rejected")
+        if response.status_code == 403:
+            raise forbidden_cls(f"Notion Connection lacks permission for {operation}")
+        raise error_cls(
+            f"Notion {operation} failed with HTTP {response.status_code}",
+            transient=_transient_status(response.status_code),
+        )
+
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+        if isinstance(payload, dict):
+            message = payload.get("message")
+            code = payload.get("code")
+            return f"{code or ''} {message or ''}".casefold()
+        return ""
+
+    @staticmethod
+    def _looks_archived(response: httpx.Response, detail: str) -> bool:
+        return response.status_code in (400, 404) and "archiv" in detail
 
     async def get_recording_field(self, page_id: str, recording_prop: str) -> dict[str, object]:
         """Return the exact configured files field after Notion page retrieval."""
