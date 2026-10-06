@@ -209,6 +209,30 @@ shared by every question type) — debugging the above meant the first approval 
 expired before it could be used. Not a defect; just means approvals must happen reasonably
 soon after the question is created, same as any other recruiter question in this system.
 
+**5th issue, found right after, by the user — not by this E2E run**: the whole matching/
+extraction design above was built without ever having checked a real "Хранитель встреч
+Телемоста" email. The user pointed at a real one in her own inbox (`keeper@telemost.yandex.ru`,
+subject `Конспект встречи «Воркшоп "Бизнес-контекст в AI-разработке"» от 06.10.2026`) and it
+immediately showed the design was structurally wrong, not just buggy:
+- The subject's quoted title is the *meeting's own title*, not the candidate's name — subject/
+  candidate-name substring matching could never have worked for a real interview.
+- The body states the exact call link ("Ссылка на встречу: https://telemost.360.yandex.ru/j/
+  ...") — the same link `app/services/matching.py` already parses into
+  `Recording.calendar_telemost_url`. That is the correct, deterministic match key.
+- The real conspectus (a "Задачи" section + numbered "Тема N" sections) lives in the inline
+  HTML body; a separate text/plain part is the full call transcript sent as an attachment
+  (filename set) — the user explicitly does not want that read, only what the email itself
+  shows.
+
+Fixed (commit `2b7d53e`, same manual rollout pattern, image `…@sha256:e8227503…`): search by
+`FROM keeper@telemost.yandex.ru` + exact `calendar_telemost_url` match in the body (no event
+link parsed → `UNAVAILABLE`, permanent, not retried); added HTML→text stripping for the inline
+body. Not yet re-verified live with a real interview's email (today's live E2E used a
+synthetic plain-text test email that happened to work by accident under the old, wrong design —
+needs a fresh live pass once a real calink-booked interview produces a real Telemost summary
+email, to confirm the subject-title assumption and the exact-link-match actually holds for that
+case too).
+
 Cleanup done for all three demo candidates (1220, 1228, 1608) created during this run: Notion
 cards archived, Disk files trashed, Synology files deleted (1608 never reached Synology —
 unrelated transient `SynologyAPIError: Synology API returned HTTP 200` blocked its folder
