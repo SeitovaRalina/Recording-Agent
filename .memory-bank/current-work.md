@@ -153,9 +153,71 @@ sha256 verified to match the local repo exactly. Smoke-tested both new endpoints
 (404 on an unknown recording id — route and auth path both real, not a 404-route-not-found) and
 confirmed both paths listed in `/openapi.json`; `/health` still 200.
 
-Not yet done: Notion Connection comment permission — user confirmed already granted (same
-Connection, no new grant needed). Live E2E with real IMAP/Mila end-to-end — explicitly deferred,
-to be run only against Ralina's own test data per her instruction, not Lilia's.
+Notion Connection comment permission — user confirmed already granted (same Connection, no new
+grant needed).
+
+## Meeting-summary live E2E on prod (2026-10-06) — 4 real bugs found and fixed
+
+Ran the full live E2E on Ralina's own accounts, authorized explicitly ("Да, я разрешаю, делай
+Live E2E на моих доступах"): seeded a demo interview via `tests.e2e.demo`, sent a real
+"Конспект встречи: <candidate>" email to her own mailbox via SMTP, then drove real
+`openclaw agent` turns against Mila (`tests/e2e/lib/mila.turn`, the same mechanism the R01-R15
+E2E suite uses — real LLM, real tool calls, not simulated) asking her to scan, summarize, and
+confirm. Each bug below was found live, fixed, re-deployed (canary-build + manual backup/
+migrate-noop/swap), and re-verified in the same session:
+
+1. **Cyrillic IMAP SEARCH crashes.** `imaplib` encodes every SEARCH argument through a
+   hardcoded ASCII encoder regardless of CHARSET — a Cyrillic candidate name in
+   `subject_contains` raised `UnicodeEncodeError` deep inside `imaplib`, swallowed by cron.py's
+   broad `except Exception`, silently stuck at `NOT_FOUND` forever. Fix: never send
+   `subject_contains` to SEARCH; filter fetched candidates by subject client-side
+   (`app/tools/mail_imap.py`).
+2. **Yandex rejects `HEADER "Message-ID"` search outright**, quoted or not, with
+   `[UNAVAILABLE] SEARCH Backend error` — confirmed live, a real Yandex IMAP server limitation,
+   not a quoting bug. `fetch_by_message_id` (used by `GET summary-source` to re-read the body)
+   now re-runs the same server-accepted `SINCE` search and matches client-side instead.
+3. **`list_active`/`build_digest`'s settled-recording filter hid and then would have
+   auto-closed `summary_assessment_approval`/`summary_email_ambiguous` forever** — those two
+   question types are created ON an already-`completed` recording by design, but the generic
+   "settled recording = stale question" assumption (built for routing/candidate questions) did
+   not carve them out. Without the fix, the recruiter's pending approval was invisible to
+   `/tools/questions` and the next digest run would have silently discarded it with no comment
+   ever posted. Fixed in `app/services/question_queue.py` (both call sites now exempt
+   `DISCARD_ONLY_QUESTION_TYPES`).
+4. **`recording.status.value` crashed with `AttributeError: 'str' object has no attribute
+   'value'`** on a real request. Every other `ReviewService.mutate` branch calls
+   `transition_to(...)` first, which reassigns `recording.status` to a real `RecordingStatus`
+   enum instance in memory — masking that the ORM actually loads the column as a plain `str`.
+   Our two new branches never call `transition_to` (status must stay unchanged by design), so
+   this was the first branch to expose it. Fixed by using `str(recording.status)` instead of
+   `.value` (correct for both cases).
+
+None of these were caught by the unit test suite (545+ tests passing throughout) — each is a
+real-infrastructure-only failure mode (real `imaplib` ASCII encoding, a real Yandex server
+quirk, real DB-reload-vs-Python-construction attribute typing) that mocked tests structurally
+cannot exercise. Regression tests were added for all four after the fact.
+
+End-to-end proof, fully real: Mila found the email, summarized it with her own model strictly
+from that email's text, wrote the toggle `«Конспект общего собеседования»` to the real Notion
+card, created a real `ManualReview`, and — after an explicit recruiter confirmation — posted a
+real Notion comment addressed to the hiring manager with a strengths/weaknesses breakdown and an
+explicit move-forward recommendation. Verified by reading the live Notion page directly (not
+trusting Mila's chat reply alone).
+
+One non-bug friction point: a review's capability token has a 15-minute TTL (existing design,
+shared by every question type) — debugging the above meant the first approval attempt's token
+expired before it could be used. Not a defect; just means approvals must happen reasonably
+soon after the question is created, same as any other recruiter question in this system.
+
+Cleanup done for all three demo candidates (1220, 1228, 1608) created during this run: Notion
+cards archived, Disk files trashed, Synology files deleted (1608 never reached Synology —
+unrelated transient `SynologyAPIError: Synology API returned HTTP 200` blocked its folder
+choice; settled via `stand settle` → `ignored`, not a meeting-summary bug), calendar events
+deleted, and the three test emails removed from Ralina's real inbox via IMAP.
+
+Still open: PR → `main` for `feature/meeting-summary` (same `main`-catch-up gap as the other
+rollouts — resolved for the prior branch when PR #9 merged and auto-deployed; this one is still
+ahead of `main`).
 
 ## Next steps (as of 2026-09-29 evening)
 
