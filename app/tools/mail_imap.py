@@ -62,15 +62,22 @@ class MailIMAPClient:
         self._port = port
 
     async def fetch_by_message_id(
-        self, *, username: str, password: str, message_id: str
+        self, *, username: str, password: str, message_id: str, since: datetime
     ) -> MailMessage | None:
-        """Re-fetch one already-found message's full body by its RFC822 `Message-Id`."""
+        """Re-fetch one already-found message's full body by its RFC822 `Message-Id`.
+
+        Yandex's IMAP server rejects `HEADER "Message-ID" "..."` outright — even quoted, even
+        without angle brackets — with `[UNAVAILABLE] SEARCH Backend error`, confirmed live
+        against a real mailbox. `SINCE` search works fine, so this re-runs that (the same
+        server-accepted criterion `search_inbox` uses) and matches the target message
+        client-side by its already-parsed `Message-Id`, instead of asking the server to do it.
+        """
         return await asyncio.to_thread(
-            self._fetch_by_message_id_sync, username, password, message_id
+            self._fetch_by_message_id_sync, username, password, message_id, since
         )
 
     def _fetch_by_message_id_sync(
-        self, username: str, password: str, message_id: str
+        self, username: str, password: str, message_id: str, since: datetime
     ) -> MailMessage | None:
         try:
             connection = imaplib.IMAP4_SSL(
@@ -89,16 +96,18 @@ class MailIMAPClient:
                     raise MailIMAPSearchError("IMAP INBOX select failed")
                 try:
                     status, data = connection.search(
-                        None, "HEADER", "Message-ID", _imap_literal(message_id)
+                        None, "SINCE", since.astimezone(UTC).strftime("%d-%b-%Y")
                     )
                 except imaplib.IMAP4.error as error:
                     raise MailIMAPSearchError("IMAP search failed") from error
                 if status != "OK":
                     raise MailIMAPSearchError("IMAP search failed")
                 ids = data[0].split() if data and data[0] else []
-                if not ids:
-                    return None
-                return self._fetch_message(connection, ids[-1])
+                for raw_id in reversed(ids[-_MAX_MESSAGES_PER_SEARCH:]):
+                    message = self._fetch_message(connection, raw_id)
+                    if message is not None and message.message_id == message_id:
+                        return message
+                return None
             finally:
                 try:
                     connection.close()

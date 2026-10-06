@@ -207,7 +207,10 @@ async def test_fetch_by_message_id_returns_none_when_absent(
 
     client = MailIMAPClient("imap.example.test")
     message = await client.fetch_by_message_id(
-        username="r@example.com", password="x", message_id="<missing@mail>"
+        username="r@example.com",
+        password="x",
+        message_id="<missing@mail>",
+        since=datetime.now(UTC),
     )
 
     assert message is None
@@ -226,12 +229,47 @@ async def test_fetch_by_message_id_returns_the_full_body(
 
     client = MailIMAPClient("imap.example.test")
     message = await client.fetch_by_message_id(
-        username="r@example.com", password="x", message_id="<msg-2@mail>"
+        username="r@example.com",
+        password="x",
+        message_id="<msg-2@mail>",
+        since=datetime.now(UTC),
     )
 
     assert message is not None
     assert message.subject == "Re: Interview"
     assert "Body text" in message.body
+
+
+@pytest.mark.anyio
+async def test_fetch_by_message_id_never_sends_header_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Yandex's IMAP server rejects HEADER "Message-ID" "..." outright with
+    [UNAVAILABLE] SEARCH Backend error, confirmed live. fetch_by_message_id must use SINCE
+    (server-accepted) and match the target message client-side instead."""
+    raw = _raw_message("<msg-3@mail>", "Re: Interview", "HR <hr@example.com>")
+    other = _raw_message("<msg-other@mail>", "Unrelated", "HR <hr@example.com>")
+
+    def factory(host: str, port: int, timeout: float | None = None) -> FakeIMAP4SSL:
+        return FakeIMAP4SSL(
+            host, port, timeout, search_ids=(b"1", b"2"), messages={b"1": other, b"2": raw}
+        )
+
+    monkeypatch.setattr("app.tools.mail_imap.imaplib.IMAP4_SSL", factory)
+
+    client = MailIMAPClient("imap.example.test")
+    message = await client.fetch_by_message_id(
+        username="r@example.com",
+        password="x",
+        message_id="<msg-3@mail>",
+        since=datetime.now(UTC),
+    )
+
+    assert message is not None
+    assert message.message_id == "<msg-3@mail>"
+    criteria = FakeIMAP4SSL.instances[0].received_criteria
+    assert "HEADER" not in criteria
+    assert criteria[0] == "SINCE"
 
 
 def test_search_raises_search_error_on_imap_failure(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,7 +9,7 @@ locates one already-matched candidate's summary email; a miss or ambiguity never
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from app.config import Settings
@@ -87,11 +87,17 @@ class SummaryEmailService:
         password = self._settings.yandex_mail_app_passwords.get(recruiter.email)
         if password is None or not password.get_secret_value():
             return None
+        since = (
+            recording.summary_email_received_at
+            or recording.calendar_dtstart
+            or recording.found_at
+        )
         try:
             return await self._client.fetch_by_message_id(
                 username=recruiter.email,
                 password=password.get_secret_value(),
                 message_id=message_id,
+                since=since - timedelta(days=1),
             )
         except MailIMAPError:
             return None
