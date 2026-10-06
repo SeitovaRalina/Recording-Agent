@@ -25,6 +25,7 @@ from app.services.reviews import ReviewService
 from app.services.routing_jobs import RoutingJobService
 from app.services.status import StatusService
 from app.services.storage import StorageFactory
+from app.services.summary_email import SummaryEmailService
 from app.services.transfer import TransferService
 from app.services.yandex_token_manager import YandexTokenManager
 from app.tools.calendar import CalDAVClient
@@ -72,7 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     destination_service = (
         DestinationService(storage, settings) if isinstance(storage, SynologyBackend) else None
     )
-    review_service = ReviewService(mattermost, settings, destination_service)
+    review_service = ReviewService(mattermost, settings, destination_service, notion)
     question_queue_service = QuestionQueueService(review_service, mattermost, settings)
     cleanup_service = CleanupService(disk, settings)
     non_interview_service = (
@@ -98,6 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.non_interview_service = non_interview_service
     app.state.reroute_service = reroute_service
     app.state.notion_reassignment_service = NotionReassignmentService(notion, settings)
+    app.state.summary_email_service = SummaryEmailService(settings)
     app.state.routing_job_service = RoutingJobService()
     register_jobs(
         scheduler,

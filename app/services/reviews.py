@@ -22,6 +22,7 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import enforce_recruiter_scope
 from app.services.destinations import DestinationRejectedError, DestinationService
 from app.tools.mattermost import MattermostClient
+from app.tools.notion import NotionAPIError, NotionClient
 
 AUTONOMOUS_ROUTING_QUESTION_TYPES = frozenset(
     {
@@ -30,6 +31,23 @@ AUTONOMOUS_ROUTING_QUESTION_TYPES = frozenset(
         "autonomous_routing_model_error",
     }
 )
+
+
+# Question types whose approve/reject never resumes or reopens the recording pipeline: the
+# recording's status is unaffected by either answer (acceptance criterion #5 / plan "digest
+# approve-flow" reuse). `ignore` for these types only discards the question.
+DISCARD_ONLY_QUESTION_TYPES = frozenset({"summary_assessment_approval", "summary_email_ambiguous"})
+
+
+def hash_review_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def derive_review_token(
+    review_id: uuid.UUID, delivery_nonce: str, recording_version: int, *, secret: bytes
+) -> str:
+    payload = f"{review_id}:{delivery_nonce}:{recording_version}".encode()
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 class ReviewRejectedError(ValueError):
@@ -64,7 +82,6 @@ class ReviewMutation:
         }
 
 
-
 def locked_review_statement(review_id: uuid.UUID) -> Select[tuple[ManualReview]]:
     """Lock a review and its recording.
 
@@ -78,16 +95,19 @@ def locked_review_statement(review_id: uuid.UUID) -> Select[tuple[ManualReview]]
         .with_for_update()
     )
 
+
 class ReviewService:
     def __init__(
         self,
         mattermost: MattermostClient,
         settings: Settings,
         destination_service: DestinationService | None = None,
+        notion: NotionClient | None = None,
     ) -> None:
         self._mattermost = mattermost
         self._settings = settings
         self._destinations = destination_service
+        self._notion = notion
 
     def capability_token(self, review: ManualReview) -> str:
         if not review.delivery_nonce:
@@ -448,8 +468,9 @@ class ReviewService:
         recording = review.recording
         now = datetime.now(UTC)
         if action == "ignore":
-            recording.transition_to(RecordingStatus.IGNORED)
             review.parsed_action = "ignore"
+            if review.question_type not in DISCARD_ONLY_QUESTION_TYPES:
+                recording.transition_to(RecordingStatus.IGNORED)
         else:
             choices = review.question_context.get("choices")
             if (
@@ -462,7 +483,12 @@ class ReviewService:
             selected = choices[choice - 1]
             if not isinstance(selected, dict):
                 raise ReviewRejectedError("Selected review option cannot resume the pipeline")
-            if isinstance(selected.get("id"), str):
+            if review.question_type == "summary_assessment_approval":
+                await self._apply_summary_assessment_approval(review, recording, selected)
+            elif review.question_type == "summary_email_ambiguous":
+                self._apply_summary_email_choice(recording, selected)
+                review.parsed_action = "select_email"
+            elif isinstance(selected.get("id"), str):
                 spot_id, spot_url = self._selected_spot_identity(
                     selected,
                     required=review.question_type == "multiple_spots",
@@ -572,6 +598,41 @@ class ReviewService:
             return spot_id, spot_url
         return None, None
 
+    async def _apply_summary_assessment_approval(
+        self, review: ManualReview, recording: Recording, selected: dict[str, Any]
+    ) -> None:
+        """Approve → post the saved assessment as a Notion comment; reject → discard only."""
+        if not bool(selected.get("approve")):
+            review.parsed_action = "reject"
+            return
+        text = review.question_context.get("assessment_text")
+        if not isinstance(text, str) or not text.strip():
+            raise ReviewRejectedError("Summary assessment text is missing")
+        if self._notion is None:
+            raise ReviewRejectedError("Notion comment delivery is unavailable")
+        page_id = recording.notion_page_id
+        if not page_id:
+            raise ReviewRejectedError("Recording has no linked Notion page")
+        try:
+            await self._notion.create_comment(page_id, text)
+        except NotionAPIError as error:
+            raise ReviewRejectedError(str(error)) from error
+        review.parsed_action = "approve"
+
+    @staticmethod
+    def _apply_summary_email_choice(recording: Recording, selected: dict[str, Any]) -> None:
+        message_id = selected.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            raise ReviewRejectedError("Selected email option is malformed")
+        recording.summary_email_message_id = message_id
+        recording.summary_email_subject = str(selected.get("subject") or "")
+        received_at = selected.get("received_at")
+        if isinstance(received_at, str):
+            try:
+                recording.summary_email_received_at = datetime.fromisoformat(received_at)
+            except ValueError:
+                raise ReviewRejectedError("Selected email option has an invalid date") from None
+
     @staticmethod
     async def _find_replay(
         session: AsyncSession, actor: str, operation: str, idempotency_key: str
@@ -674,7 +735,7 @@ class ReviewService:
 
     @staticmethod
     def _hash_token(token: str) -> str:
-        return hashlib.sha256(token.encode()).hexdigest()
+        return hash_review_token(token)
 
     def _review_token_secret(self) -> bytes:
         secret = self._settings.openclaw_secret.get_secret_value()
@@ -685,8 +746,9 @@ class ReviewService:
     def _derive_review_token(
         self, review_id: uuid.UUID, delivery_nonce: str, recording_version: int
     ) -> str:
-        payload = f"{review_id}:{delivery_nonce}:{recording_version}".encode()
-        return hmac.new(self._review_token_secret(), payload, hashlib.sha256).hexdigest()
+        return derive_review_token(
+            review_id, delivery_nonce, recording_version, secret=self._review_token_secret()
+        )
 
     @staticmethod
     def _pending_post_id(kind: str, entity_id: uuid.UUID, version: int | None = None) -> str:

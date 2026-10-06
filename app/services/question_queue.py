@@ -47,6 +47,8 @@ _QUESTION_LABELS = {
     "storage_key_collision": "в папке уже есть файл с таким именем",
     "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
     "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
+    "summary_email_ambiguous": "выберите письмо с конспектом собеседования",
+    "summary_assessment_approval": "подтвердите отправку оценки кандидата нанимающему менеджеру",
 }
 
 _FAILED_STEP_LABELS = {
