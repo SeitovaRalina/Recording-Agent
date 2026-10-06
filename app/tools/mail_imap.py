@@ -151,23 +151,31 @@ class MailIMAPClient:
                 status, _ = connection.select("INBOX", readonly=True)
                 if status != "OK":
                     raise MailIMAPSearchError("IMAP INBOX select failed")
+                # IMAP SEARCH criteria are sent through imaplib's command encoder, which is
+                # hardcoded to ASCII (imaplib.IMAP4._encoding) regardless of any CHARSET
+                # argument — a non-ASCII criterion (a Cyrillic candidate name in
+                # `subject_contains`) raises UnicodeEncodeError deep inside imaplib, not a
+                # catchable imaplib.IMAP4.error. `from_contains` is an email address (ASCII) and
+                # stays server-side; `subject_contains` is matched client-side below instead.
                 criteria: list[str] = ["SINCE", since.astimezone(UTC).strftime("%d-%b-%Y")]
                 if from_contains:
                     criteria += ["FROM", _imap_literal(from_contains)]
-                if subject_contains:
-                    criteria += ["SUBJECT", _imap_literal(subject_contains)]
                 try:
                     status, data = connection.search(None, *criteria)
-                except imaplib.IMAP4.error as error:
+                except (imaplib.IMAP4.error, UnicodeEncodeError) as error:
                     raise MailIMAPSearchError("IMAP search failed") from error
                 if status != "OK":
                     raise MailIMAPSearchError("IMAP search failed")
                 ids = data[0].split() if data and data[0] else []
+                needle = subject_contains.casefold() if subject_contains else None
                 messages: list[MailMessage] = []
                 for raw_id in ids[-_MAX_MESSAGES_PER_SEARCH:]:
                     message = self._fetch_message(connection, raw_id)
-                    if message is not None:
-                        messages.append(message)
+                    if message is None:
+                        continue
+                    if needle is not None and needle not in message.subject.casefold():
+                        continue
+                    messages.append(message)
                 return messages
             finally:
                 try:

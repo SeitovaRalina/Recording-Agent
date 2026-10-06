@@ -51,6 +51,7 @@ class FakeIMAP4SSL:
         self.logged_in = False
         self.closed = False
         self.logged_out = False
+        self.received_criteria: tuple[str, ...] = ()
         FakeIMAP4SSL.instances.append(self)
 
     def login(self, username: str, password: str) -> None:
@@ -62,6 +63,7 @@ class FakeIMAP4SSL:
         return "OK", [b"1"]
 
     def search(self, charset: str | None, *criteria: str) -> tuple[str, list[bytes]]:
+        self.received_criteria = criteria
         return "OK", [b" ".join(self.search_ids)]
 
     def fetch(self, message_id: str | bytes, parts: str) -> tuple[str, list[Any]]:
@@ -119,6 +121,49 @@ async def test_search_inbox_returns_empty_list_when_no_match(
     )
 
     assert messages == []
+
+
+@pytest.mark.anyio
+async def test_search_inbox_filters_cyrillic_subject_client_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: imaplib encodes SEARCH criteria as ASCII internally (imaplib._encoding),
+    so a Cyrillic candidate name passed as a SEARCH criterion raises UnicodeEncodeError deep
+    inside the real client — not caught by imaplib.IMAP4.error. Found via live E2E against a
+    real Yandex mailbox (summary_email_search_attempts advanced but never found a real,
+    already-delivered message). Fix: never send subject_contains to IMAP SEARCH; filter the
+    fetched candidates by subject client-side instead."""
+    matching = _raw_message(
+        "<msg-1@mail>", "Конспект встречи: E2E Демо Кандидатова 1228", "hr@example.com"
+    )
+    other = _raw_message("<msg-2@mail>", "Другое письмо", "hr@example.com")
+
+    def factory(host: str, port: int, timeout: float | None = None) -> FakeIMAP4SSL:
+        return FakeIMAP4SSL(
+            host,
+            port,
+            timeout,
+            search_ids=(b"1", b"2"),
+            messages={b"1": matching, b"2": other},
+        )
+
+    monkeypatch.setattr("app.tools.mail_imap.imaplib.IMAP4_SSL", factory)
+
+    client = MailIMAPClient("imap.example.test")
+    messages = await client.search_inbox(
+        username="r@example.com",
+        password="x",
+        since=datetime.now(UTC),
+        subject_contains="E2E Демо Кандидатова 1228",
+    )
+
+    assert len(messages) == 1
+    assert messages[0].message_id == "<msg-1@mail>"
+    criteria = FakeIMAP4SSL.instances[0].received_criteria
+    assert all(part.isascii() for part in criteria), (
+        f"non-ASCII criterion would crash real imaplib: {criteria!r}"
+    )
+    assert "SUBJECT" not in criteria
 
 
 @pytest.mark.anyio
