@@ -1087,3 +1087,333 @@ async def test_confirm_reassignment_rejects_inactive_recruiter_binding(
     assert response.status_code == 404
     assert response.json()["detail"] == "Active recruiter DM binding not found"
     notion.get_recording_field.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------------------------
+# Summary email endpoints (meeting-summary)
+
+
+def _summary_recruiter() -> RecruiterConfig:
+    return RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="mm-user",
+        mattermost_dm_channel="dm-channel",
+        active=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_summary_source_returns_the_found_message(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="summary-found",
+        disk_path="disk:/summary-found.webm",
+        disk_filename="summary-found.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.COMPLETED,
+        summary_email_message_id="<a@mail>",
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    from app.tools.mail_imap import MailMessage
+
+    service = AsyncMock()
+    service.fetch_found_message = AsyncMock(
+        return_value=MailMessage(
+            message_id="<a@mail>",
+            subject="Interview summary",
+            sender="hr@example.com",
+            received_at=datetime(2026, 10, 2, 10, 0, tzinfo=UTC),
+            body="Candidate did well.",
+        )
+    )
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(app.state, "summary_email_service", service, raising=False)
+
+    response = await async_client.get(
+        f"/tools/recordings/{recording_id}/summary-source",
+        params={"recruiter_user_id": "mm-user"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["subject"] == "Interview summary"
+    assert payload["body"] == "Candidate did well."
+
+
+@pytest.mark.anyio
+async def test_summary_source_404_for_unknown_or_foreign_recording(
+    async_client: AsyncClient, session: AsyncSession
+) -> None:
+    recruiter = _summary_recruiter()
+    foreign = Recording(
+        disk_file_id="foreign",
+        disk_path="disk:/foreign.webm",
+        disk_filename="foreign.webm",
+        disk_owner_email="other@example.com",
+        summary_email_message_id="<a@mail>",
+    )
+    session.add_all([recruiter, foreign])
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+
+    response = await async_client.get(
+        f"/tools/recordings/{foreign.id}/summary-source",
+        params={"recruiter_user_id": "mm-user"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_summary_source_409_when_email_not_matched_yet(
+    async_client: AsyncClient, session: AsyncSession
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="no-email-yet",
+        disk_path="disk:/no-email-yet.webm",
+        disk_filename="no-email-yet.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.AWAITING_SUMMARY_EMAIL,
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+
+    response = await async_client.get(
+        f"/tools/recordings/{recording.id}/summary-source",
+        params={"recruiter_user_id": "mm-user"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_summary_source_rejects_recruiter_outside_test_scope(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="production-db",
+        synology_base_folder="production-prefix",
+        mattermost_user_id="mm-user",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setenv("TEST_MODE_ENABLED", "true")
+    monkeypatch.setenv("YANDEX_SOURCE_MUTATION_ENABLED", "false")
+    monkeypatch.setenv("TEST_MATTERMOST_USER_ALLOWLIST", '["mm-user"]')
+    monkeypatch.setenv("TEST_RECRUITER_ALLOWLIST", '["r@example.com"]')
+    monkeypatch.setenv("TEST_NOTION_DATABASE_ALLOWLIST", '["test-db"]')
+    get_settings.cache_clear()
+
+    response = await async_client.get(
+        f"/tools/recordings/{uuid4()}/summary-source",
+        params={"recruiter_user_id": "mm-user"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_submit_summary_writes_toggle_creates_review_and_replays_idempotently(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="submit-summary",
+        disk_path="disk:/submit-summary.webm",
+        disk_filename="submit-summary.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.COMPLETED,
+        notion_page_id="page-1",
+        version=2,
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    notion = AsyncMock()
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setenv("OPENCLAW_SECRET", "test-secret")
+    get_settings.cache_clear()
+    monkeypatch.setattr(app.state, "notion_client", notion, raising=False)
+
+    request_payload = {
+        "recruiter_user_id": "mm-user",
+        "expected_version": 2,
+        "idempotency_key": "summary-submit-0001",
+        "toggle_paragraphs": ["Паспортные данные.", "Итог собеседования."],
+        "assessment_text": "Сильные стороны: X. Слабые стороны: Y. Рекомендация: продвигать.",
+    }
+
+    first = await async_client.post(
+        f"/tools/recordings/{recording_id}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json=request_payload,
+    )
+    replay = await async_client.post(
+        f"/tools/recordings/{recording_id}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json=request_payload,
+    )
+    await session.refresh(recording)
+
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert first_payload["toggle_written"] is True
+    assert first_payload["version"] == 3
+    assert first_payload["replayed"] is False
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert notion.append_toggle_block.await_count == 1
+    assert notion.append_toggle_block.await_args.args[0] == "page-1"
+    assert recording.version == 3
+    assert recording.summary_toggle_written_at is not None
+
+    review = await session.scalar(
+        select(ManualReview).where(ManualReview.recording_id == recording_id)
+    )
+    assert review is not None
+    assert review.question_type == "summary_assessment_approval"
+    assert review.question_context["assessment_text"] == request_payload["assessment_text"]
+
+
+@pytest.mark.anyio
+async def test_submit_summary_404_for_unknown_or_foreign_recording(
+    async_client: AsyncClient, session: AsyncSession
+) -> None:
+    recruiter = _summary_recruiter()
+    session.add(recruiter)
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+
+    response = await async_client.post(
+        f"/tools/recordings/{uuid4()}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "mm-user",
+            "expected_version": 0,
+            "idempotency_key": "summary-submit-missing",
+            "toggle_paragraphs": ["paragraph"],
+            "assessment_text": "text",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_submit_summary_409_on_stale_expected_version(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="stale-version",
+        disk_path="disk:/stale-version.webm",
+        disk_filename="stale-version.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.COMPLETED,
+        notion_page_id="page-1",
+        version=5,
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    notion = AsyncMock()
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(app.state, "notion_client", notion, raising=False)
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording_id}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "mm-user",
+            "expected_version": 1,
+            "idempotency_key": "summary-submit-stale",
+            "toggle_paragraphs": ["paragraph"],
+            "assessment_text": "text",
+        },
+    )
+
+    assert response.status_code == 409
+    notion.append_toggle_block.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_submit_summary_rejects_recruiter_outside_test_scope(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="production-db",
+        synology_base_folder="production-prefix",
+        mattermost_user_id="mm-user",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setenv("TEST_MODE_ENABLED", "true")
+    monkeypatch.setenv("YANDEX_SOURCE_MUTATION_ENABLED", "false")
+    monkeypatch.setenv("TEST_MATTERMOST_USER_ALLOWLIST", '["mm-user"]')
+    monkeypatch.setenv("TEST_RECRUITER_ALLOWLIST", '["r@example.com"]')
+    monkeypatch.setenv("TEST_NOTION_DATABASE_ALLOWLIST", '["test-db"]')
+    get_settings.cache_clear()
+
+    response = await async_client.post(
+        f"/tools/recordings/{uuid4()}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "mm-user",
+            "expected_version": 0,
+            "idempotency_key": "summary-submit-scope",
+            "toggle_paragraphs": ["paragraph"],
+            "assessment_text": "text",
+        },
+    )
+
+    assert response.status_code == 403

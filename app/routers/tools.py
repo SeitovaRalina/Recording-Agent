@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +41,11 @@ from app.services.reviews import (
     InteractionBindingConflict,
     ReviewRejectedError,
     ReviewService,
+    derive_review_token,
+    hash_review_token,
 )
+from app.services.summary_email import SummaryEmailService
+from app.tools.notion import NotionAPIError, NotionClient
 from app.tools.synology import SynologyAPIError
 
 router = APIRouter(
@@ -273,6 +278,51 @@ class InterviewRouteResponse(BaseModel):
     replayed: bool = False
     error: str | None = None
     error_step: str | None = None
+
+
+SUMMARY_TOGGLE_TITLE = "Конспект общего собеседования"
+
+
+class SummarySourceResponse(BaseModel):
+    recording_id: uuid.UUID
+    subject: str
+    sender: str
+    received_at: str
+    body: str
+
+
+class SummarySubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recruiter_user_id: str = Field(min_length=1, max_length=200)
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    toggle_paragraphs: list[str] = Field(min_length=1, max_length=20)
+    assessment_text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("toggle_paragraphs")
+    @classmethod
+    def _bounded_paragraphs(cls, value: list[str]) -> list[str]:
+        cleaned = [" ".join(item.split()) for item in value]
+        if any(not item or len(item) > 4000 for item in cleaned):
+            raise ValueError("Each toggle paragraph must be 1..4000 non-blank characters")
+        return cleaned
+
+    @field_validator("assessment_text")
+    @classmethod
+    def _bounded_assessment(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Assessment text must not be blank")
+        return cleaned
+
+
+class SummarySubmitResponse(BaseModel):
+    recording_id: uuid.UUID
+    version: int
+    toggle_written: bool
+    review_id: uuid.UUID
+    replayed: bool = False
 
 
 class RecordingRerouteRequest(BaseModel):
@@ -529,6 +579,124 @@ async def route_interview(
             detail=response.model_dump(mode="json")
             | {"message": "Transfer resume is already in progress or not resumable"},
         )
+    await complete_intent(session, claim, response.model_dump(mode="json"))
+    return response
+
+
+@router.get(
+    "/recordings/{recording_id}/summary-source",
+    response_model=SummarySourceResponse,
+)
+async def summary_source(
+    recording_id: uuid.UUID,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
+    recruiter_user_id: Annotated[str, Query(min_length=1, max_length=200)],
+) -> SummarySourceResponse:
+    recruiter = await _recruiter_by_user_id(session, settings, recruiter_user_id)
+    recording = await session.get(Recording, recording_id)
+    if recording is None or recording.disk_owner_email != recruiter.email:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if not recording.summary_email_message_id:
+        raise HTTPException(
+            status_code=409, detail="Summary email was not found yet for this recording"
+        )
+    message = await _summary_email_service(request).fetch_found_message(recording, recruiter)
+    if message is None:
+        raise HTTPException(
+            status_code=409, detail="Summary email is temporarily unavailable; retry later"
+        )
+    return SummarySourceResponse(
+        recording_id=recording.id,
+        subject=message.subject,
+        sender=message.sender,
+        received_at=message.received_at.isoformat(),
+        body=message.body[:20_000],
+    )
+
+
+@router.post(
+    "/recordings/{recording_id}/summary",
+    response_model=SummarySubmitResponse,
+)
+async def submit_summary(
+    recording_id: uuid.UUID,
+    body: SummarySubmitRequest,
+    session: Session,
+    request: Request,
+    settings: AppSettings,
+) -> SummarySubmitResponse:
+    recruiter = await _recruiter_by_user_id(session, settings, body.recruiter_user_id)
+    recording = await session.get(Recording, recording_id)
+    if recording is None or recording.disk_owner_email != recruiter.email:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    payload = body.model_dump(mode="json") | {"recording_id": str(recording_id)}
+    try:
+        claim = await claim_intent(
+            session,
+            actor=body.recruiter_user_id,
+            operation=f"summary-submit:{recording_id}",
+            idempotency_key=body.idempotency_key,
+            fingerprint=request_fingerprint(payload),
+            ttl_seconds=settings.intent_claim_ttl_seconds,
+        )
+    except IntentRejectedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if claim.completed_response is not None:
+        return SummarySubmitResponse.model_validate(claim.completed_response | {"replayed": True})
+    if recording.version != body.expected_version:
+        raise HTTPException(status_code=409, detail="Recording version is stale")
+    if recording.status == RecordingStatus.FAILED:
+        raise HTTPException(status_code=409, detail="Recording is in a failed state")
+    if not recording.notion_page_id:
+        raise HTTPException(status_code=409, detail="Recording has no linked Notion page")
+    try:
+        await _notion_client(request).append_toggle_block(
+            recording.notion_page_id, SUMMARY_TOGGLE_TITLE, body.toggle_paragraphs
+        )
+    except NotionAPIError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    secret = settings.openclaw_secret.get_secret_value()
+    if not secret:
+        raise HTTPException(
+            status_code=409, detail="OpenClaw secret is required for review delivery"
+        )
+    recording.summary_toggle_written_at = datetime.now(UTC)
+    recording.version += 1
+    review_id = uuid.uuid4()
+    delivery_nonce = secrets.token_urlsafe(16)
+    review = ManualReview(
+        id=review_id,
+        recording_id=recording.id,
+        question_type="summary_assessment_approval",
+        question_context={
+            "choices": [
+                {"approve": True, "name": "Подтвердить и отправить оценку нанимающему менеджеру"},
+                {"approve": False, "name": "Отклонить оценку"},
+            ],
+            "assessment_text": body.assessment_text,
+        },
+        recruiter_user_id=recruiter.mattermost_user_id,
+        mattermost_channel_id=recruiter.mattermost_dm_channel,
+        recording_version=recording.version,
+        delivery_nonce=delivery_nonce,
+    )
+    token = derive_review_token(
+        review_id, delivery_nonce, recording.version, secret=secret.encode()
+    )
+    review.token_hash = hash_review_token(token)
+    review.token_expires_at = datetime.now(UTC) + timedelta(
+        seconds=settings.review_token_ttl_seconds
+    )
+    session.add(review)
+    await session.flush()
+    response = SummarySubmitResponse(
+        recording_id=recording.id,
+        version=recording.version,
+        toggle_written=True,
+        review_id=review.id,
+    )
     await complete_intent(session, claim, response.model_dump(mode="json"))
     return response
 
@@ -1327,6 +1495,40 @@ def _non_interview_service(request: Request) -> NonInterviewService:
 
 def _cleanup_service(request: Request) -> CleanupService:
     return cast(CleanupService, request.app.state.cleanup_service)
+
+
+async def _recruiter_by_user_id(
+    session: AsyncSession, settings: Settings, recruiter_user_id: str
+) -> RecruiterConfig:
+    """Resolve and scope-check a recruiter by Mattermost user id alone (no DM channel check).
+
+    Used by the summary endpoints, which mirror `GET /tools/recordings/status`: recruiter scope
+    is still enforced (`enforce_recruiter_scope`), but these are not DM-thread-bound mutations.
+    """
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(
+            RecruiterConfig.mattermost_user_id == recruiter_user_id,
+            RecruiterConfig.active.is_(True),
+        )
+    )
+    if recruiter is None:
+        raise HTTPException(status_code=404, detail="Recruiter not found")
+    try:
+        enforce_recruiter_scope(settings, recruiter)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    return recruiter
+
+
+def _notion_client(request: Request) -> NotionClient:
+    return cast(NotionClient, request.app.state.notion_client)
+
+
+def _summary_email_service(request: Request) -> SummaryEmailService:
+    service = getattr(request.app.state, "summary_email_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="Summary email search is unavailable")
+    return cast(SummaryEmailService, service)
 
 
 async def _bound_recruiter(
