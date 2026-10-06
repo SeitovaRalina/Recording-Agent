@@ -38,8 +38,48 @@ async def test_duplicate_disk_file_id_rejected(session: AsyncSession) -> None:
         await session.commit()
 
 
-def test_all_thirteen_statuses_present() -> None:
-    assert len(RecordingStatus) == 13
+def test_all_fourteen_statuses_present() -> None:
+    assert len(RecordingStatus) == 14
+
+
+def test_awaiting_summary_email_transitions() -> None:
+    item = recording()
+    item.status = RecordingStatus.NOTION_UPDATED
+
+    item.transition_to(RecordingStatus.AWAITING_SUMMARY_EMAIL)
+    assert item.status == RecordingStatus.AWAITING_SUMMARY_EMAIL
+
+    # Self-transition (retry tick) is explicitly allowed.
+    item.transition_to(RecordingStatus.AWAITING_SUMMARY_EMAIL)
+    assert item.status == RecordingStatus.AWAITING_SUMMARY_EMAIL
+
+    item.transition_to(RecordingStatus.COMPLETED)
+    assert item.status == RecordingStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "target",
+    [RecordingStatus.SOURCE_MARKED_PROCESSED, RecordingStatus.COMPLETED, RecordingStatus.FAILED],
+)
+def test_awaiting_summary_email_reaches_every_terminal_path(target: RecordingStatus) -> None:
+    item = recording()
+    item.status = RecordingStatus.AWAITING_SUMMARY_EMAIL
+
+    item.transition_to(target)
+
+    assert item.status == target
+
+
+def test_notion_updated_no_longer_skips_directly_to_source_marked_processed_bypass() -> None:
+    # notion_updated can still reach source_marked_processed/completed/failed directly (no
+    # email-search infrastructure configured never blocks an old caller that skips the new
+    # intermediate status), in addition to the new awaiting_summary_email step.
+    item = recording()
+    item.status = RecordingStatus.NOTION_UPDATED
+
+    item.transition_to(RecordingStatus.COMPLETED)
+
+    assert item.status == RecordingStatus.COMPLETED
 
 
 def test_transition_guard() -> None:
