@@ -115,6 +115,48 @@ fix (`swarm-report/calink-matching-plan.md`) and the per-recruiter matching-sign
 column. Not yet done: PR → `main` → CI deploy (three features now ahead of `main`: multi-tenancy,
 digest-toggle, calink-matching + matching-signals).
 
+## PR #9 merged to main (2026-10-02)
+
+`feature/lilia-onboarding` → `main` (multi-tenancy, digest-toggle, calink-matching + matching-signals)
+merged via GitHub PR, which triggered the **regular CI → Deploy pipeline automatically** —
+`release-manifest.json` on prod shows `commit: cdde9c2`, `status: deployed`, confirming the
+`PR → main → CI → Deploy` path works end-to-end for this repo. The three-rollouts-ahead-of-`main`
+gap from the two sections above is resolved as of this merge.
+
+## Meeting-summary (item 4) on production (2026-10-06)
+
+Full scope shipped (`/plan` → `/build` → `/review`, `swarm-report/meeting-summary-*.md`), on
+`feature/meeting-summary` (not yet merged to `main` — manual rollout again, same reason as
+before: canary-build, not the canary stack). New `RecordingStatus.AWAITING_SUMMARY_EMAIL` +
+per-recruiter IMAP summary-email search (`app/services/summary_email.py`), two new recruiter-scoped
+tool endpoints (`GET/POST .../summary-source`, `.../summary`), Notion toggle-list
+(`«Конспект общего собеседования»`) + comment APIs, approval reuses `ManualReview`. Mila's skill
+(`openclaw/skills/recording-agent/`) updated to fetch/summarize/submit — this skill is version-
+controlled IN this repo, not external work (an earlier note in this session wrongly assumed
+otherwise; corrected in `swarm-report/meeting-summary-plan.md`).
+
+Rollout: commit `eaa72bd` built by `canary-build` run 37413267463 (first attempt, run 37412967579,
+failed the secret scanner on a fake IMAP test password literal — fixed, re-pushed) → image
+`…@sha256:a6766d26…`. Backup `/var/backups/recording-agent/20261006T042659Z-eaa72bd…-manual.dump`.
+
+**Incident**: the first rollout attempt (piping the deploy script into `ssh … 'bash -s'` via
+PowerShell stdin) silently died after the backup step — no error, no rollback trap fired (the
+shell was killed by a dying SSH transport, not a command failure, so the `ERR` trap never ran).
+Backend was left stopped for roughly 1–2 minutes before this was caught and the previous image
+restarted manually. Root cause: passing multi-line scripts as piped stdin over this Windows
+OpenSSH/PowerShell setup is unreliable; embedding the script inline with a base64-encoded
+single-line `echo … | base64 -d | bash` command is not. Switched to that pattern for the retry,
+which completed cleanly: fresh backup `…manual2.dump` → `migrate` (`20261002_1000 → 20261006_1000`)
+→ backend swapped → healthy after 4 health-check polls → spot-checked Alembic head directly in
+Postgres (`20261006_1000`). Skill deployed via `tests/e2e/lib/deploy_skill.py`; all 4 files'
+sha256 verified to match the local repo exactly. Smoke-tested both new endpoints live
+(404 on an unknown recording id — route and auth path both real, not a 404-route-not-found) and
+confirmed both paths listed in `/openapi.json`; `/health` still 200.
+
+Not yet done: Notion Connection comment permission — user confirmed already granted (same
+Connection, no new grant needed). Live E2E with real IMAP/Mila end-to-end — explicitly deferred,
+to be run only against Ralina's own test data per her instruction, not Lilia's.
+
 ## Next steps (as of 2026-09-29 evening)
 
 1. **Multi-tenancy first** (item 0). The 29.09 update to the lead already reports it as done, so
