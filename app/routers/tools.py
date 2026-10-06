@@ -651,17 +651,17 @@ async def submit_summary(
         raise HTTPException(status_code=409, detail="Recording is in a failed state")
     if not recording.notion_page_id:
         raise HTTPException(status_code=409, detail="Recording has no linked Notion page")
+    secret = settings.openclaw_secret.get_secret_value()
+    if not secret:
+        raise HTTPException(
+            status_code=409, detail="OpenClaw secret is required for review delivery"
+        )
     try:
         await _notion_client(request).append_toggle_block(
             recording.notion_page_id, SUMMARY_TOGGLE_TITLE, body.toggle_paragraphs
         )
     except NotionAPIError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    secret = settings.openclaw_secret.get_secret_value()
-    if not secret:
-        raise HTTPException(
-            status_code=409, detail="OpenClaw secret is required for review delivery"
-        )
     recording.summary_toggle_written_at = datetime.now(UTC)
     recording.version += 1
     review_id = uuid.uuid4()

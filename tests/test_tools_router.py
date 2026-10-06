@@ -40,6 +40,7 @@ from app.services.reviews import (
     ReviewRejectedError,
     ReviewService,
 )
+from app.tools.notion import NotionPageArchivedError
 
 TEST_INTERVIEW_ROOTS = (
     "/home/Recruiting-NE/2. Interviews",
@@ -1417,3 +1418,92 @@ async def test_submit_summary_rejects_recruiter_outside_test_scope(
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_submit_summary_409_when_recording_is_failed(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="failed-recording",
+        disk_path="disk:/failed-recording.webm",
+        disk_filename="failed-recording.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.FAILED,
+        notion_page_id="page-1",
+        version=1,
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    notion = AsyncMock()
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(app.state, "notion_client", notion, raising=False)
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording_id}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "mm-user",
+            "expected_version": 1,
+            "idempotency_key": "summary-submit-failed",
+            "toggle_paragraphs": ["paragraph"],
+            "assessment_text": "text",
+        },
+    )
+
+    assert response.status_code == 409
+    notion.append_toggle_block.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_submit_summary_409_when_notion_page_is_archived(
+    async_client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = _summary_recruiter()
+    recording = Recording(
+        disk_file_id="archived-page",
+        disk_path="disk:/archived-page.webm",
+        disk_filename="archived-page.webm",
+        disk_owner_email="r@example.com",
+        status=RecordingStatus.COMPLETED,
+        notion_page_id="page-archived",
+        version=1,
+    )
+    session.add_all([recruiter, recording])
+    await session.commit()
+    recording_id = recording.id
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    notion = AsyncMock()
+    notion.append_toggle_block.side_effect = NotionPageArchivedError("page is archived")
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setenv("OPENCLAW_SECRET", "test-secret")
+    get_settings.cache_clear()
+    monkeypatch.setattr(app.state, "notion_client", notion, raising=False)
+
+    response = await async_client.post(
+        f"/tools/recordings/{recording_id}/summary",
+        headers={"Authorization": "Bearer test-secret"},
+        json={
+            "recruiter_user_id": "mm-user",
+            "expected_version": 1,
+            "idempotency_key": "summary-submit-archived",
+            "toggle_paragraphs": ["paragraph"],
+            "assessment_text": "text",
+        },
+    )
+
+    assert response.status_code == 409
+    notion.append_toggle_block.assert_awaited_once()
+    review = await session.scalar(
+        select(ManualReview).where(ManualReview.recording_id == recording_id)
+    )
+    assert review is None
