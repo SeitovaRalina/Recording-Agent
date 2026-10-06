@@ -553,7 +553,12 @@ class ReviewService:
         review.processing_at = now
         review.resolved_at = now
         review.token_consumed_at = now
-        result = ReviewMutation(review.id, recording.id, recording.status.value, recording.version)
+        # str(), not .value: summary_assessment_approval/summary_email_ambiguous never call
+        # transition_to (status must stay unchanged by design), so recording.status here is
+        # whatever the ORM loaded -- a plain str, not a RecordingStatus member. str() is
+        # correct for both (StrEnum's str() output equals .value); .value crashed on the str
+        # case with AttributeError, found live via E2E.
+        result = ReviewMutation(review.id, recording.id, str(recording.status), recording.version)
         session.add(
             IntentReplay(
                 actor=recruiter_user_id,

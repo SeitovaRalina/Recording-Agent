@@ -97,6 +97,48 @@ async def test_approve_summary_assessment_posts_comment_exactly_once(session: ob
 
 
 @pytest.mark.anyio
+async def test_approve_summary_assessment_after_a_real_db_reload(session: object) -> None:
+    """Regression (found live via E2E, not caught by the other tests): those tests build
+    Recording(status=RecordingStatus.COMPLETED) directly in Python, so the attribute stays a
+    real enum member in memory. A row loaded fresh from the DB (a real request's actual path)
+    deserializes `status` as a plain str, not a RecordingStatus member -- reproduced here by
+    assigning the raw string directly, same as the ORM would after a real round-trip.
+    ReviewMutation's `recording.status.value` crashed with
+    AttributeError: 'str' object has no attribute 'value' for exactly this reason, since
+    summary_assessment_approval/summary_email_ambiguous never call transition_to (the only
+    thing that re-assigns the Python enum instance)."""
+    recording = _recording()
+    recording.status = "completed"  # type: ignore[assignment]  # simulates a real DB reload
+    review = _review(
+        recording,
+        question_type="summary_assessment_approval",
+        context={
+            "choices": [{"approve": True, "name": "approve"}, {"approve": False, "name": "reject"}],
+            "assessment_text": "Strengths: X. Weaknesses: Y. Recommendation: move forward.",
+        },
+    )
+    session.add_all([_recruiter(), review])  # type: ignore[attr-defined]
+    await session.commit()  # type: ignore[attr-defined]
+    notion = AsyncMock()
+    service = ReviewService(AsyncMock(), Settings(), notion=notion)
+
+    mutation = await service.mutate(
+        session,  # type: ignore[arg-type]
+        review_id=review.id,
+        action="resolve",
+        recruiter_user_id="mm-user",
+        thread_id="dm-channel",
+        token=_TOKEN,
+        expected_version=5,
+        idempotency_key="approve-reload-1",
+        choice=1,
+        bind_dm=True,
+    )
+
+    assert mutation.status == RecordingStatus.COMPLETED.value
+
+
+@pytest.mark.anyio
 async def test_reject_summary_assessment_never_posts_a_comment(session: object) -> None:
     recording = _recording()
     review = _review(
