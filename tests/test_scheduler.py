@@ -1300,6 +1300,184 @@ async def test_transfer_pipeline_resumes_from_committed_restart_checkpoint(
     candidate.find_and_match.assert_not_awaited()
 
 
+def _notion_updated_item(file_id: str) -> Recording:
+    item = found(file_id)
+    item.status = RecordingStatus.NOTION_UPDATED
+    item.calendar_dtstart = datetime(2026, 7, 16, 10, tzinfo=UTC)
+    item.candidate_name = "Ivan Ivanov"
+    item.candidate_email = "ivan@candidate.test"
+    item.notion_page_id = "page"
+    item.notion_page_url = "https://notion/page"
+    item.generated_filename = "2026-07-16_Ivan_Ivanov_Project_general_interview.webm"
+    item.storage_key = f"recruiter/2026-07-16/Ivan_Ivanov/{item.generated_filename}"
+    item.synology_folder_path = "/folder"
+    item.synology_file_path = f"/{item.storage_key}"
+    item.synology_share_url = "https://share/video"
+    item.content_identity = item.disk_file_id
+    return item
+
+
+@pytest.mark.anyio
+async def test_summary_email_found_sets_fields_and_still_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.summary_email import SummaryEmailOutcome, SummaryEmailResult
+    from app.tools.mail_imap import MailMessage
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(yandex_source_mutation_enabled=False)
+    item = _notion_updated_item("summary-found")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+
+    message = MailMessage(
+        message_id="<a@mail>",
+        subject="Interview summary",
+        sender="hr@example.com",
+        received_at=datetime(2026, 7, 16, 12, tzinfo=UTC),
+        body="text",
+    )
+    fake_service = AsyncMock()
+    fake_service.find.return_value = SummaryEmailResult(SummaryEmailOutcome.FOUND, message=message)
+    monkeypatch.setattr(
+        "app.scheduler.cron.SummaryEmailService", MagicMock(return_value=fake_service)
+    )
+
+    owned = await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert owned is True
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.COMPLETED
+    assert loaded.summary_email_message_id == "<a@mail>"
+    assert loaded.summary_email_subject == "Interview summary"
+
+
+@pytest.mark.anyio
+async def test_summary_email_ambiguous_escalates_to_manual_review_and_still_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.summary_email import SummaryEmailOutcome, SummaryEmailResult
+    from app.tools.mail_imap import MailMessage
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    owner.mattermost_user_id = "mm-user"
+    owner.mattermost_dm_channel = "dm-channel"
+    settings = Settings(yandex_source_mutation_enabled=False, openclaw_secret="test-secret")
+    item = _notion_updated_item("summary-ambiguous")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+
+    candidates = (
+        MailMessage("<a@mail>", "S1", "hr@example.com", datetime(2026, 7, 16, 11, tzinfo=UTC), "x"),
+        MailMessage("<b@mail>", "S2", "hr@example.com", datetime(2026, 7, 16, 12, tzinfo=UTC), "y"),
+    )
+    fake_service = AsyncMock()
+    fake_service.find.return_value = SummaryEmailResult(
+        SummaryEmailOutcome.AMBIGUOUS, candidates=candidates
+    )
+    monkeypatch.setattr(
+        "app.scheduler.cron.SummaryEmailService", MagicMock(return_value=fake_service)
+    )
+
+    owned = await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+        review = await session.scalar(
+            select(ManualReview).where(ManualReview.recording_id == recording_id)
+        )
+    await engine.dispose()
+
+    assert owned is True
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.COMPLETED
+    assert review is not None
+    assert review.question_type == "summary_email_ambiguous"
+    assert len(review.question_context["choices"]) == 2
+
+
+@pytest.mark.anyio
+async def test_summary_email_not_found_before_deadline_keeps_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.summary_email import SummaryEmailOutcome, SummaryEmailResult
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = recruiter()
+    settings = Settings(
+        yandex_source_mutation_enabled=False, summary_email_search_timeout_seconds=3600
+    )
+    item = _notion_updated_item("summary-not-found")
+    async with factory() as session:
+        session.add(item)
+        await session.commit()
+        recording_id = item.id
+
+    fake_service = AsyncMock()
+    fake_service.find.return_value = SummaryEmailResult(SummaryEmailOutcome.NOT_FOUND)
+    monkeypatch.setattr(
+        "app.scheduler.cron.SummaryEmailService", MagicMock(return_value=fake_service)
+    )
+
+    owned = await _resume_transfer_recording(
+        recording_id,
+        owner,
+        factory,
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        StatusService(),
+        AsyncMock(),
+        settings,
+    )
+    async with factory() as session:
+        loaded = await session.get(Recording, recording_id)
+    await engine.dispose()
+
+    assert owned is True
+    assert loaded is not None
+    assert loaded.status == RecordingStatus.AWAITING_SUMMARY_EMAIL
+    assert loaded.summary_email_search_attempts == 1
+    assert loaded.processing_lease_token is None  # lease always released for the next tick
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("transient", "expected_status"),

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
@@ -38,13 +39,21 @@ from app.services.matching import (
 from app.services.pipeline_trace import safe_url, trace
 from app.services.question_queue import QuestionQueueService
 from app.services.recruiter_schema import resolve_matching_signals, resolve_notion_property_map
-from app.services.reviews import InteractionBinding, InteractionBindingConflict, ReviewService
+from app.services.reviews import (
+    InteractionBinding,
+    InteractionBindingConflict,
+    ReviewService,
+    derive_review_token,
+    hash_review_token,
+)
 from app.services.routing_jobs import RoutingJobRejectedError, RoutingJobService
 from app.services.status import StatusService
 from app.services.storage import StorageCollisionError
+from app.services.summary_email import SummaryEmailOutcome, SummaryEmailResult, SummaryEmailService
 from app.services.transfer import TransferError, TransferService, cleanup_stale_temp_files
 from app.tools.calendar import CalDAVAuthError, CalDAVClient, CalendarConfigurationError
 from app.tools.disk import DiskScanner
+from app.tools.mail_imap import MailMessage
 from app.tools.notion import NotionAPIError, NotionClient, NotionPage, NotionRelationChoice
 
 logger = logging.getLogger(__name__)
@@ -64,6 +73,7 @@ TRANSFER_RESUMABLE_STATUSES = (
     RecordingStatus.UPLOADED_TO_SYNOLOGY,
     RecordingStatus.SYNOLOGY_LINK_CREATED,
     RecordingStatus.NOTION_UPDATED,
+    RecordingStatus.AWAITING_SUMMARY_EMAIL,
 )
 
 
@@ -494,6 +504,7 @@ async def _run_transfer_recording(
             RecordingStatus.UPLOADED_TO_SYNOLOGY,
             RecordingStatus.SYNOLOGY_LINK_CREATED,
             RecordingStatus.NOTION_UPDATED,
+            RecordingStatus.AWAITING_SUMMARY_EMAIL,
         }:
             await _resume_committed_transfer_steps(
                 session, recording, recruiter, disk, transfer_service, status, notion, settings
@@ -950,6 +961,113 @@ async def _defer_transient_notion_update(
     return True
 
 
+async def _advance_summary_email_search(
+    session: AsyncSession,
+    recording: Recording,
+    recruiter: RecruiterConfig,
+    settings: Settings,
+) -> bool:
+    """Run one best-effort summary-email search tick.
+
+    Returns True when the recording should keep waiting for the next scheduled tick (retry),
+    False when it is ready to proceed to the existing completion logic unchanged — found,
+    ambiguous (escalated to a ManualReview), or the search deadline/an IMAP error means giving
+    up. Never raises: a search failure of any kind is swallowed so the recording is never
+    failed by this best-effort step (acceptance criterion #4).
+    """
+    recording.summary_email_search_attempts += 1
+    try:
+        result = await SummaryEmailService(settings).find(recording, recruiter)
+    except Exception:
+        logger.exception("Summary email search failed for recording %s", recording.id)
+        result = SummaryEmailResult(SummaryEmailOutcome.NOT_FOUND)
+    if result.outcome == SummaryEmailOutcome.FOUND and result.message is not None:
+        recording.summary_email_message_id = result.message.message_id
+        recording.summary_email_subject = result.message.subject
+        recording.summary_email_received_at = result.message.received_at
+        await session.flush()
+        return False
+    if result.outcome == SummaryEmailOutcome.AMBIGUOUS:
+        await _escalate_ambiguous_summary_email(
+            session, recording, recruiter, settings, result.candidates
+        )
+        return False
+    if result.outcome == SummaryEmailOutcome.UNAVAILABLE:
+        # Permanent misconfiguration (missing/invalid app password): retrying later cannot
+        # help, so give up now instead of holding the recording at this status until the
+        # deadline (acceptance criterion #6 — this only fails the search step, never the
+        # recording).
+        return False
+    now = datetime.now(UTC)
+    deadline = recording.summary_email_search_deadline_at
+    if deadline is not None and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    if deadline is not None and now < deadline:
+        await session.flush()
+        return True
+    return False
+
+
+async def _escalate_ambiguous_summary_email(
+    session: AsyncSession,
+    recording: Recording,
+    recruiter: RecruiterConfig,
+    settings: Settings,
+    candidates: tuple[MailMessage, ...],
+) -> None:
+    """Create one durable ManualReview for an ambiguous summary-email match.
+
+    This never blocks the recording (it keeps advancing to `completed`); it only gives the
+    recruiter a way to pick the right email afterwards, through the existing `/tools/questions`
+    and `/tools/questions/answer` flow (same mechanism as any other confidence escalation).
+    """
+    if not recruiter.mattermost_user_id or not recruiter.mattermost_dm_channel:
+        return
+    existing = await session.scalar(
+        select(ManualReview.id).where(
+            ManualReview.recording_id == recording.id,
+            ManualReview.question_type == "summary_email_ambiguous",
+            ManualReview.status == ManualReviewStatus.PENDING,
+        )
+    )
+    if existing is not None:
+        return
+    secret = settings.openclaw_secret.get_secret_value()
+    if not secret:
+        return
+    review_id = uuid.uuid4()
+    delivery_nonce = secrets.token_urlsafe(16)
+    choices = [
+        {
+            "message_id": message.message_id,
+            "name": f"{message.subject[:160] or '(без темы)'} — {message.sender[:160]}",
+            "subject": message.subject[:200],
+            "sender": message.sender[:320],
+            "received_at": message.received_at.isoformat(),
+        }
+        for message in candidates[:10]
+    ]
+    review = ManualReview(
+        id=review_id,
+        recording_id=recording.id,
+        question_type="summary_email_ambiguous",
+        question_context={"choices": choices},
+        recruiter_user_id=recruiter.mattermost_user_id,
+        mattermost_channel_id=recruiter.mattermost_dm_channel,
+        recording_version=recording.version,
+        delivery_nonce=delivery_nonce,
+    )
+    token = derive_review_token(
+        review_id, delivery_nonce, recording.version, secret=secret.encode()
+    )
+    review.token_hash = hash_review_token(token)
+    review.token_expires_at = datetime.now(UTC) + timedelta(
+        seconds=settings.review_token_ttl_seconds
+    )
+    session.add(review)
+    await session.flush()
+
+
 async def _resume_committed_transfer_steps(
     session: AsyncSession,
     recording: Recording,
@@ -1114,7 +1232,24 @@ async def _resume_committed_transfer_steps(
         await status.advance(session, recording, RecordingStatus.NOTION_UPDATED)
         await session.commit()
 
-    if recording.status != RecordingStatus.NOTION_UPDATED:
+    if recording.status == RecordingStatus.NOTION_UPDATED:
+        await status.advance(
+            session,
+            recording,
+            RecordingStatus.AWAITING_SUMMARY_EMAIL,
+            summary_email_search_attempts=0,
+            summary_email_search_deadline_at=datetime.now(UTC)
+            + timedelta(seconds=settings.summary_email_search_timeout_seconds),
+        )
+        await session.commit()
+
+    if recording.status == RecordingStatus.AWAITING_SUMMARY_EMAIL:
+        still_waiting = await _advance_summary_email_search(session, recording, recruiter, settings)
+        await session.commit()
+        if still_waiting:
+            return
+
+    if recording.status != RecordingStatus.AWAITING_SUMMARY_EMAIL:
         return
     if not settings.yandex_source_mutation_enabled:
         await status.advance(
