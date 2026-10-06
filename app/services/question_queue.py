@@ -18,6 +18,7 @@ from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import enforce_recruiter_scope
 from app.services.reviews import (
+    DISCARD_ONLY_QUESTION_TYPES,
     InteractionBinding,
     ReviewMutation,
     ReviewRejectedError,
@@ -150,7 +151,16 @@ class QuestionQueueService:
                 ManualReview.recruiter_user_id == recruiter_user_id,
                 ManualReview.mattermost_channel_id == dm_channel_id,
                 ManualReview.status == ManualReviewStatus.PENDING,
-                ManualReview.recording_id.not_in(self._settled_recording_ids()),
+                # summary_assessment_approval / summary_email_ambiguous are created ON an
+                # already-completed recording by design (the summary pipeline runs after the
+                # recording settles) -- the settled-recording exclusion below exists for the
+                # OTHER question types, where a settled recording means a stale, no-longer-
+                # actionable question. Found live: without this carve-out, these two types were
+                # permanently invisible to /tools/questions.
+                or_(
+                    ManualReview.question_type.in_(DISCARD_ONLY_QUESTION_TYPES),
+                    ManualReview.recording_id.not_in(self._settled_recording_ids()),
+                ),
             )
             .options(joinedload(ManualReview.recording))
             .order_by(ManualReview.created_at.asc(), ManualReview.id.asc())
@@ -262,6 +272,12 @@ class QuestionQueueService:
                 ManualReview.mattermost_channel_id == dm_channel_id,
                 ManualReview.status == ManualReviewStatus.PENDING,
                 ManualReview.recording_id.in_(self._settled_recording_ids()),
+                # Never auto-close summary_assessment_approval / summary_email_ambiguous this
+                # way: they are created ON an already-settled recording by design, so this sweep
+                # would silently discard a real pending approval (no Notion comment posted, no
+                # recruiter notification) before the recruiter ever saw it. Same carve-out as
+                # list_active's settled-recording exclusion above.
+                ManualReview.question_type.not_in(DISCARD_ONLY_QUESTION_TYPES),
             )
             .values(
                 status=ManualReviewStatus.COMPLETED,

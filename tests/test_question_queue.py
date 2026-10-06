@@ -755,6 +755,49 @@ async def test_questions_of_settled_recordings_are_hidden_and_closed(
 
 
 @pytest.mark.anyio
+async def test_summary_questions_on_settled_recordings_stay_active_and_unclosed(
+    session: AsyncSession,
+) -> None:
+    """Regression (found via live E2E): summary_assessment_approval / summary_email_ambiguous
+    are created ON an already-completed recording by design -- the generic settled-recording
+    exclusion/auto-close in list_active/build_digest must not apply to them, or the recruiter's
+    pending approval becomes permanently unreachable and gets silently auto-closed overnight."""
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    summary_review = _question("summary", "unused-1")
+    summary_review.recording.status = RecordingStatus.COMPLETED
+    summary_review.question_type = "summary_assessment_approval"
+    settled_other = _question("settled-other", "unused-2")
+    settled_other.recording.status = RecordingStatus.COMPLETED
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            summary_review,
+            settled_other,
+        ]
+    )
+    await session.commit()
+
+    active = await service.list_active(session, recruiter_user_id="recruiter", dm_channel_id="dm")
+    assert [item.id for item in active] == [summary_review.id]
+
+    assert await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 9, 24)
+    )
+    await session.commit()
+    await session.refresh(summary_review)
+    assert summary_review.status == ManualReviewStatus.PENDING
+    assert summary_review.result is None
+
+
+@pytest.mark.anyio
 async def test_terminal_sweep_renders_routes_and_skips_already_notified(
     session: AsyncSession,
 ) -> None:
