@@ -5,9 +5,13 @@
 Два новых tool-эндпоинта (`GET /tools/recordings/{id}/summary-source`, `POST /tools/recordings/{id}/summary`)
 дают Миле сырой текст найденного письма и принимают обратно готовый toggle-list + оценку кандидата.
 Бэкенд находит письмо через новый per-recruiter IMAP-поиск (новый сервис `summary_email.py`, не
-`InterviewMatcher`), пишет toggle-list в Notion сразу, а comment с оценкой — только после подтверждения
-рекрутёра через существующий `ManualReview`/`QuestionQueueService` (как в digest-toggle). LLM-суммаризация
-письма — в skill-файле Милы, вне этого репозитория (пользователь настраивает параллельно).
+`InterviewMatcher`), пишет toggle-list `«Конспект общего собеседования»` в Notion сразу, а comment с
+оценкой — только после подтверждения рекрутёра через существующий `ManualReview`/`QuestionQueueService`
+(как в digest-toggle). LLM-суммаризация письма выполняется Милой — её skill ЖИВЁТ В ЭТОМ РЕПОЗИТОРИИ
+(`openclaw/skills/recording-agent/`, деплой через `tests/e2e/lib/deploy_skill.py`), это часть `/build`,
+а не отдельная задача оператора (исходная формулировка плана это ошибочно утверждала — поправлено).
+
+**Полный скоуп, оценка времени не блокер — делаем всё сразу (решение пользователя 2026-10-06).**
 
 ## Acceptance criteria
 
@@ -42,6 +46,11 @@
 8. `poetry run pytest -q` зелёный, включая новые тесты (см. Plan → tests).
 9. Notion Connection получает comment-право вручную в Notion UI — внешний шаг оператора, не код-таск;
    проверяется перед первой прод-отправкой comment.
+10. Toggle-блок называется `«Конспект общего собеседования»` (см. Plan → Toggle-содержимое).
+11. `openclaw/skills/recording-agent/` (SKILL.md, `recording_agent.py`, `contract.md`) обновлён под два
+    новых subcommand, задеплоен на прод через `tests/e2e/lib/deploy_skill.py`, и хотя бы один реальный
+    цикл (найденное письмо → Мила суммирует → `summary-submit` → toggle в Notion → approve → comment)
+    проверен на живой инфраструктуре (как live E2E для calink-фикса), не только мок-вызовами.
 
 ## Plan
 
@@ -94,6 +103,29 @@ intents.py`), не изобретать новый.
 "summary_assessment_approval"` — approve → `notion.create_comment`, reject/ignore → discard. Это тот же
 механизм реюза, что в digest-toggle.
 
+**Toggle-содержимое**: заголовок блока — `«Конспект общего собеседования»` (по аналогии с существующими
+полями `General Interview recording`/`General Interview Date`, той же конвенцией, что toggle-блоки
+`«Скрининг <Имя>»`/`«Профскрининг»` на реальной тестовой карточке Лили). Один toggle на запись; если у
+кандидата несколько `General Interview`-записей — каждая получает свой toggle с тем же именем (не
+дедуплицируется в этом скоупе).
+
+**Skill Милы** (`openclaw/skills/recording-agent/` — ЭТОТ репозиторий, не внешняя работа):
+- `scripts/recording_agent.py`: два новых subcommand `summary-source` (GET) и `summary-submit` (POST) —
+  тот же паттерн, что `scan`/`status`/`route-interview` (`_request(...)` + собственный
+  `_summary_source_message()`/`_summary_submit_message()` без внутренних кодов наружу).
+- `SKILL.md`: сегодня явно ограничивает LLM Милы одним случаем — `«Interview destination selection is
+  the only allowed LLM classification step»`. Добавить второй явный разрешённый случай: суммаризация
+  письма, строго ограниченная текстом из `summary-source` (никаких данных из памяти/прошлых ходов), с
+  форматом результата (toggle-текст + вердикт), заранее заданным именем toggle (`«Конспект общего
+  собеседования»`) и правилом "никогда не придумывать оценку без реального текста письма".
+- `references/contract.md`: контракт обоих новых эндпоинтов (payload/response), читается Милой перед
+  любой мутацией — обязательно обновить.
+- Деплой — существующим `tests/e2e/lib/deploy_skill.py` (все 4 файла уже в его `FILES`/`DISPATCHER`
+  списке, никаких изменений в сам скрипт деплоя не нужно).
+- Это снимает прежний out-of-scope пункт "Полный E2E с живой Милой" — теперь он ДОСТИЖИМ в рамках этого
+  `/build`: задеплоить обновлённый skill на прод и прогнать реальный цикл summary-source→LLM→summary-submit
+  на настоящем письме (как делался live E2E для calink-фикса).
+
 **Tests**: unit (`summary_email.py` против реальных fixture-примеров подписей/окон времени, включая
 timeout-исчерпание и `AMBIGUOUS`-ветку), unit (`mail_imap.py` против мокнутого `imaplib` — никогда реальное
 IMAP-соединение в тестах), unit (новые переходы `RecordingStatus`), integration (оба новых эндпоинта —
@@ -107,20 +139,11 @@ Notion-методы, tools-эндпоинты, approve-dispatch — каждый
 
 ## Blockers
 
-- **Оценка времени.** Черновая оценка пользователя (9ч) занижена: это 2 новых auth-корректных
-  tool-эндпоинта + сервисный слой, новый IMAP-клиент с нуля (своя конфигурация и тесты), новый
-  `RecordingStatus` (миграция + `CHECK` + `TRANSITIONS`), Notion children-blocks/comments с нуля — ни
-  одна из трёх поверхностей (IMAP, новый статус, Notion comments) не имеет кода для расширения, всё
-  пишется заново. Реалистичная оценка — **16-24ч / 2+ сессии `/build`**. Нужно решение: делать полный
-  скоуп сразу, или резать на v1 (например: только toggle-list без comment-approval флоу — переносится в
-  отдельную фичу)?
+Снято. Оценка времени (16-24ч/2+ сессии `/build`) подтверждена пользователем как не-блокер — делаем
+полный скоуп в одном заходе (решение 2026-10-06).
 
 ## Out of scope
 
-- Skill-файл/конфиг Милы в OpenClaw (сама суммаризация её моделью) — параллельная работа пользователя
-  вне этого репозитория.
-- Полный E2E с живой Милой — зависит от готовности её skill-конфига; `/build` в этом репо проверяет оба
-  эндпоинта только мок-вызовами/curl.
 - Per-recruiter Notion token override (один глобальный токен на всех — не нужен сейчас).
 - Изменение `InterviewMatcher`/calink-сопоставления календаря (используется только как источник
   `candidate_email`/времени, read-only контекст).
