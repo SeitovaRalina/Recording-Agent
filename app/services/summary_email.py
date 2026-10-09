@@ -8,8 +8,9 @@ locates one already-matched candidate's summary email; a miss or ambiguity never
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 
 from app.config import Settings
@@ -18,6 +19,23 @@ from app.db.models.recruiter_config import RecruiterConfig
 from app.tools.mail_imap import MailIMAPClient, MailIMAPError, MailMessage
 
 _MAX_AMBIGUOUS_CANDIDATES = 10
+
+# "Хранитель встреч" always reports when it actually started recording — "Конспектирование
+# началось DD.MM.YYYY в HH:MM (MSK)" — always labelled MSK in every real sample seen so far.
+# Found live: a recruiter can have a single *permanent* personal Telemost room (confirmed
+# against Lilia's real calendar — 5+ different real calink-booked interviews over 3 days all
+# carry the identical https://telemost.360.yandex.ru/j/<id> link), so an exact link match in
+# `find()` can legitimately return more than one candidate for the same recruiter. This actual
+# per-call start timestamp — not in the link, not in the subject — is the only remaining signal
+# that distinguishes which summary email belongs to which recording when that happens.
+_STARTED_AT_RE = re.compile(
+    r"Конспектирование началось (\d{2})\.(\d{2})\.(\d{4}) в (\d{2}):(\d{2})\s*\(MSK\)"
+)
+_MSK = timezone(timedelta(hours=3))
+# How far the actual recording start may drift from the calendar's scheduled start and still
+# count as "the same meeting" — generous enough for a late join, tight enough that two
+# back-to-back 45-minute calink slots in the same permanent room can't be confused.
+_START_TIME_TOLERANCE = timedelta(minutes=20)
 
 # Telemost's own "meeting keeper" always sends the summary from this fixed address — found
 # live against a real mailbox (tests/e2e scratch inspection), confirmed by its Subject shape
@@ -82,6 +100,9 @@ class SummaryEmailService:
         if not messages:
             return SummaryEmailResult(SummaryEmailOutcome.NOT_FOUND)
         if len(messages) > 1:
+            disambiguated = _disambiguate_by_start_time(messages, recording.calendar_dtstart)
+            if disambiguated is not None:
+                return SummaryEmailResult(SummaryEmailOutcome.FOUND, message=disambiguated)
             return SummaryEmailResult(
                 SummaryEmailOutcome.AMBIGUOUS,
                 candidates=tuple(messages[:_MAX_AMBIGUOUS_CANDIDATES]),
@@ -118,12 +139,43 @@ class SummaryEmailService:
             return None
 
 
+def _parse_started_at(body: str) -> datetime | None:
+    match = _STARTED_AT_RE.search(body)
+    if match is None:
+        return None
+    day, month, year, hour, minute = (int(part) for part in match.groups())
+    try:
+        return datetime(year, month, day, hour, minute, tzinfo=_MSK)
+    except ValueError:
+        return None
+
+
+def _disambiguate_by_start_time(
+    messages: list[MailMessage], scheduled_start: datetime | None
+) -> MailMessage | None:
+    """Among several same-link candidates, pick the one whose actual recording start (parsed
+    from its own body) is the single closest match to the recording's scheduled calendar start.
+
+    Returns None (stay AMBIGUOUS) when `scheduled_start` is unknown, no candidate's body states
+    a start time, or more than one candidate falls within tolerance — never guesses.
+    """
+    if scheduled_start is None:
+        return None
+    within_tolerance = [
+        (message, parsed)
+        for message in messages
+        if (parsed := _parse_started_at(message.body)) is not None
+        and abs(parsed - scheduled_start.astimezone(_MSK)) <= _START_TIME_TOLERANCE
+    ]
+    if len(within_tolerance) != 1:
+        return None
+    return within_tolerance[0][0]
+
+
 def search_deadline_exceeded(recording: Recording, *, now: datetime) -> bool:
     deadline = recording.summary_email_search_deadline_at
     if deadline is None:
         return True
     if deadline.tzinfo is None:
-        from datetime import UTC
-
         deadline = deadline.replace(tzinfo=UTC)
     return now >= deadline

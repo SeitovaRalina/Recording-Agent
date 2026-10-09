@@ -19,7 +19,9 @@ from app.tools.mail_imap import MailIMAPAuthError, MailIMAPConnectionError, Mail
 
 
 def _recording(
-    *, telemost_url: str | None = "https://telemost.360.yandex.ru/j/9589671710"
+    *,
+    telemost_url: str | None = "https://telemost.360.yandex.ru/j/9589671710",
+    calendar_dtstart: datetime | None = None,
 ) -> Recording:
     return Recording(
         disk_file_id="rec-1",
@@ -29,6 +31,7 @@ def _recording(
         candidate_name="Ivan Ivanov",
         candidate_email="ivan@candidate.test",
         calendar_telemost_url=telemost_url,
+        calendar_dtstart=calendar_dtstart,
         found_at=datetime(2026, 10, 1, tzinfo=UTC),
     )
 
@@ -96,6 +99,67 @@ async def test_find_returns_ambiguous_for_multiple_matches() -> None:
     service = SummaryEmailService(_settings(), client=FakeClient(messages))
 
     result = await service.find(_recording(), _recruiter())
+
+    assert result.outcome == SummaryEmailOutcome.AMBIGUOUS
+    assert len(result.candidates) == 2
+
+
+@pytest.mark.anyio
+async def test_find_disambiguates_same_link_candidates_by_start_time() -> None:
+    """Regression: found live against Lilia's real calendar — a recruiter can have one
+    *permanent* personal Telemost room, so several different real interviews all carry the
+    identical calendar_telemost_url, and an exact-link search legitimately returns more than
+    one candidate email. The one candidate whose own "Конспектирование началось" timestamp
+    actually lines up with this recording's scheduled start must be picked instead of just
+    escalating every time."""
+    other_interview = MailMessage(
+        message_id="<other@mail>",
+        subject="Interview summary",
+        sender="hr@example.com",
+        received_at=datetime(2026, 10, 7, tzinfo=UTC),
+        body="Конспектирование началось 07.10.2026 в 08:00 (MSK)\n\nДругое собеседование.",
+    )
+    this_interview = MailMessage(
+        message_id="<this@mail>",
+        subject="Interview summary",
+        sender="hr@example.com",
+        received_at=datetime(2026, 10, 7, tzinfo=UTC),
+        body="Конспектирование началось 07.10.2026 в 11:02 (MSK)\n\nЭто собеседование.",
+    )
+    service = SummaryEmailService(
+        _settings(), client=FakeClient([other_interview, this_interview])
+    )
+    recording = _recording(
+        calendar_dtstart=datetime(2026, 10, 7, 8, 0, tzinfo=UTC)  # 11:00 MSK
+    )
+
+    result = await service.find(recording, _recruiter())
+
+    assert result.outcome == SummaryEmailOutcome.FOUND
+    assert result.message is not None
+    assert result.message.message_id == "<this@mail>"
+
+
+@pytest.mark.anyio
+async def test_find_stays_ambiguous_when_two_candidates_match_the_start_window() -> None:
+    close_a = MailMessage(
+        message_id="<a@mail>",
+        subject="s",
+        sender="hr@example.com",
+        received_at=datetime(2026, 10, 7, tzinfo=UTC),
+        body="Конспектирование началось 07.10.2026 в 10:55 (MSK)",
+    )
+    close_b = MailMessage(
+        message_id="<b@mail>",
+        subject="s",
+        sender="hr@example.com",
+        received_at=datetime(2026, 10, 7, tzinfo=UTC),
+        body="Конспектирование началось 07.10.2026 в 11:05 (MSK)",
+    )
+    service = SummaryEmailService(_settings(), client=FakeClient([close_a, close_b]))
+    recording = _recording(calendar_dtstart=datetime(2026, 10, 7, 8, 0, tzinfo=UTC))
+
+    result = await service.find(recording, _recruiter())
 
     assert result.outcome == SummaryEmailOutcome.AMBIGUOUS
     assert len(result.candidates) == 2
