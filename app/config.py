@@ -71,6 +71,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("scan_ignore_before_today", "SCAN_IGNORE_BEFORE_TODAY"),
     )
+    scan_ignore_before_days: int = Field(
+        default=0,
+        ge=0,
+        le=30,
+        validation_alias=AliasChoices("scan_ignore_before_days", "SCAN_IGNORE_BEFORE_DAYS"),
+        description=(
+            "Extra days to subtract from the scan_ignore_before_today cutoff (0 = today's "
+            "local midnight only, the historical behaviour; 1 = yesterday's local midnight, "
+            "i.e. a yesterday+today window)."
+        ),
+    )
     scan_local_timezone: str = Field(
         default="Asia/Omsk",
         validation_alias=AliasChoices("scan_local_timezone", "SCAN_LOCAL_TIMEZONE"),

@@ -115,6 +115,20 @@ async def test_discovery_skips_only_new_files_before_local_today() -> None:
     assert [item.disk_file_id for item in recordings] == ["current"]
 
 
+def test_scan_ignore_before_days_widens_the_local_today_cutoff() -> None:
+    """scan_ignore_before_days=0 (default) keeps the historical today-only cutoff; a recruiter
+    override widens it by that many extra days (e.g. 1 = yesterday+today), found needed live
+    when a demo's only fresh interview recording had landed the day before "today" local."""
+    now = datetime(2026, 10, 9, 5, tzinfo=UTC)
+
+    default_cutoff = local_today_start_utc(Settings(scan_local_timezone="Asia/Omsk"), now)
+    widened_cutoff = local_today_start_utc(
+        Settings(scan_local_timezone="Asia/Omsk", scan_ignore_before_days=1), now
+    )
+
+    assert widened_cutoff == default_cutoff - timedelta(days=1)
+
+
 @pytest.mark.anyio
 async def test_successful_scan_logs_insert_match_and_summary(
     caplog: pytest.LogCaptureFixture,

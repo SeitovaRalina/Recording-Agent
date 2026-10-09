@@ -102,9 +102,9 @@ class ScanSummary:
 def local_today_start_utc(settings: Settings, now: datetime | None = None) -> datetime:
     current = _utc(now or datetime.now(UTC))
     local_zone = ZoneInfo(settings.scan_local_timezone)
-    return datetime.combine(current.astimezone(local_zone).date(), time.min, local_zone).astimezone(
-        UTC
-    )
+    local_midnight = datetime.combine(current.astimezone(local_zone).date(), time.min, local_zone)
+    local_midnight -= timedelta(days=settings.scan_ignore_before_days)
+    return local_midnight.astimezone(UTC)
 
 
 async def scan_recruiter(
