@@ -1410,7 +1410,8 @@ async def _scan_recruiter(
         raise HTTPException(status_code=404, detail="Active recruiter not found")
     if body.recruiter_email is None:
         offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
-        if not offline and not _dm_channel_matches(settings, recruiter, body.mattermost_dm_channel_id):
+        channel_matches = _dm_channel_matches(settings, recruiter, body.mattermost_dm_channel_id)
+        if not offline and not channel_matches:
             raise HTTPException(status_code=404, detail="Active recruiter not found")
     return recruiter
 
