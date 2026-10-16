@@ -11,6 +11,17 @@ class MattermostError(RuntimeError):
     pass
 
 
+def direct_channel_name(bot_user_id: str, recruiter_user_id: str) -> str:
+    """Mattermost's deterministic DM channel name: sorted `<user>__<user>`.
+
+    OpenClaw's inbound metadata for a DM can report either this name or the channel's
+    real id (both are equally valid ways to address the same Mattermost channel) — callers
+    that compare an inbound channel id against `RecruiterConfig.mattermost_dm_channel` must
+    accept both forms, not just raw equality.
+    """
+    return "__".join(sorted((bot_user_id, recruiter_user_id)))
+
+
 @dataclass(frozen=True)
 class MattermostPost:
     channel_id: str
@@ -45,7 +56,7 @@ class MattermostClient:
 
     def direct_channel_name(self, recruiter_user_id: str) -> str:
         """Return Mattermost's deterministic DM name, which OpenClaw reports as the channel."""
-        return "__".join(sorted((self._bot_user_id, recruiter_user_id)))
+        return direct_channel_name(self._bot_user_id, recruiter_user_id)
 
     def _matches_binding(self, channel: dict[str, Any], binding: str) -> bool:
         return binding in {channel.get("id"), channel.get("name")}

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,6 +27,7 @@ from app.routers.tools import (
     DestinationItem,
     QuestionItem,
     ScanRequest,
+    _bound_recruiter,
     _question_recruiter,
     _scan_interaction_binding,
     _scan_recruiter,
@@ -40,6 +42,7 @@ from app.services.reviews import (
     ReviewRejectedError,
     ReviewService,
 )
+from app.tools.mattermost import direct_channel_name
 from app.tools.notion import NotionPageArchivedError
 
 TEST_INTERVIEW_ROOTS = (
@@ -214,6 +217,89 @@ async def test_scan_recruiter_resolves_from_mattermost_binding_without_email(
     )
 
     resolved = await _scan_recruiter(session, settings, body)
+
+    assert resolved.email == "r@example.com"
+
+
+@pytest.mark.anyio
+async def test_scan_recruiter_accepts_dm_channel_name_form(session: AsyncSession) -> None:
+    """Regression: found live against a real recruiter — OpenClaw's inbound metadata for a
+    DM can report the channel as its deterministic `<bot>__<user>` name instead of its real
+    id, while `RecruiterConfig.mattermost_dm_channel` was provisioned with the real id. Raw
+    `==` rejected every one of her commands with a 404; both forms must resolve the same
+    recruiter."""
+    settings = get_settings().model_copy(
+        update={"test_mode_enabled": False, "mattermost_bot_user_id": "bot-id"}
+    )
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="real-channel-id",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+    body = ScanRequest(
+        recruiter_user_id="trusted-user",
+        mattermost_dm_channel_id=direct_channel_name("bot-id", "trusted-user"),
+        idempotency_key="scan-0001",
+    )
+
+    resolved = await _scan_recruiter(session, settings, body)
+
+    assert resolved.email == "r@example.com"
+
+
+@pytest.mark.anyio
+async def test_scan_recruiter_rejects_unrelated_channel(session: AsyncSession) -> None:
+    settings = get_settings().model_copy(
+        update={"test_mode_enabled": False, "mattermost_bot_user_id": "bot-id"}
+    )
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="real-channel-id",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+    body = ScanRequest(
+        recruiter_user_id="trusted-user",
+        mattermost_dm_channel_id="some-other-channel",
+        idempotency_key="scan-0001",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _scan_recruiter(session, settings, body)
+    assert excinfo.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_bound_recruiter_accepts_dm_channel_name_form(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MATTERMOST_BOT_USER_ID", "bot-id")
+    get_settings.cache_clear()
+    recruiter = RecruiterConfig(
+        email="r@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="trusted-user",
+        mattermost_dm_channel="real-channel-id",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+    try:
+        resolved = await _bound_recruiter(
+            session, "trusted-user", direct_channel_name("bot-id", "trusted-user")
+        )
+    finally:
+        get_settings.cache_clear()
 
     assert resolved.email == "r@example.com"
 

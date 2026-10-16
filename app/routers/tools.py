@@ -45,6 +45,7 @@ from app.services.reviews import (
     hash_review_token,
 )
 from app.services.summary_email import SummaryEmailService
+from app.tools.mattermost import direct_channel_name
 from app.tools.notion import NotionAPIError, NotionClient
 from app.tools.synology import SynologyAPIError
 
@@ -1362,6 +1363,23 @@ def _question_queue_service(request: Request) -> QuestionQueueService:
     return cast(QuestionQueueService, request.app.state.question_queue_service)
 
 
+def _dm_channel_matches(settings: Settings, recruiter: RecruiterConfig, dm_channel_id: str) -> bool:
+    """Accept either the DM channel's real id or its deterministic `<user>__<user>` name.
+
+    OpenClaw's inbound metadata for a DM can report the channel in either form depending on
+    which field the skill prompt reads (found live: a real recruiter's scan command carried
+    the name form while `RecruiterConfig.mattermost_dm_channel` was provisioned with the real
+    id — raw `==` rejected every one of her commands with a 404). `MattermostClient` already
+    tolerates both forms when validating a channel at setup/send time; this mirrors that.
+    """
+    if recruiter.mattermost_dm_channel == dm_channel_id:
+        return True
+    bot_user_id = settings.mattermost_bot_user_id
+    if not bot_user_id or not recruiter.mattermost_user_id:
+        return False
+    return direct_channel_name(bot_user_id, recruiter.mattermost_user_id) == dm_channel_id
+
+
 def _scan_interaction_binding(
     settings: Settings,
     recruiter: RecruiterConfig,
@@ -1372,7 +1390,7 @@ def _scan_interaction_binding(
     offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
     if offline:
         return InteractionBinding(body.recruiter_user_id, body.mattermost_dm_channel_id)
-    if recruiter.mattermost_dm_channel != body.mattermost_dm_channel_id:
+    if not _dm_channel_matches(settings, recruiter, body.mattermost_dm_channel_id):
         raise PermissionError("Scan channel does not match recruiter configuration")
     return None
 
@@ -1387,12 +1405,13 @@ async def _scan_recruiter(
         criteria.append(RecruiterConfig.email == body.recruiter_email)
     else:
         criteria.append(RecruiterConfig.mattermost_user_id == body.recruiter_user_id)
-        offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
-        if not offline:
-            criteria.append(RecruiterConfig.mattermost_dm_channel == body.mattermost_dm_channel_id)
     recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
     if recruiter is None:
         raise HTTPException(status_code=404, detail="Active recruiter not found")
+    if body.recruiter_email is None:
+        offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
+        if not offline and not _dm_channel_matches(settings, recruiter, body.mattermost_dm_channel_id):
+            raise HTTPException(status_code=404, detail="Active recruiter not found")
     return recruiter
 
 
@@ -1403,14 +1422,15 @@ async def _question_recruiter(
     dm_channel_id: str,
 ) -> tuple[RecruiterConfig, InteractionBinding | None]:
     offline = settings.test_mode_enabled and not settings.mattermost_delivery_enabled
-    criteria = [
-        RecruiterConfig.mattermost_user_id == recruiter_user_id,
-        RecruiterConfig.active.is_(True),
-    ]
-    if not offline:
-        criteria.append(RecruiterConfig.mattermost_dm_channel == dm_channel_id)
-    recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
-    if recruiter is None:
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(
+            RecruiterConfig.mattermost_user_id == recruiter_user_id,
+            RecruiterConfig.active.is_(True),
+        )
+    )
+    if recruiter is None or (
+        not offline and not _dm_channel_matches(settings, recruiter, dm_channel_id)
+    ):
         raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
     try:
         enforce_recruiter_scope(settings, recruiter)
@@ -1534,17 +1554,17 @@ def _summary_email_service(request: Request) -> SummaryEmailService:
 async def _bound_recruiter(
     session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
 ) -> RecruiterConfig:
+    settings = get_settings()
     recruiter = await session.scalar(
         select(RecruiterConfig).where(
             RecruiterConfig.mattermost_user_id == recruiter_user_id,
-            RecruiterConfig.mattermost_dm_channel == dm_channel_id,
             RecruiterConfig.active.is_(True),
         )
     )
-    if recruiter is None:
+    if recruiter is None or not _dm_channel_matches(settings, recruiter, dm_channel_id):
         raise HTTPException(status_code=404, detail="Active recruiter DM binding not found")
     try:
-        enforce_recruiter_scope(get_settings(), recruiter)
+        enforce_recruiter_scope(settings, recruiter)
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
     return recruiter
