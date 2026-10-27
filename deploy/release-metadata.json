@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "targetAlembicRevision": "20261002_1000",
+  "targetAlembicRevision": "20261006_1000",
   "previousApplicationCompatibleWithTargetSchema": true,
   "migrationStrategy": "expand-contract",
   "failurePolicy": "automatic-application-rollback",
   "reviewPolicy": "code-owner-and-production-environment-approver",
-  "rationale": "20261002_1000 adds a nullable recruiter_config.matching_signals column the previous application never selects, so it runs unchanged on the new schema."
+  "rationale": "20261006_1000 adds nullable recordings.summary_email_*/summary_toggle_written_at columns and a new awaiting_summary_email status value the previous application never selects or transitions into, so it runs unchanged on the new schema."
 }

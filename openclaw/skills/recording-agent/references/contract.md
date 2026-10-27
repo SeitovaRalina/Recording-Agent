@@ -37,7 +37,29 @@ recording_agent.py routing-resolve --job-id UUID --dispatch-nonce NONCE --snapsh
 recording_agent.py routing-defer --job-id UUID --dispatch-nonce NONCE
                                   --snapshot-hash SHA256
                                   --reason ambiguous|no_match|model_error
+recording_agent.py summary-source [trusted metadata] --recording-id UUID
+recording_agent.py summary-submit [trusted metadata] --recording-id UUID --expected-version N
+                                   --toggle-paragraphs-json JSON --assessment-text TEXT
+                                   --idempotency-key KEY
 ```
+
+`summary-source` returns `{subject, sender, received_at, body}` for the one summary email the
+Backend already matched to this recording; it never searches live. `404` means the recording is
+unknown or not this recruiter's; `409` means no email is matched yet (best-effort search is still
+running on its own schedule, or the recruiter's IMAP app password is missing/invalid) — never
+report this as a failure.
+
+`summary-submit` takes `toggle_paragraphs` (1..20 plain-text strings, no markdown) and
+`assessment_text` (the hiring-manager message: strengths/weaknesses breakdown plus an explicit
+move-forward recommendation, built only from the `summary-source` email text). It writes the
+toggle block titled «Конспект общего собеседования» to the recording's Notion page immediately and
+returns `{recording_id, version, toggle_written, review_id, replayed}`; the assessment text is
+held, not posted, until the recruiter answers the resulting `summary_assessment_approval` question
+through `questions`/`answer` (choice 1 = send the comment, choice 2 or `ignore` = discard it — the
+toggle write is never undone either way). `404` is an unknown/foreign recording; `409` is a stale
+`expected_version`, a `failed` recording, a recording with no linked Notion page, an archived
+Notion page, or a Connection without comment permission (surfaced only once the recruiter
+approves).
 
 `answer --actions-json` accepts 1..50 objects containing only `question_id`, `question_set_id`,
 `action`, `capability`, `expected_version`, `idempotency_key`, and optional `choice`. `resolve`
@@ -57,6 +79,8 @@ requires choice 1..10; `ignore` forbids choice. Free text is never sent to Backe
 | `non-interview` | `POST /tools/recordings/{id}/route-non-interview` |
 | `cleanup-preview` | `POST /tools/cleanup/previews` |
 | `cleanup-confirm` | `POST /tools/cleanup/previews/{id}/confirm` |
+| `summary-source` | `GET /tools/recordings/{id}/summary-source` |
+| `summary-submit` | `POST /tools/recordings/{id}/summary` |
 | `routing-activate` | `POST /internal/routing-jobs/{id}/activate` |
 | `routing-resolve` | `POST /internal/routing-jobs/{id}/resolve` |
 | `routing-defer` | `POST /internal/routing-jobs/{id}/defer` |

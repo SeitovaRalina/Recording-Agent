@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -18,12 +19,15 @@ from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.canary import enforce_recruiter_scope
 from app.services.reviews import (
+    DISCARD_ONLY_QUESTION_TYPES,
     InteractionBinding,
     ReviewMutation,
     ReviewRejectedError,
     ReviewService,
 )
-from app.tools.mattermost import MattermostClient, MattermostError
+from app.tools.mattermost import MattermostClient, MattermostError, direct_channel_name
+
+logger = logging.getLogger(__name__)
 
 QuestionAction = Literal["resolve", "ignore"]
 # A question about a recording in one of these states can no longer change its outcome.
@@ -47,6 +51,8 @@ _QUESTION_LABELS = {
     "storage_key_collision": "в папке уже есть файл с таким именем",
     "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
     "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
+    "summary_email_ambiguous": "выберите письмо с конспектом собеседования",
+    "summary_assessment_approval": "подтвердите отправку оценки кандидата нанимающему менеджеру",
 }
 
 _FAILED_STEP_LABELS = {
@@ -61,6 +67,22 @@ _FAILED_STEP_LABELS = {
     "notion_update": "запись ссылки в Notion",
     "mark_processed": "отметка файла на Яндекс.Диске",
 }
+
+
+def _channel_matches(settings: Settings, recruiter: RecruiterConfig, dm_channel_id: str) -> bool:
+    """Accept either the DM channel's real id or its deterministic `<user>__<user>` name.
+
+    Mirrors `app.routers.tools._dm_channel_matches` (same fix, 2026-10-16, applied there but
+    not here): OpenClaw's inbound metadata for a DM can report either form, so a raw `==`
+    against the stored real id rejects every `questions`/`digest` call whose inbound metadata
+    uses the name form instead.
+    """
+    if recruiter.mattermost_dm_channel == dm_channel_id:
+        return True
+    bot_user_id = settings.mattermost_bot_user_id
+    if not bot_user_id or not recruiter.mattermost_user_id:
+        return False
+    return direct_channel_name(bot_user_id, recruiter.mattermost_user_id) == dm_channel_id
 
 
 def _folder_label(path: str | None) -> str:
@@ -132,6 +154,33 @@ class QuestionQueueService:
     def capability_token(self, question: ManualReview) -> str:
         return self._reviews.capability_token(question)
 
+    async def mirror_to_observer(self, recruiter: RecruiterConfig, text: str) -> None:
+        """Fan out `text` to the recruiter's configured observer DM, if any.
+
+        Mirroring is a one-way, best-effort notification: the observer fields are never fed
+        into `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` or any `ManualReview`
+        binding/capability check, and a mirror failure never blocks or alters the primary
+        recruiter send (see swarm-report/shared-mattermost-observer-plan.md, Decision B). A
+        no-op when no observer is configured, or in offline test mode (no real Mattermost
+        calls are ever made there).
+        """
+        if self._offline_test_mode:
+            return
+        if (
+            not recruiter.observer_mattermost_user_id
+            or not recruiter.observer_mattermost_dm_channel
+        ):
+            return
+        label = recruiter.display_name or recruiter.email
+        try:
+            await self._mattermost.send_dm(
+                recruiter.observer_mattermost_user_id,
+                f"[{label}] {text}",
+                expected_channel_id=recruiter.observer_mattermost_dm_channel,
+            )
+        except MattermostError as error:
+            logger.warning("Observer mirror failed for recruiter %s: %s", recruiter.email, error)
+
     async def list_active(
         self,
         session: AsyncSession,
@@ -141,14 +190,23 @@ class QuestionQueueService:
         question_set_id: uuid.UUID | None = None,
         limit: int = 50,
     ) -> list[ManualReview]:
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
         statement = (
             select(ManualReview)
             .where(
                 ManualReview.recruiter_user_id == recruiter_user_id,
                 ManualReview.mattermost_channel_id == dm_channel_id,
                 ManualReview.status == ManualReviewStatus.PENDING,
-                ManualReview.recording_id.not_in(self._settled_recording_ids()),
+                # summary_assessment_approval / summary_email_ambiguous are created ON an
+                # already-completed recording by design (the summary pipeline runs after the
+                # recording settles) -- the settled-recording exclusion below exists for the
+                # OTHER question types, where a settled recording means a stale, no-longer-
+                # actionable question. Found live: without this carve-out, these two types were
+                # permanently invisible to /tools/questions.
+                or_(
+                    ManualReview.question_type.in_(DISCARD_ONLY_QUESTION_TYPES),
+                    ManualReview.recording_id.not_in(self._settled_recording_ids()),
+                ),
             )
             .options(joinedload(ManualReview.recording))
             .order_by(ManualReview.created_at.asc(), ManualReview.id.asc())
@@ -170,7 +228,9 @@ class QuestionQueueService:
             raise ReviewRejectedError("Question answer batch must contain 1..50 items")
         if len({answer.question_id for answer in answers}) != len(answers):
             raise ReviewRejectedError("Question answer batch contains duplicate questions")
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        recruiter, dm_channel_id = await self._resolve_dm_channel(
+            session, recruiter_user_id, dm_channel_id
+        )
         accepted: list[ReviewMutation] = []
         rejected: list[tuple[uuid.UUID, str]] = []
         for answer in answers:
@@ -196,14 +256,16 @@ class QuestionQueueService:
                 )
                 accepted.append(mutation)
                 if not self._offline_test_mode:
+                    ack_message = f"Recording {mutation.recording_id}: processing started."
                     await self.queue_notification(
                         session,
                         dedupe_key=f"question:{answer.question_id}:start:{mutation.version}",
                         kind="processing_started",
                         recruiter_user_id=recruiter_user_id,
                         dm_channel_id=dm_channel_id,
-                        message=f"Recording {mutation.recording_id}: processing started.",
+                        message=ack_message,
                     )
+                    await self.mirror_to_observer(recruiter, ack_message)
             except ReviewRejectedError as error:
                 rejected.append((answer.question_id, str(error)))
         await session.flush()
@@ -226,7 +288,9 @@ class QuestionQueueService:
         local_date: date,
         send: bool = True,
     ) -> QuestionDigest | None:
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        recruiter, dm_channel_id = await self._resolve_dm_channel(
+            session, recruiter_user_id, dm_channel_id
+        )
         dedupe_key = f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}"
         outstanding_summary = await session.scalar(
             select(NotificationOutbox.id).where(
@@ -260,6 +324,12 @@ class QuestionQueueService:
                 ManualReview.mattermost_channel_id == dm_channel_id,
                 ManualReview.status == ManualReviewStatus.PENDING,
                 ManualReview.recording_id.in_(self._settled_recording_ids()),
+                # Never auto-close summary_assessment_approval / summary_email_ambiguous this
+                # way: they are created ON an already-settled recording by design, so this sweep
+                # would silently discard a real pending approval (no Notion comment posted, no
+                # recruiter notification) before the recruiter ever saw it. Same carve-out as
+                # list_active's settled-recording exclusion above.
+                ManualReview.question_type.not_in(DISCARD_ONLY_QUESTION_TYPES),
             )
             .values(
                 status=ManualReviewStatus.COMPLETED,
@@ -319,15 +389,17 @@ class QuestionQueueService:
             question.digest_id = digest.id
             self._reviews.rotate_digest_capability(question, issued_at=now)
             lines.extend(self._render_question(number, question))
+        digest_text = "\n".join(lines)
         await self.queue_notification(
             session,
             dedupe_key=dedupe_key,
             kind="summary",
             recruiter_user_id=recruiter_user_id,
             dm_channel_id=dm_channel_id,
-            message="\n".join(lines),
+            message=digest_text,
             entity_id=digest.id,
         )
+        await self.mirror_to_observer(recruiter, digest_text)
         return digest
 
     @staticmethod
@@ -709,17 +781,36 @@ class QuestionQueueService:
                     digest.sent_at = item.sent_at
         await session.flush()
 
+    async def _resolve_dm_channel(
+        self, session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
+    ) -> tuple[RecruiterConfig, str]:
+        """Validate the DM binding, then canonicalize `dm_channel_id` to the stored real id.
+
+        `ManualReview`/`NotificationOutbox`/`QuestionDigest` rows are always written with the
+        real-id form (`RecruiterConfig.mattermost_dm_channel`). A caller that keeps using a
+        name-form `dm_channel_id` after `_validate_dm` accepts it would pass the binding check
+        but then find nothing in those tables. Offline test mode intentionally allows per-call
+        channel ids that differ from the recruiter's stored one (interaction bindings), so it
+        is left unchanged there.
+        """
+        recruiter = await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        if self._offline_test_mode:
+            return recruiter, dm_channel_id
+        return recruiter, recruiter.mattermost_dm_channel or dm_channel_id
+
     async def _validate_dm(
         self, session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
     ) -> RecruiterConfig:
-        criteria = [
-            RecruiterConfig.mattermost_user_id == recruiter_user_id,
-            RecruiterConfig.active.is_(True),
-        ]
-        if not self._offline_test_mode:
-            criteria.append(RecruiterConfig.mattermost_dm_channel == dm_channel_id)
-        recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
-        if recruiter is None:
+        recruiter = await session.scalar(
+            select(RecruiterConfig).where(
+                RecruiterConfig.mattermost_user_id == recruiter_user_id,
+                RecruiterConfig.active.is_(True),
+            )
+        )
+        if recruiter is None or (
+            not self._offline_test_mode
+            and not _channel_matches(self._settings, recruiter, dm_channel_id)
+        ):
             raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
         if self._offline_test_mode:
             try:

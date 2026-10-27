@@ -16,6 +16,7 @@ from app.db.models.recording import Recording, RecordingStatus
 from app.db.models.recruiter_config import RecruiterConfig
 from app.services.question_queue import QuestionAnswer, QuestionQueueService
 from app.services.reviews import InteractionBinding, ReviewRejectedError, ReviewService
+from app.tools.mattermost import MattermostError
 
 
 def _question(file_id: str, token: str) -> ManualReview:
@@ -755,6 +756,84 @@ async def test_questions_of_settled_recordings_are_hidden_and_closed(
 
 
 @pytest.mark.anyio
+async def test_list_active_accepts_deterministic_dm_name_form(session: AsyncSession) -> None:
+    """Regression for the 19.10/22.10 live incident: OpenClaw reported the DM channel as the
+    deterministic `<bot>__<recruiter>` name while `RecruiterConfig.mattermost_dm_channel` holds
+    the real channel id. `_validate_dm`'s raw `==` rejected it with a 409; `_resolve_dm_channel`
+    must accept the name form and canonicalize subsequent queries to the stored real id.
+    """
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret", mattermost_bot_user_id="bot")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("legacy", "unused-1")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="real-dm-id",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+    question.mattermost_channel_id = "real-dm-id"
+    await session.commit()
+
+    name_form = "__".join(sorted(("bot", "recruiter")))
+    active = await service.list_active(
+        session, recruiter_user_id="recruiter", dm_channel_id=name_form
+    )
+
+    assert [item.id for item in active] == [question.id]
+
+
+@pytest.mark.anyio
+async def test_summary_questions_on_settled_recordings_stay_active_and_unclosed(
+    session: AsyncSession,
+) -> None:
+    """Regression (found via live E2E): summary_assessment_approval / summary_email_ambiguous
+    are created ON an already-completed recording by design -- the generic settled-recording
+    exclusion/auto-close in list_active/build_digest must not apply to them, or the recruiter's
+    pending approval becomes permanently unreachable and gets silently auto-closed overnight."""
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    summary_review = _question("summary", "unused-1")
+    summary_review.recording.status = RecordingStatus.COMPLETED
+    summary_review.question_type = "summary_assessment_approval"
+    settled_other = _question("settled-other", "unused-2")
+    settled_other.recording.status = RecordingStatus.COMPLETED
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            summary_review,
+            settled_other,
+        ]
+    )
+    await session.commit()
+
+    active = await service.list_active(session, recruiter_user_id="recruiter", dm_channel_id="dm")
+    assert [item.id for item in active] == [summary_review.id]
+
+    assert await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 9, 24)
+    )
+    await session.commit()
+    await session.refresh(summary_review)
+    assert summary_review.status == ManualReviewStatus.PENDING
+    assert summary_review.result is None
+
+
+@pytest.mark.anyio
 async def test_terminal_sweep_renders_routes_and_skips_already_notified(
     session: AsyncSession,
 ) -> None:
@@ -792,6 +871,254 @@ async def test_terminal_sweep_renders_routes_and_skips_already_notified(
     assert message.startswith("✅ Запись рабочей встречи сохранена")
     assert "Папка: Recruiting-NE / 2. Interviews / BizDev" in message
     assert item.mattermost_channel_id == "dm"
+
+
+@pytest.mark.anyio
+async def test_digest_mirrors_verbatim_text_to_observer_when_configured(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("observed", "unused")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                display_name="Лилия",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                observer_mattermost_user_id="observer",
+                observer_mattermost_dm_channel="observer-dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+
+    assert mattermost.send_dm.await_count == 1
+    call = mattermost.send_dm.await_args
+    assert call.args[0] == "observer"
+    assert call.args[1].startswith("[Лилия] Вопросы по записям собеседований: 1.")
+    assert call.kwargs["expected_channel_id"] == "observer-dm"
+
+
+@pytest.mark.anyio
+async def test_digest_is_a_noop_for_mirroring_when_observer_unset(session: AsyncSession) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("unobserved", "unused")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+
+    mattermost.send_dm.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_mirror_failure_does_not_block_or_alter_the_primary_digest_send(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    mattermost.send_dm.side_effect = MattermostError("observer channel is gone")
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("observed-failing", "unused")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                observer_mattermost_user_id="observer",
+                observer_mattermost_dm_channel="observer-dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    digest = await service.build_digest(
+        session, recruiter_user_id="recruiter", dm_channel_id="dm", local_date=date(2026, 7, 22)
+    )
+
+    assert digest is not None
+    summary = await session.scalar(
+        select(NotificationOutbox).where(NotificationOutbox.kind == "summary")
+    )
+    assert summary is not None
+
+
+@pytest.mark.anyio
+async def test_reply_acknowledgment_mirrors_to_observer_when_configured(
+    session: AsyncSession,
+) -> None:
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("answered", "valid-token")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="dm",
+                observer_mattermost_user_id="observer",
+                observer_mattermost_dm_channel="observer-dm",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+
+    await service.apply_partial(
+        session,
+        recruiter_user_id="recruiter",
+        dm_channel_id="dm",
+        answers=(
+            QuestionAnswer(
+                question_id=question.id,
+                question_set_id=question.question_set_id,
+                action="ignore",
+                token="valid-token",
+                expected_version=3,
+                idempotency_key="observed-1",
+            ),
+        ),
+    )
+
+    assert mattermost.send_dm.await_count == 1
+    call = mattermost.send_dm.await_args
+    assert call.args[0] == "observer"
+    assert "processing started" in call.args[1]
+    assert call.kwargs["expected_channel_id"] == "observer-dm"
+
+
+@pytest.mark.anyio
+async def test_observer_identity_never_resolves_as_a_recruiter_binding(
+    session: AsyncSession,
+) -> None:
+    """Regression: `observer_mattermost_user_id`/`observer_mattermost_dm_channel` are never
+    read by the binding lookup any `QuestionQueueService` entry point uses -- an observer can
+    never pose as the recruiter they observe, for this recruiter row or any other."""
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="lilia@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="lilia-id",
+                mattermost_dm_channel="lilia-dm",
+                observer_mattermost_user_id="ralina-id",
+                observer_mattermost_dm_channel="ralina-dm",
+                active=True,
+            ),
+            RecruiterConfig(
+                email="ralina@example.com",
+                notion_database_id="db2",
+                synology_base_folder="root2",
+                mattermost_user_id="ralina-id",
+                mattermost_dm_channel="ralina-dm",
+                active=True,
+            ),
+        ]
+    )
+    await session.commit()
+
+    with pytest.raises(ReviewRejectedError, match="Mattermost DM binding is invalid"):
+        await service.list_active(session, recruiter_user_id="ralina-id", dm_channel_id="lilia-dm")
+
+
+@pytest.mark.anyio
+async def test_observer_cannot_consume_a_capability_token_bound_to_the_observed_recruiter(
+    session: AsyncSession,
+) -> None:
+    """Regression: an observer's own message, answered through her own DM binding, never
+    matches or consumes a pending `ManualReview` capability token bound to the recruiter she
+    observes -- `_enforce_authoritative_scope` resolves the recording's real owning recruiter
+    and requires her Mattermost user id to match the requester; the observer fields never
+    populate or alias that identity."""
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    lilias_question = _question("lilias-question", "lilias-token")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="lilia@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="lilia-id",
+                mattermost_dm_channel="lilia-dm",
+                observer_mattermost_user_id="ralina-id",
+                observer_mattermost_dm_channel="ralina-dm",
+                active=True,
+            ),
+            RecruiterConfig(
+                email="ralina@example.com",
+                notion_database_id="db2",
+                synology_base_folder="root2",
+                mattermost_user_id="ralina-id",
+                mattermost_dm_channel="ralina-dm",
+                active=True,
+            ),
+        ]
+    )
+    lilias_question.recording.disk_owner_email = "lilia@example.com"
+    lilias_question.recruiter_user_id = "lilia-id"
+    lilias_question.mattermost_channel_id = "lilia-dm"
+    session.add(lilias_question)
+    await session.commit()
+
+    result = await service.apply_partial(
+        session,
+        recruiter_user_id="ralina-id",
+        dm_channel_id="ralina-dm",
+        answers=(
+            QuestionAnswer(
+                question_id=lilias_question.id,
+                question_set_id=lilias_question.question_set_id,
+                action="ignore",
+                token="lilias-token",
+                expected_version=3,
+                idempotency_key="observer-steal-1",
+            ),
+        ),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0][0] == lilias_question.id
+    assert "does not match recruiter configuration" in result.rejected[0][1]
+    await session.refresh(lilias_question)
+    assert lilias_question.status == ManualReviewStatus.PENDING
 
 
 def test_digest_question_uses_recruiter_label_not_internal_code() -> None:

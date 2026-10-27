@@ -357,6 +357,48 @@ async def set_daily_digest(
     return recruiter
 
 
+async def set_observer(
+    session: AsyncSession,
+    *,
+    recruiter_email: str,
+    observer_mattermost_user_id: str,
+    observer_mattermost_dm_channel: str,
+) -> RecruiterConfig:
+    """Point an existing recruiter's observer mirror at another person's Mattermost DM.
+
+    The observer fields are a notification destination, never a recruiter identity: they are
+    never read by `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` or any
+    `ManualReview` binding/capability check (see
+    swarm-report/shared-mattermost-observer-plan.md, Decision B).
+    """
+    observer_user_id = observer_mattermost_user_id.strip()
+    observer_dm_channel = observer_mattermost_dm_channel.strip()
+    if not observer_user_id or not observer_dm_channel:
+        raise ValueError("Observer Mattermost user id and DM channel are both required")
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email.strip().casefold())
+    )
+    if recruiter is None:
+        raise ValueError("Recruiter config not found")
+    recruiter.observer_mattermost_user_id = observer_user_id
+    recruiter.observer_mattermost_dm_channel = observer_dm_channel
+    await session.commit()
+    return recruiter
+
+
+async def clear_observer(session: AsyncSession, *, recruiter_email: str) -> RecruiterConfig:
+    """Remove an existing recruiter's observer mirror (active or inactive)."""
+    recruiter = await session.scalar(
+        select(RecruiterConfig).where(RecruiterConfig.email == recruiter_email.strip().casefold())
+    )
+    if recruiter is None:
+        raise ValueError("Recruiter config not found")
+    recruiter.observer_mattermost_user_id = None
+    recruiter.observer_mattermost_dm_channel = None
+    await session.commit()
+    return recruiter
+
+
 async def set_matching_signals(
     session: AsyncSession,
     *,
@@ -510,6 +552,26 @@ async def _run(args: argparse.Namespace) -> None:
                         )
                         state = recruiter.daily_digest_enabled
                         print(f"{recruiter.email}: daily_digest_enabled={state}")
+                    elif args.command == "set-observer":
+                        if input("Set observer mirror? [yes/no] ").strip() != "yes":
+                            raise ValueError("Operator confirmation is required")
+                        recruiter = await set_observer(
+                            session,
+                            recruiter_email=args.email,
+                            observer_mattermost_user_id=args.observer_user_id,
+                            observer_mattermost_dm_channel=args.observer_dm_channel,
+                        )
+                        print(
+                            f"{recruiter.email}: "
+                            f"observer_mattermost_user_id={recruiter.observer_mattermost_user_id}, "
+                            "observer_mattermost_dm_channel="
+                            f"{recruiter.observer_mattermost_dm_channel}"
+                        )
+                    elif args.command == "clear-observer":
+                        if input("Clear observer mirror? [yes/no] ").strip() != "yes":
+                            raise ValueError("Operator confirmation is required")
+                        recruiter = await clear_observer(session, recruiter_email=args.email)
+                        print(f"{recruiter.email}: observer mirror cleared")
                     elif args.command == "set-matching-signals":
                         overrides = matching_signals_overrides_from_args(args)
                         prompt = "Clear" if overrides is None else "Set"
@@ -601,6 +663,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_digest.add_argument("--email", required=True)
     set_digest.add_argument("--state", required=True, choices=["enabled", "disabled"])
+    set_observer = commands.add_parser(
+        "set-observer", help="Point an existing recruiter's observer mirror at another DM"
+    )
+    set_observer.add_argument("--email", required=True)
+    set_observer.add_argument("--observer-user-id", required=True)
+    set_observer.add_argument("--observer-dm-channel", required=True)
+    clear_observer_parser = commands.add_parser(
+        "clear-observer", help="Remove an existing recruiter's observer mirror"
+    )
+    clear_observer_parser.add_argument("--email", required=True)
     set_matching_signals_parser = commands.add_parser(
         "set-matching-signals",
         help="Set or clear an existing recruiter's matching signals override",

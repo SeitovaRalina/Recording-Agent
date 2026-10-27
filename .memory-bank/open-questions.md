@@ -255,6 +255,35 @@ automatic-suppression policy.
 - Manual message-triggered scan remains supported while the scheduler is disabled. No scheduled
   Yandex cleanup is part of the target system.
 
+## Q17: Shared Mattermost channel to observe recruiter-bot conversations ✅ CLOSED
+
+**Answer (2026-10-27), per `swarm-report/shared-mattermost-observer-plan.md`:** reject the literal
+3-person group-channel shape agreed with Lilia on 2026-10-16. Ship a **mirrored notification**
+instead — Backend copies every digest/question/confirmation text it already sends to Lilia to
+Ralina's own existing DM with the bot, prefixed with Lilia's display name, read-only, via the
+existing `MattermostClient.send_dm` path. Resolves both open design decisions by construction:
+
+- Shape: not a group channel. `MattermostClient.validate_direct_channel` keeps its `type == "D"` +
+  exact-2-member invariant unchanged for every recruiter; Ralina's observer channel is her own
+  already-provisioned 1:1 DM, untouched by any channel-membership change.
+- Identity: the observer fields (`observer_mattermost_user_id`, `observer_mattermost_dm_channel`)
+  live on the *observed* recruiter's row (Lilia's `RecruiterConfig`) and are read only by the new
+  mirror helper — never by `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` matching. No
+  RecruiterConfig row is created for Ralina-as-observer; an observer can never trigger a
+  scan/mutation for any recruiter, including her own. No silent fallthrough is possible because
+  there is no third binding state to invent.
+
+**Cross-reference Q3** ("no shared-channel fallback" for recruiter conversational UX): this answer
+reinforces Q3 rather than overriding it. A mirror is a one-way fan-out of text Backend already
+rendered to a *second* recruiter's own pre-existing DM — not a shared channel, not an alternative
+conversational UX for the observed recruiter herself. Lilia's own Mattermost experience stays
+exactly the ordinary 1:1 DM Q3 specifies; only Ralina gets a read-only copy elsewhere.
+
+The separate, more urgent finding that the OpenClaw Gateway runs one shared conversation *session*
+per Mattermost bot account regardless of channel (see `deploy-and-ops.md` → "Known architecture
+gap") remains open and untouched by this decision — the mirror never adds a second real sender into
+Lilia's session, so it neither requires nor worsens that fix. Tracked separately, not by this item.
+
 ## Q16: Autonomous Synology routing delivery ownership — CLOSED
 
 **Answer (2026-07-29):** Backend creates a durable routing job after daily/manual scan matching;

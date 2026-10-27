@@ -19,6 +19,12 @@ class RecruiterConfig(Base):
     synology_base_folder: Mapped[str] = mapped_column(Text, nullable=False)
     mattermost_user_id: Mapped[str | None] = mapped_column(Text)
     mattermost_dm_channel: Mapped[str | None] = mapped_column(Text)
+    # A notification destination, never a recruiter identity: never read by
+    # _bound_recruiter/_scan_recruiter/_question_recruiter or any ManualReview binding check.
+    # NULL means "no observer configured" (zero behavior change). See
+    # swarm-report/shared-mattermost-observer-plan.md, Decision B.
+    observer_mattermost_user_id: Mapped[str | None] = mapped_column(Text)
+    observer_mattermost_dm_channel: Mapped[str | None] = mapped_column(Text)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC", server_default="UTC")
     notion_preflight_token_hash: Mapped[str | None] = mapped_column(Text)
     notion_preflight_database_id: Mapped[str | None] = mapped_column(Text)

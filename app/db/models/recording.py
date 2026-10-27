@@ -30,6 +30,7 @@ class RecordingStatus(StrEnum):
     UPLOADED_TO_SYNOLOGY = "uploaded_to_synology"
     SYNOLOGY_LINK_CREATED = "synology_link_created"
     NOTION_UPDATED = "notion_updated"
+    AWAITING_SUMMARY_EMAIL = "awaiting_summary_email"
     SOURCE_MARKED_PROCESSED = "source_marked_processed"
     SOURCE_DELETED = "source_deleted"
     COMPLETED = "completed"
@@ -98,6 +99,13 @@ class Recording(Base):
             RecordingStatus.FAILED,
         },
         RecordingStatus.NOTION_UPDATED: {
+            RecordingStatus.AWAITING_SUMMARY_EMAIL,
+            RecordingStatus.SOURCE_MARKED_PROCESSED,
+            RecordingStatus.COMPLETED,
+            RecordingStatus.FAILED,
+        },
+        RecordingStatus.AWAITING_SUMMARY_EMAIL: {
+            RecordingStatus.AWAITING_SUMMARY_EMAIL,
             RecordingStatus.SOURCE_MARKED_PROCESSED,
             RecordingStatus.COMPLETED,
             RecordingStatus.FAILED,
@@ -191,6 +199,19 @@ class Recording(Base):
     storage_is_durable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Summary-email tracking lives independently of `status`/`transition_to`; the matching
+    # recruiter's inbox is searched best-effort after `notion_updated` and never blocks
+    # `completed`. See app/services/summary_email.py and app/scheduler/cron.py.
+    summary_email_search_attempts: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default=text("0")
+    )
+    summary_email_search_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    summary_email_message_id: Mapped[str | None] = mapped_column(Text)
+    summary_email_subject: Mapped[str | None] = mapped_column(Text)
+    summary_email_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary_toggle_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     processing_attempts: Mapped[list[ProcessingAttempt]] = relationship(
         back_populates="recording", cascade="all, delete-orphan"

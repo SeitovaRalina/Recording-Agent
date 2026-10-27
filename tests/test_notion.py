@@ -12,13 +12,17 @@ from app.tools.notion import (
     ConnectRetryTransport,
     NotionAPIError,
     NotionAuthError,
+    NotionBlockError,
     NotionClient,
+    NotionCommentError,
+    NotionCommentForbiddenError,
     NotionDatabaseNotFoundError,
     NotionDatabaseUnavailableError,
     NotionDataSourceNotFoundError,
     NotionDataSourceUnavailableError,
     NotionForbiddenError,
     NotionMalformedResponseError,
+    NotionPageArchivedError,
     NotionQueryError,
     NotionRelationChoice,
     NotionSchemaError,
@@ -684,6 +688,97 @@ async def test_update_page_interview_uses_date_and_external_file_current_header(
                     url="https://share",
                     filename="interview.webm",
                 )
+
+
+@pytest.mark.anyio
+async def test_append_toggle_block_sends_rich_text_children() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.patch(f"{BASE}/blocks/page/children").mock(
+                return_value=httpx.Response(200, json={})
+            )
+            await client.append_toggle_block(
+                "page", "Конспект общего собеседования", ["Paragraph one", "Paragraph two"]
+            )
+        body = route.calls.last.request.content.decode()
+        assert "Конспект общего собеседования" in body
+        assert "Paragraph one" in body
+        assert "Paragraph two" in body
+
+
+@pytest.mark.anyio
+async def test_append_toggle_block_rejects_archived_page() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.patch(f"{BASE}/blocks/page/children").mock(
+                return_value=httpx.Response(
+                    400, json={"code": "validation_error", "message": "block is archived"}
+                )
+            )
+            with pytest.raises(NotionPageArchivedError):
+                await client.append_toggle_block("page", "title", ["paragraph"])
+
+
+@pytest.mark.anyio
+async def test_append_toggle_block_generic_failure_is_typed() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.patch(f"{BASE}/blocks/page/children").mock(return_value=httpx.Response(500))
+            with pytest.raises(NotionBlockError):
+                await client.append_toggle_block("page", "title", ["paragraph"])
+
+
+@pytest.mark.anyio
+async def test_create_comment_sends_rich_text() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(f"{BASE}/comments").mock(return_value=httpx.Response(200, json={}))
+            await client.create_comment("page", "Assessment text")
+        body = route.calls.last.request.content.decode()
+        assert "Assessment text" in body
+        assert "page_id" in body and "page" in body
+
+
+@pytest.mark.anyio
+async def test_create_comment_without_permission_is_typed() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{BASE}/comments").mock(
+                return_value=httpx.Response(
+                    403, json={"code": "restricted_resource", "message": "no comment capability"}
+                )
+            )
+            with pytest.raises(NotionCommentForbiddenError):
+                await client.create_comment("page", "text")
+
+
+@pytest.mark.anyio
+async def test_create_comment_on_archived_page_is_typed() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{BASE}/comments").mock(
+                return_value=httpx.Response(
+                    404, json={"code": "object_not_found", "message": "page is archived"}
+                )
+            )
+            with pytest.raises(NotionPageArchivedError):
+                await client.create_comment("page", "text")
+
+
+@pytest.mark.anyio
+async def test_create_comment_generic_failure_is_typed() -> None:
+    async with httpx.AsyncClient() as http:
+        client = NotionClient(SecretStr("token"), http)
+        with respx.mock(assert_all_called=True) as router:
+            router.post(f"{BASE}/comments").mock(return_value=httpx.Response(500))
+            with pytest.raises(NotionCommentError):
+                await client.create_comment("page", "text")
 
 
 @pytest.mark.anyio

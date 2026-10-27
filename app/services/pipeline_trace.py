@@ -9,7 +9,19 @@ from app.config import Settings
 
 logger = logging.getLogger("recording_agent.pipeline")
 
-_SENSITIVE_KEY_PARTS = ("authorization", "password", "secret", "token", "raw_ics")
+_SENSITIVE_KEY_PARTS = (
+    "authorization",
+    "password",
+    "secret",
+    "token",
+    "raw_ics",
+    # Summary-email content (subject/body/paragraphs/assessment) never reaches the dev trace
+    # log unredacted, even if a future caller passes it by mistake.
+    "body",
+    "paragraphs",
+    "assessment",
+    "email_subject",
+)
 
 
 def trace(settings: Settings, event: str, **fields: object) -> None:

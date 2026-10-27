@@ -29,6 +29,7 @@ STATUS_LABELS = {
     "uploaded_to_synology": "файл загружен в хранилище",
     "synology_link_created": "ссылка на файл создана",
     "notion_updated": "Notion обновлён",
+    "awaiting_summary_email": "обработка завершена, идёт поиск письма с конспектом",
     "source_marked_processed": "обработка завершена",
     "source_deleted": "исходный файл удалён по retention policy",
     "completed": "обработка завершена",
@@ -59,6 +60,8 @@ REVIEW_REASON_LABELS = {
     "autonomous_routing_ambiguous": "подходят несколько папок в Synology",
     "autonomous_routing_no_match": "подходящая папка в Synology не найдена",
     "autonomous_routing_model_error": "не удалось автоматически выбрать папку",
+    "summary_email_ambiguous": "найдено несколько писем, похожих на конспект собеседования",
+    "summary_assessment_approval": "ждёт подтверждения отправки оценки кандидата",
 }
 
 ERROR_LABELS = {
@@ -345,6 +348,34 @@ def _parser() -> argparse.ArgumentParser:
     cleanup_confirm.add_argument("--snapshot-hash", required=True)
     cleanup_confirm.add_argument("--idempotency-key", required=True)
 
+    summary_source = subparsers.add_parser(
+        "summary-source", help="read the found summary-email text for one recording"
+    )
+    _add_recruiter_user_id_argument(summary_source)
+    summary_source.add_argument("--recording-id", required=True, type=uuid.UUID)
+
+    summary_submit = subparsers.add_parser(
+        "summary-submit",
+        help="write the LLM-summarized toggle content and candidate assessment",
+    )
+    _add_recruiter_user_id_argument(summary_submit)
+    summary_submit.add_argument("--recording-id", required=True, type=uuid.UUID)
+    summary_submit.add_argument("--expected-version", required=True, type=int)
+    summary_submit.add_argument("--idempotency-key", required=True)
+    summary_submit.add_argument(
+        "--toggle-paragraphs-json",
+        required=True,
+        help='JSON array of 1..20 plain-text paragraph strings, e.g. ["line one", "line two"]',
+    )
+    summary_submit.add_argument(
+        "--assessment-text",
+        required=True,
+        help=(
+            "Comment text for the hiring manager: strengths/weaknesses breakdown from the "
+            "email plus an explicit move-forward recommendation."
+        ),
+    )
+
     for name in ("routing-activate", "routing-resolve", "routing-defer"):
         routing = subparsers.add_parser(name, help=f"{name} one autonomous routing job")
         routing.add_argument("--job-id", required=True, type=uuid.UUID)
@@ -410,6 +441,20 @@ def _question_actions(raw: str) -> list[dict[str, Any]]:
             raise ClientError("Question action capability or idempotency key is invalid")
         actions.append(normalized)
     return actions
+
+
+def _toggle_paragraphs(raw: str) -> list[str]:
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ClientError("Toggle paragraphs must be valid JSON") from None
+    if (
+        not isinstance(decoded, list)
+        or not 1 <= len(decoded) <= 20
+        or not all(isinstance(item, str) and item.strip() for item in decoded)
+    ):
+        raise ClientError("Toggle paragraphs must be 1..20 non-blank strings")
+    return [str(item) for item in decoded]
 
 
 def _execute(args: argparse.Namespace) -> Any:
@@ -593,6 +638,24 @@ def _execute(args: argparse.Namespace) -> Any:
                 "mattermost_dm_channel_id": args.mattermost_dm_channel_id,
                 "capability": args.capability,
                 "idempotency_key": args.idempotency_key,
+            },
+        )
+    if args.command == "summary-source":
+        return _request(
+            "GET",
+            f"/tools/recordings/{args.recording_id}/summary-source",
+            query={"recruiter_user_id": args.recruiter_user_id},
+        )
+    if args.command == "summary-submit":
+        return _request(
+            "POST",
+            f"/tools/recordings/{args.recording_id}/summary",
+            body={
+                "recruiter_user_id": args.recruiter_user_id,
+                "expected_version": args.expected_version,
+                "idempotency_key": args.idempotency_key,
+                "toggle_paragraphs": _toggle_paragraphs(args.toggle_paragraphs_json),
+                "assessment_text": args.assessment_text,
             },
         )
     if args.command == "cleanup-preview":
@@ -867,6 +930,28 @@ def _cleanup_confirm_message(result: dict[str, Any]) -> str:
     return f"Очистка выполнена. {summary or 'Подходящих записей нет.'}"
 
 
+def _summary_source_message(result: dict[str, Any]) -> str:
+    subject = str(result.get("subject") or "(без темы)")[:300]
+    sender = str(result.get("sender") or "")[:320]
+    received_at = str(result.get("received_at") or "")[:32]
+    body = str(result.get("body") or "")
+    return (
+        f"Письмо с конспектом найдено: «{subject}» от {sender} ({received_at}).\n"
+        f"Текст письма:\n{body}"
+    )
+
+
+def _summary_submit_message(result: dict[str, Any]) -> str:
+    replay = (
+        " Повторный запрос не создал дополнительную обработку." if result.get("replayed") else ""
+    )
+    return (
+        "Конспект записан в карточку Notion (toggle «Конспект общего собеседования»). "
+        f"Оценка кандидата ждёт вашего подтверждения — ответьте на вопрос по этой записи "
+        f"(1 — отправить нанимающему менеджеру, 2 — отклонить).{replay}"
+    )
+
+
 def _stored_message(subject: str, result: dict[str, Any]) -> str:
     candidate = str(result.get("candidate_name") or "")
     who = f" ({candidate})" if candidate else ""
@@ -928,6 +1013,10 @@ def _message_for(command: str, result: Any) -> str:
             "Готово: ссылка на запись перенесена в новую карточку Notion, из старой карточки "
             f"она убрана. Запись: {result.get('safe_link') or 'ссылка без изменений'}."
         )
+    if command == "summary-source":
+        return _summary_source_message(result)
+    if command == "summary-submit":
+        return _summary_submit_message(result)
     if command == "cleanup-preview":
         return _cleanup_preview_message(result)
     if command == "cleanup-confirm":

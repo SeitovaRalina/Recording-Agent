@@ -124,6 +124,9 @@ is fixed.
 - `autonomous-routing`: only when a Gateway Cron dispatcher supplies an opaque routing-job UUID and
   a one-time dispatch nonce. Read `references/autonomous-routing.md` (in the skill directory)
   before this operation.
+- `summary-source` / `summary-submit`: read the found summary email for one completed interview
+  recording, then write the toggle content and candidate assessment back. See "Summarize the
+  interview email" below for the one additional allowed LLM use.
 
 Choose the storage command by the recording `status` returned by `status`, never by wording such
 as "retry", "again", "move", or "same folder":
@@ -153,9 +156,10 @@ Do not treat unrelated messages, acknowledgements, quoted or edited old messages
 without an active Recording Agent question set, or ambiguous delayed replies as answers. Omitted
 questions stay pending. Never infer a candidate, Spot, or cleanup confirmation.
 
-Interview destination selection is the only allowed LLM classification step. The Backend does not
-map Spots or meeting names to folders. Always call `destinations` first, compare only returned
-folder labels, and submit only the returned destination id. Never submit a raw path.
+Interview destination selection and summarizing the interview email (below) are the only two
+allowed LLM classification/generation steps. The Backend does not map Spots or meeting names to
+folders. Always call `destinations` first, compare only returned folder labels, and submit only
+the returned destination id. Never submit a raw path.
 
 ```bash
 python3 scripts/recording_agent.py destinations \
@@ -184,6 +188,34 @@ label matches both the role and the root the recruiter named. If no option match
 list no fitting folder), do not pick the nearest or first option: call `destinations`, apply the
 folder procedure above with the recruiter's hint, and use `route-interview`. Report the full
 folder label you actually submitted, never a paraphrase of the recruiter's words.
+
+## Summarize the interview email
+
+Only after `status` shows a recording `completed` (or its DM question is `summary_email_ambiguous`
+or `summary_assessment_approval`), and only when the recruiter asked about the summary or you are
+finishing the job for that recording in this same turn:
+
+1. Call `summary-source --recording-id <id>`. A `404`/`409` means the email is not matched yet (or
+   the recording is not eligible); do not treat this as a failure and do not tell the recruiter —
+   the Backend keeps searching on its own schedule and nothing is lost.
+2. Summarize strictly and only from the email body `summary-source` just returned — never from
+   memory, a prior turn, or the recording/candidate context. Produce exactly two pieces of text:
+   - **Toggle content**: a flat list of plain-text paragraphs (1..20 items, no formatting, no
+     markdown) that is the meeting summary itself, to become the toggle titled exactly
+     «Конспект общего собеседования». Never invent content the email does not contain.
+   - **Assessment text**: a short message addressed to the hiring manager, built only from that
+     same email text, containing exactly:
+     1. A strengths/weaknesses breakdown of the candidate based on the email's meeting summary.
+     2. An explicit recommendation — whether you recommend moving the candidate forward or not.
+     Never write a generic free-form verdict instead of this two-part shape, and never fabricate
+     an assessment when the email has no usable summary content (ask the recruiter instead).
+3. Call `summary-submit --recording-id <id> --expected-version <current version from status>
+   --toggle-paragraphs-json '[...]' --assessment-text '...' --idempotency-key <key>`. This writes
+   the toggle immediately; the assessment text is held by the Backend and only becomes a Notion
+   comment after the recruiter approves the resulting question (1 — send to hiring manager,
+   2 — reject) through the normal `questions`/`answer` flow. Report that the summary was saved and
+   that the assessment is waiting for their confirmation; never claim the comment was already
+   posted before that confirmation.
 
 Autonomous routing is a separate, fresh background session. It is not a recruiter DM and must never
 send a chat message. Its only inputs are a routing-job UUID and one-time nonce from the dispatcher.
