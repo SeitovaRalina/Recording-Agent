@@ -24,7 +24,7 @@ from app.services.reviews import (
     ReviewRejectedError,
     ReviewService,
 )
-from app.tools.mattermost import MattermostClient, MattermostError
+from app.tools.mattermost import MattermostClient, MattermostError, direct_channel_name
 
 QuestionAction = Literal["resolve", "ignore"]
 # A question about a recording in one of these states can no longer change its outcome.
@@ -64,6 +64,22 @@ _FAILED_STEP_LABELS = {
     "notion_update": "запись ссылки в Notion",
     "mark_processed": "отметка файла на Яндекс.Диске",
 }
+
+
+def _channel_matches(settings: Settings, recruiter: RecruiterConfig, dm_channel_id: str) -> bool:
+    """Accept either the DM channel's real id or its deterministic `<user>__<user>` name.
+
+    Mirrors `app.routers.tools._dm_channel_matches` (same fix, 2026-10-16, applied there but
+    not here): OpenClaw's inbound metadata for a DM can report either form, so a raw `==`
+    against the stored real id rejects every `questions`/`digest` call whose inbound metadata
+    uses the name form instead.
+    """
+    if recruiter.mattermost_dm_channel == dm_channel_id:
+        return True
+    bot_user_id = settings.mattermost_bot_user_id
+    if not bot_user_id or not recruiter.mattermost_user_id:
+        return False
+    return direct_channel_name(bot_user_id, recruiter.mattermost_user_id) == dm_channel_id
 
 
 def _folder_label(path: str | None) -> str:
@@ -144,7 +160,7 @@ class QuestionQueueService:
         question_set_id: uuid.UUID | None = None,
         limit: int = 50,
     ) -> list[ManualReview]:
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
         statement = (
             select(ManualReview)
             .where(
@@ -182,7 +198,7 @@ class QuestionQueueService:
             raise ReviewRejectedError("Question answer batch must contain 1..50 items")
         if len({answer.question_id for answer in answers}) != len(answers):
             raise ReviewRejectedError("Question answer batch contains duplicate questions")
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
         accepted: list[ReviewMutation] = []
         rejected: list[tuple[uuid.UUID, str]] = []
         for answer in answers:
@@ -238,7 +254,7 @@ class QuestionQueueService:
         local_date: date,
         send: bool = True,
     ) -> QuestionDigest | None:
-        await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
         dedupe_key = f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}"
         outstanding_summary = await session.scalar(
             select(NotificationOutbox.id).where(
@@ -727,17 +743,36 @@ class QuestionQueueService:
                     digest.sent_at = item.sent_at
         await session.flush()
 
+    async def _resolve_dm_channel(
+        self, session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
+    ) -> tuple[RecruiterConfig, str]:
+        """Validate the DM binding, then canonicalize `dm_channel_id` to the stored real id.
+
+        `ManualReview`/`NotificationOutbox`/`QuestionDigest` rows are always written with the
+        real-id form (`RecruiterConfig.mattermost_dm_channel`). A caller that keeps using a
+        name-form `dm_channel_id` after `_validate_dm` accepts it would pass the binding check
+        but then find nothing in those tables. Offline test mode intentionally allows per-call
+        channel ids that differ from the recruiter's stored one (interaction bindings), so it
+        is left unchanged there.
+        """
+        recruiter = await self._validate_dm(session, recruiter_user_id, dm_channel_id)
+        if self._offline_test_mode:
+            return recruiter, dm_channel_id
+        return recruiter, recruiter.mattermost_dm_channel or dm_channel_id
+
     async def _validate_dm(
         self, session: AsyncSession, recruiter_user_id: str, dm_channel_id: str
     ) -> RecruiterConfig:
-        criteria = [
-            RecruiterConfig.mattermost_user_id == recruiter_user_id,
-            RecruiterConfig.active.is_(True),
-        ]
-        if not self._offline_test_mode:
-            criteria.append(RecruiterConfig.mattermost_dm_channel == dm_channel_id)
-        recruiter = await session.scalar(select(RecruiterConfig).where(*criteria))
-        if recruiter is None:
+        recruiter = await session.scalar(
+            select(RecruiterConfig).where(
+                RecruiterConfig.mattermost_user_id == recruiter_user_id,
+                RecruiterConfig.active.is_(True),
+            )
+        )
+        if recruiter is None or (
+            not self._offline_test_mode
+            and not _channel_matches(self._settings, recruiter, dm_channel_id)
+        ):
             raise ReviewRejectedError("Recruiter or exact Mattermost DM binding is invalid")
         if self._offline_test_mode:
             try:

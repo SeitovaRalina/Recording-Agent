@@ -755,6 +755,41 @@ async def test_questions_of_settled_recordings_are_hidden_and_closed(
 
 
 @pytest.mark.anyio
+async def test_list_active_accepts_deterministic_dm_name_form(session: AsyncSession) -> None:
+    """Regression for the 19.10/22.10 live incident: OpenClaw reported the DM channel as the
+    deterministic `<bot>__<recruiter>` name while `RecruiterConfig.mattermost_dm_channel` holds
+    the real channel id. `_validate_dm`'s raw `==` rejected it with a 409; `_resolve_dm_channel`
+    must accept the name form and canonicalize subsequent queries to the stored real id.
+    """
+    mattermost = AsyncMock()
+    settings = Settings(openclaw_secret="secret", mattermost_bot_user_id="bot")
+    service = QuestionQueueService(ReviewService(mattermost, settings), mattermost, settings)
+    question = _question("legacy", "unused-1")
+    session.add_all(
+        [
+            RecruiterConfig(
+                email="r@example.com",
+                notion_database_id="db",
+                synology_base_folder="root",
+                mattermost_user_id="recruiter",
+                mattermost_dm_channel="real-dm-id",
+            ),
+            question,
+        ]
+    )
+    await session.commit()
+    question.mattermost_channel_id = "real-dm-id"
+    await session.commit()
+
+    name_form = "__".join(sorted(("bot", "recruiter")))
+    active = await service.list_active(
+        session, recruiter_user_id="recruiter", dm_channel_id=name_form
+    )
+
+    assert [item.id for item in active] == [question.id]
+
+
+@pytest.mark.anyio
 async def test_summary_questions_on_settled_recordings_stay_active_and_unclosed(
     session: AsyncSession,
 ) -> None:

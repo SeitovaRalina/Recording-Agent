@@ -40,6 +40,10 @@ image when the migration is declared compatible. For multi-tenancy: additive, nu
 `previousApplicationCompatibleWithTargetSchema=true`); deploy at an agreed quiet time; verify the
 release, migration, skill files, flags and logs afterwards.
 
+For a migration-free fix, the canary-swap fast path above is viable — see `deploy-and-ops.md` for
+the exact, tested commands (compose variable pinning, SSH/PowerShell quoting gotchas, OpenClaw
+Gateway operations) instead of re-deriving them each time.
+
 ## Multi-tenancy on production (2026-09-30)
 
 The user chose a manual rollout before merging to `main`. Commit `a5cec1d` (branch pushed, then
@@ -242,6 +246,46 @@ deleted, and the three test emails removed from Ralina's real inbox via IMAP.
 Still open: PR → `main` for `feature/meeting-summary` (same `main`-catch-up gap as the other
 rollouts — resolved for the prior branch when PR #9 merged and auto-deployed; this one is still
 ahead of `main`).
+
+## Meeting-summary live E2E round 2 (2026-10-16) — same-link disambiguation, scan window, DM channel identity
+
+Follow-up live round against Lilia's real calendar and a live demo with her. Three real fixes,
+each deployed via the canary-swap fast path (see `deploy-and-ops.md`); full suite green throughout
+(557 → 560 passed, 2 skipped, as tests were added). Full operational detail (exact commands,
+PowerShell/SSH gotchas, OpenClaw session findings) now lives in `deploy-and-ops.md`, not here.
+
+1. **Same Telemost link across several real interviews.** Confirmed against Lilia's real calendar:
+   a recruiter can have one *permanent* personal Telemost room, reused as the call link for every
+   calink-booked interview — so the item-5 fix above (exact-link match) can legitimately return
+   more than one candidate email for the same recruiter. Fixed (commit `eb03986`) by
+   `_disambiguate_by_start_time()` in `app/services/summary_email.py`: among same-link candidates,
+   parse each one's own "Конспектирование началось DD.MM.YYYY в HH:MM (MSK)" line and pick the
+   single one within ±20 minutes of `Recording.calendar_dtstart`; stays `AMBIGUOUS` if zero or more
+   than one candidate matches the window.
+2. **Scan window silently skipped yesterday's recording.** `scan_ignore_before_today`'s existing
+   local-midnight cutoff meant a manual "Проверь новые записи" the morning after an interview
+   would silently skip it (`_persist_found_recording` → `"skipped_legacy"`, no error, no mention to
+   the recruiter). Found by re-reading the code before promising the user it would work for an
+   imminent demo, not after. Fixed with a new additive setting, `scan_ignore_before_days` (default
+   0 = unchanged historical behaviour), subtracted from the local-midnight cutoff in
+   `local_today_start_utc()` (`app/config.py`, `app/scheduler/cron.py`, commit `b9c6f05`). Set to
+   `1` on prod (global env var — affects every recruiter, accepted as a safe, backward-compatible
+   default-0 change) to give a yesterday+today window instead of today-only.
+3. **Mattermost DM channel id vs. name mismatch.** See `deploy-and-ops.md` → "Mattermost DM channel
+   — two valid identities" for the full writeup. Commit `a561683` (plus the ruff line-length fixup
+   folded into the same push).
+4. **Found while diagnosing the above, not a code bug:** the `recordings-saver` OpenClaw agent
+   runs one shared conversation session per Mattermost bot account, not one per recruiter — see
+   `deploy-and-ops.md` → "Known architecture gap" for the full writeup and the manual reset
+   procedure. This is also why a transient `HTTPStatusError` from Yandex CalDAV (reproduced
+   manually afterwards: the exact same 3-request discovery flow succeeded cleanly moments later —
+   not a credential or calendar-access problem) got misread by the recruiter as a persistent
+   failure; a stuck shared session makes transient backend errors look worse than they are.
+
+Still open, not started: a *deliberate* shared-channel design so Ralina can watch a recruiter's
+conversation with the bot in one place without manual feedback relay — see item 5 below and
+`open-questions.md` Q17. It is blocked on the same single-session architecture gap, not just a
+Mattermost channel-membership change.
 
 ## Next steps (as of 2026-09-29 evening)
 
@@ -500,6 +544,63 @@ with an assessment (passes / recommend or not). Decisions pending: mail access (
 recruiters re-consent), where the LLM runs (Mila vs. a backend model; the backend has no LLM
 today), assessment labelled as the agent's and published only after recruiter confirmation,
 Notion connection needs the comment capability.
+
+## 5. Shared channel to observe a recruiter's conversation with the bot (scope) — NOT STARTED
+
+Agreed with Lilia (2026-10-16) as the format for her upcoming async testing: Ralina creates a
+Mattermost channel with the bot and adds Lilia to it, so Lilia can talk to the bot asynchronously
+while Ralina sees every exchange and reply quality in one place, without a manual feedback relay.
+
+Not a config toggle — see `deploy-and-ops.md` → "Known architecture gap: one shared session per
+Mattermost bot account" and Q17 in `open-questions.md`. Two separate problems need solving, not
+one:
+- `MattermostClient.validate_direct_channel` hard-requires `channel.type == "D"` and exactly two
+  members (bot + recruiter) — a 3-person group channel is Mattermost type `"G"` and fails this
+  outright, and the runtime binding check in `app/routers/tools.py` (`_scan_recruiter` etc.)
+  compares the inbound `recruiter_user_id` against one fixed value per `RecruiterConfig` row, so a
+  message from Ralina in a shared channel would not resolve to Lilia's recruiter identity either.
+- Separately, and discovered only while debugging the live demo: the OpenClaw Gateway already runs
+  one shared conversation session per Mattermost bot account today, with no per-recruiter or
+  per-channel isolation at all. A "shared channel" feature needs to land on top of (or instead of)
+  fixing that gap deliberately, not by accident — right now, adding Ralina to a channel would not
+  give her a safe, separate observer role; it would just be another sender dropped into whatever
+  single thread the bot already has going.
+
+## Fixed: recording_agent.py exec failures, 19.10 and 22.10 (2026-10-27)
+
+Diagnosed via `/debug` (journalctl + backend trajectory +
+`/var/lib/openclaw/agents/recordings-saver/sessions/*.jsonl`), not guessed from chat screenshots.
+**Both incidents, same root cause** — not two separate bugs, and the earlier "maybe the model
+improvised a command outside its allowed set" hypothesis is **disproved**: the 22.10 trajectory
+shows the model correctly called the real `questions` command both times and got the same error
+both times.
+
+Root cause: the 2026-10-16 dual-DM-channel-identity fix (`_dm_channel_matches`, commits
+e33008d/a561683) was applied to `app/routers/tools.py` (scan path) but never to
+`app/services/question_queue.py::_validate_dm` (the `questions`/digest path). OpenClaw reported
+Lilia's DM channel in the deterministic name form (`<bot_user_id>__<recruiter_user_id>`); the
+unfixed raw `RecruiterConfig.mattermost_dm_channel == dm_channel_id` SQL filter rejected it with
+a 409 ("Recruiter or exact Mattermost DM binding is invalid") before `questions` ever ran — a
+clean script exit (197ms), not a Python crash or timeout. Confirmed live: the same `dm_channel_id`
+string in one turn succeeded through `scan` (fixed path) and failed through `questions` (unfixed
+path).
+
+Fixed in `app/services/question_queue.py`: `_validate_dm` now mirrors `_dm_channel_matches` via a
+local `_channel_matches` helper, and a new `_resolve_dm_channel` canonicalizes the inbound channel
+id to the recruiter's stored real id for all downstream `ManualReview`/`NotificationOutbox`/
+`QuestionDigest` queries in `list_active`, `apply_partial`, and `build_digest` — fixing a second,
+related staleness bug the debug session flagged (those queries' own raw `== dm_channel_id` would
+otherwise still miss rows after validation passed, since rows are always written with the real-id
+form). Regression test: `test_list_active_accepts_deterministic_dm_name_form` in
+`tests/test_question_queue.py`. Full suite green: 561 passed, 2 skipped. Not yet deployed — no
+Alembic migration, so the canary-swap fast path applies (see `deploy-and-ops.md`); needs the
+user's go-ahead before SSH.
+
+**Backlog question (Lilia's "можем разобрать эти 14 записей?") is separate and still open** —
+`scan_ignore_before_days` is deliberate design, not a bug; this fix does not change it. Needs a
+product decision: permanent exclusion vs. a one-off `--include-legacy` backfill command
+(recommended, with preview+confirm per Q9's pattern) vs. a manual one-time SQL pass. Decision is
+the user's.
 
 ## Known agent issues (for slides and backlog)
 
