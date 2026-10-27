@@ -109,6 +109,19 @@ message for one recruiter; the scheduled scan, matching, transfer and Notion wri
 unaffected, and the manual-review auto-complete/suppress hygiene inside `build_digest` still runs.
 Set it with `configure_recruiter.py set-digest --email <email> --state enabled|disabled`.
 
+Two nullable columns, `observer_mattermost_user_id` and `observer_mattermost_dm_channel` (Text,
+Text, additive, no backfill), make a recruiter row's digest/question/confirmation text fan out as
+a read-only mirrored notification to a second person's existing Mattermost DM with the bot — e.g.
+Lilia's row pointing at Ralina's own `mattermost_user_id`/`dm_channel`. Both NULL (the default) is
+a no-op: zero extra Mattermost calls. They are populated only on the *observed* recruiter's row and
+are never read by `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` — an observer is a
+notification destination only, never a recruiter identity, and can never trigger a scan or
+mutation. One observer per recruiter row; no separate `RecruiterConfig` row is created for the
+observer. Set or clear with `configure_recruiter.py set-observer --email <email>
+--observer-user-id <id> --observer-dm-channel <id>` / `clear-observer`. See
+`.memory-bank/current-work.md` item 5 and `.memory-bank/open-questions.md` Q17 for the design
+decision (mirrored notification, not a group channel).
+
 ### Calendar inventory and provenance
 
 `recruiter_calendar` is the authoritative inventory of recruiter-owned CalDAV VEVENT collections.

@@ -19,11 +19,13 @@ from tools.setup.configure_recruiter import (
     NotionInspector,
     _storage_base_folder,
     activate_recruiter,
+    clear_observer,
     configure_recruiter,
     parse_notion_database_id,
     preflight_recruiter,
     preflight_recruiter_notion,
     set_daily_digest,
+    set_observer,
 )
 
 
@@ -156,6 +158,68 @@ async def test_set_daily_digest_toggles_existing_active_recruiter(session: Async
 async def test_set_daily_digest_rejects_unknown_recruiter(session: AsyncSession) -> None:
     with pytest.raises(ValueError, match="not found"):
         await set_daily_digest(session, recruiter_email="missing@example.com", enabled=False)
+
+
+@pytest.mark.anyio
+async def test_set_and_clear_observer_round_trip(session: AsyncSession) -> None:
+    recruiter = RecruiterConfig(
+        email="lilia@example.com",
+        notion_database_id="db",
+        synology_base_folder="/root",
+        mattermost_user_id="lilia-id",
+        mattermost_dm_channel="lilia-dm",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    configured = await set_observer(
+        session,
+        recruiter_email="Lilia@example.com",
+        observer_mattermost_user_id="ralina-id",
+        observer_mattermost_dm_channel="ralina-dm",
+    )
+    assert configured.observer_mattermost_user_id == "ralina-id"
+    assert configured.observer_mattermost_dm_channel == "ralina-dm"
+    # Unaffected by the observer mirror: the recruiter's own identity and digest flag.
+    assert configured.mattermost_user_id == "lilia-id"
+    assert configured.daily_digest_enabled is True
+
+    cleared = await clear_observer(session, recruiter_email="lilia@example.com")
+    assert cleared.observer_mattermost_user_id is None
+    assert cleared.observer_mattermost_dm_channel is None
+
+
+@pytest.mark.anyio
+async def test_set_observer_rejects_blank_fields(session: AsyncSession) -> None:
+    recruiter = RecruiterConfig(
+        email="lilia@example.com",
+        notion_database_id="db",
+        synology_base_folder="/root",
+        mattermost_user_id="lilia-id",
+        active=True,
+    )
+    session.add(recruiter)
+    await session.commit()
+
+    with pytest.raises(ValueError, match="required"):
+        await set_observer(
+            session,
+            recruiter_email="lilia@example.com",
+            observer_mattermost_user_id="  ",
+            observer_mattermost_dm_channel="ralina-dm",
+        )
+
+
+@pytest.mark.anyio
+async def test_set_observer_rejects_unknown_recruiter(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        await set_observer(
+            session,
+            recruiter_email="missing@example.com",
+            observer_mattermost_user_id="ralina-id",
+            observer_mattermost_dm_channel="ralina-dm",
+        )
 
 
 @pytest.mark.anyio

@@ -331,6 +331,52 @@ async def test_offline_question_recruiter_rejects_non_allowlisted_user(
 
 
 @pytest.mark.anyio
+async def test_bound_recruiter_never_matches_via_a_recruiters_observer_fields(
+    session: AsyncSession,
+) -> None:
+    """Regression: `observer_mattermost_user_id`/`observer_mattermost_dm_channel` on a
+    recruiter's row are a notification destination, never a recruiter identity. Binding
+    lookups key off `RecruiterConfig.mattermost_user_id`/`mattermost_dm_channel` only -- an
+    observer can never be resolved as (or impersonate) the recruiter she observes, and the
+    observed recruiter's observer fields never satisfy a binding check for either row."""
+    lilia = RecruiterConfig(
+        email="lilia@example.com",
+        notion_database_id="db",
+        synology_base_folder="root",
+        mattermost_user_id="lilia-id",
+        mattermost_dm_channel="lilia-dm",
+        observer_mattermost_user_id="ralina-id",
+        observer_mattermost_dm_channel="ralina-dm",
+        active=True,
+    )
+    ralina = RecruiterConfig(
+        email="ralina@example.com",
+        notion_database_id="db2",
+        synology_base_folder="root2",
+        mattermost_user_id="ralina-id",
+        mattermost_dm_channel="ralina-dm",
+        active=True,
+    )
+    session.add_all([lilia, ralina])
+    await session.commit()
+
+    # Ralina's own user id with Lilia's channel does not resolve Lilia's row via the observer
+    # pair stored there -- it resolves Ralina's own row, whose own channel does not match.
+    with pytest.raises(HTTPException) as excinfo:
+        await _bound_recruiter(session, "ralina-id", "lilia-dm")
+    assert excinfo.value.status_code == 404
+
+    # Lilia's own user id with "her observer's" channel does not resolve either -- her own
+    # mattermost_dm_channel, not her observer_mattermost_dm_channel, governs the match.
+    with pytest.raises(HTTPException) as excinfo:
+        await _bound_recruiter(session, "lilia-id", "ralina-dm")
+    assert excinfo.value.status_code == 404
+
+    resolved = await _bound_recruiter(session, "ralina-id", "ralina-dm")
+    assert resolved.email == "ralina@example.com"
+
+
+@pytest.mark.anyio
 async def test_offline_scan_binding_race_returns_409_and_releases_intent(
     async_client: AsyncClient,
     session: AsyncSession,

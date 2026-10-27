@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -25,6 +26,8 @@ from app.services.reviews import (
     ReviewService,
 )
 from app.tools.mattermost import MattermostClient, MattermostError, direct_channel_name
+
+logger = logging.getLogger(__name__)
 
 QuestionAction = Literal["resolve", "ignore"]
 # A question about a recording in one of these states can no longer change its outcome.
@@ -151,6 +154,33 @@ class QuestionQueueService:
     def capability_token(self, question: ManualReview) -> str:
         return self._reviews.capability_token(question)
 
+    async def mirror_to_observer(self, recruiter: RecruiterConfig, text: str) -> None:
+        """Fan out `text` to the recruiter's configured observer DM, if any.
+
+        Mirroring is a one-way, best-effort notification: the observer fields are never fed
+        into `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` or any `ManualReview`
+        binding/capability check, and a mirror failure never blocks or alters the primary
+        recruiter send (see swarm-report/shared-mattermost-observer-plan.md, Decision B). A
+        no-op when no observer is configured, or in offline test mode (no real Mattermost
+        calls are ever made there).
+        """
+        if self._offline_test_mode:
+            return
+        if (
+            not recruiter.observer_mattermost_user_id
+            or not recruiter.observer_mattermost_dm_channel
+        ):
+            return
+        label = recruiter.display_name or recruiter.email
+        try:
+            await self._mattermost.send_dm(
+                recruiter.observer_mattermost_user_id,
+                f"[{label}] {text}",
+                expected_channel_id=recruiter.observer_mattermost_dm_channel,
+            )
+        except MattermostError as error:
+            logger.warning("Observer mirror failed for recruiter %s: %s", recruiter.email, error)
+
     async def list_active(
         self,
         session: AsyncSession,
@@ -198,7 +228,9 @@ class QuestionQueueService:
             raise ReviewRejectedError("Question answer batch must contain 1..50 items")
         if len({answer.question_id for answer in answers}) != len(answers):
             raise ReviewRejectedError("Question answer batch contains duplicate questions")
-        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
+        recruiter, dm_channel_id = await self._resolve_dm_channel(
+            session, recruiter_user_id, dm_channel_id
+        )
         accepted: list[ReviewMutation] = []
         rejected: list[tuple[uuid.UUID, str]] = []
         for answer in answers:
@@ -224,14 +256,16 @@ class QuestionQueueService:
                 )
                 accepted.append(mutation)
                 if not self._offline_test_mode:
+                    ack_message = f"Recording {mutation.recording_id}: processing started."
                     await self.queue_notification(
                         session,
                         dedupe_key=f"question:{answer.question_id}:start:{mutation.version}",
                         kind="processing_started",
                         recruiter_user_id=recruiter_user_id,
                         dm_channel_id=dm_channel_id,
-                        message=f"Recording {mutation.recording_id}: processing started.",
+                        message=ack_message,
                     )
+                    await self.mirror_to_observer(recruiter, ack_message)
             except ReviewRejectedError as error:
                 rejected.append((answer.question_id, str(error)))
         await session.flush()
@@ -254,7 +288,9 @@ class QuestionQueueService:
         local_date: date,
         send: bool = True,
     ) -> QuestionDigest | None:
-        _, dm_channel_id = await self._resolve_dm_channel(session, recruiter_user_id, dm_channel_id)
+        recruiter, dm_channel_id = await self._resolve_dm_channel(
+            session, recruiter_user_id, dm_channel_id
+        )
         dedupe_key = f"digest:{recruiter_user_id}:{dm_channel_id}:{local_date.isoformat()}"
         outstanding_summary = await session.scalar(
             select(NotificationOutbox.id).where(
@@ -353,15 +389,17 @@ class QuestionQueueService:
             question.digest_id = digest.id
             self._reviews.rotate_digest_capability(question, issued_at=now)
             lines.extend(self._render_question(number, question))
+        digest_text = "\n".join(lines)
         await self.queue_notification(
             session,
             dedupe_key=dedupe_key,
             kind="summary",
             recruiter_user_id=recruiter_user_id,
             dm_channel_id=dm_channel_id,
-            message="\n".join(lines),
+            message=digest_text,
             entity_id=digest.id,
         )
+        await self.mirror_to_observer(recruiter, digest_text)
         return digest
 
     @staticmethod

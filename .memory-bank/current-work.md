@@ -545,15 +545,47 @@ recruiters re-consent), where the LLM runs (Mila vs. a backend model; the backen
 today), assessment labelled as the agent's and published only after recruiter confirmation,
 Notion connection needs the comment capability.
 
-## 5. Shared channel to observe a recruiter's conversation with the bot (scope) — NOT STARTED
+## 5. Shared channel to observe a recruiter's conversation with the bot (scope) — mirrored-notification decided 2026-10-27
 
 Agreed with Lilia (2026-10-16) as the format for her upcoming async testing: Ralina creates a
 Mattermost channel with the bot and adds Lilia to it, so Lilia can talk to the bot asynchronously
 while Ralina sees every exchange and reply quality in one place, without a manual feedback relay.
 
-Not a config toggle — see `deploy-and-ops.md` → "Known architecture gap: one shared session per
-Mattermost bot account" and Q17 in `open-questions.md`. Two separate problems need solving, not
-one:
+**Decided 2026-10-27, per `swarm-report/shared-mattermost-observer-plan.md`:** reject the literal
+3-person group-channel shape. Ship a **mirrored notification** instead — Backend copies every
+digest/question/confirmation text it already sends to the *observed* recruiter (Lilia) to Ralina's
+own existing DM with the bot, prefixed with the recruiter's display name, read-only, via the
+existing `MattermostClient.send_dm` path. No group-channel membership, no change to
+`validate_direct_channel`, no new recruiter identity inside Lilia's channel, no interaction with
+`_bound_recruiter`/`_scan_recruiter`/`_question_recruiter`. This avoids both problems noted below by
+construction: `validate_direct_channel` keeps its `type == "D"` + exact-2-member invariant for
+every recruiter, and the mirror never adds a second real sender into Lilia's OpenClaw session, so
+the one-shared-session-per-bot-account gap (see `deploy-and-ops.md` → "Known architecture gap") is
+not reopened or made worse by this feature — it stays a separate, already-tracked backlog item.
+
+Per-recruiter mirror config lives as two nullable columns (`observer_mattermost_user_id`,
+`observer_mattermost_dm_channel`) on the **observed** recruiter's row (Lilia's `RecruiterConfig`),
+pointing at Ralina's own `mattermost_user_id`/`dm_channel`. They are read only by the new mirror
+helper, never by `_bound_recruiter`/`_scan_recruiter`/`_question_recruiter` matching — the observer
+is a notification destination, never a recruiter identity. No RecruiterConfig row is created for
+Ralina-as-observer; she reuses her own already-provisioned DM. One observer per recruiter row;
+multiple observers and self-service onboarding are out of scope.
+
+Blockers resolved 2026-10-27: Lilia's consent for her free-form replies being mirrored verbatim to
+Ralina was obtained; Ralina's own Mattermost `mattermost_user_id` + `dm_channel` were confirmed
+already set and active on her `RecruiterConfig` row (`ralina.seitova@effective.band`) via a
+read-only query — no onboarding step needed, the observer fields on Lilia's row point straight at
+Ralina's existing DM.
+
+Implementation (python-fastapi agent, same plan, parallel to this doc update): additive Alembic
+migration for the two columns, `RecruiterConfig` model fields, `mirror_to_observer` helper called
+from `build_digest` and the question-send/reply-acknowledgment paths in `app/routers/tools.py`,
+`configure_recruiter.py set-observer`/`clear-observer`. Cross-check the actual migration revision
+id against `alembic/versions/` once that agent's commit lands — not yet visible in the working tree
+as of this note.
+
+Original two problems this decision sidesteps (see `deploy-and-ops.md` → "Known architecture gap:
+one shared session per Mattermost bot account" and the now-closed Q17 in `open-questions.md`):
 - `MattermostClient.validate_direct_channel` hard-requires `channel.type == "D"` and exactly two
   members (bot + recruiter) — a 3-person group channel is Mattermost type `"G"` and fails this
   outright, and the runtime binding check in `app/routers/tools.py` (`_scan_recruiter` etc.)
@@ -561,10 +593,11 @@ one:
   message from Ralina in a shared channel would not resolve to Lilia's recruiter identity either.
 - Separately, and discovered only while debugging the live demo: the OpenClaw Gateway already runs
   one shared conversation session per Mattermost bot account today, with no per-recruiter or
-  per-channel isolation at all. A "shared channel" feature needs to land on top of (or instead of)
+  per-channel isolation at all. A group-channel shape would need to land on top of (or instead of)
   fixing that gap deliberately, not by accident — right now, adding Ralina to a channel would not
   give her a safe, separate observer role; it would just be another sender dropped into whatever
-  single thread the bot already has going.
+  single thread the bot already has going. The mirrored-notification shape sidesteps this gap
+  entirely rather than requiring it to be fixed first.
 
 ## Fixed: recording_agent.py exec failures, 19.10 and 22.10 (2026-10-27)
 
