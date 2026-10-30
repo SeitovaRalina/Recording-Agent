@@ -171,6 +171,30 @@ def test_timestamp_inconsistency_and_low_confidence_fail_closed() -> None:
     )
 
 
+def test_filename_timestamp_tolerance_absorbs_real_telemost_processing_lag() -> None:
+    """Real Telemost recordings observed 6h14m-8h14m of lag between the filename-encoded
+    start and disk_created_at -- normal Yandex.Disk processing delay, not a mislabeled file
+    (see swarm-report, Lilia's prod data 2026-10-27..29). The default 12h tolerance must
+    absorb that lag and let matching proceed, while a genuine day-plus anomaly (the existing
+    test above, and one real case observed at ~26h) still fails closed."""
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Team sync"
+    normal_lag = recording(title, start)
+    normal_lag.disk_created_at = start + timedelta(hours=8, minutes=14)
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+    result = matcher.score(normal_lag, [event(start=start, summary=title)])
+
+    assert result.reason != ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
+
+    just_over_tolerance = recording(title, start)
+    just_over_tolerance.disk_created_at = start + timedelta(hours=12, minutes=5)
+
+    assert matcher.score(just_over_tolerance, [event(start=start, summary=title)]).reason == (
+        ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
+    )
+
+
 def test_manual_review_candidate_payload_is_field_and_total_bounded() -> None:
     start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
     title = "X" * 500

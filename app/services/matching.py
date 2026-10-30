@@ -188,7 +188,8 @@ class InterviewMatcher:
             return self._manual(ManualReviewReason.FILENAME_INVALID)
         if recording.disk_created_at is not None:
             disk_created_at = self._utc(recording.disk_created_at)
-            if abs((disk_created_at - parsed.start_utc).total_seconds()) > 6 * 60 * 60:
+            tolerance = self._settings.filename_timestamp_tolerance_hours * 60 * 60
+            if abs((disk_created_at - parsed.start_utc).total_seconds()) > tolerance:
                 return self._manual(ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT)
 
         compatible_by_key: dict[tuple[object, str, str | None], ParsedVEVENT] = {}

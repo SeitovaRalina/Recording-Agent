@@ -635,6 +635,41 @@ product decision: permanent exclusion vs. a one-off `--include-legacy` backfill 
 (recommended, with preview+confirm per Q9's pattern) vs. a manual one-time SQL pass. Decision is
 the user's.
 
+## Fixed: filename_timestamp_inconsistent threshold too tight for real Telemost lag (2026-10-30)
+
+Found while helping Lilia unblock a specific recording (interview with Vladislav Rastauskas,
+27.10): `InterviewMatcher.score` (`app/services/matching.py`) hard-gates on
+`abs(disk_created_at - filename_start) > 6h` *before* any calendar/candidate matching runs, with
+no mapped question label and no `choices` — a recruiter cannot `resolve`/`answer` their way past
+this reason through the normal DM flow at all (confirmed in code: `resolve` always rejects when
+`question_context["choices"]` isn't a list; `ignore` would wrongly mark a real interview as not
+one). This was previously undiagnosed; the 19.10/22.10 "Open incident" entry above wrongly assumed
+a different cause before the actual root cause (the DM-channel bug) was found.
+
+Measured the real gap across Lilia's open `filename_timestamp_inconsistent` recordings
+(08.10, 20.10, 27.10 x2, 29.10 x2): **6h14m-8h14m, clustered tightly** — normal Yandex.Disk
+processing lag between a Telemost call's actual start and when Disk registers the file as
+"created", not corrupted/renamed filenames. One unrelated case (12.10) showed **25h51m** — a
+genuine anomaly the check should keep catching.
+
+Fixed: threshold moved from a hardcoded `6 * 60 * 60` to `Settings.filename_timestamp_tolerance_hours`
+(default `12`, additive, `ge=1 le=72`) — covers the observed 6-8h lag with margin, still fails
+closed on the 25h+ outlier. `app/config.py`, `app/services/matching.py`. Regression test
+`test_filename_timestamp_tolerance_absorbs_real_telemost_processing_lag` in `tests/test_matching.py`
+(8h14m now passes; 12h5m still correctly fails closed); existing 1-day-offset test unchanged and
+still passes under the new threshold. Full suite: 572 passed, 2 skipped. ruff + mypy clean.
+
+Manually resolved outside this fix (direct, user-approved prod DB writes, read-only diagnosis via
+narrow psql queries throughout): the two 27.10 recordings (`7092e92d` 15:17, `f7d36d35` 15:43) were
+Lilia's real duplicate-file edge case for the same interview — she merged them herself, uploaded to
+Synology herself, and attached the link to Vladislav Rastauskas's Notion card herself, entirely
+outside the agent. Both recordings set to `status='ignored'` and their pending `manual_reviews`
+closed (`result.closed_by = "manual_resolution_outside_agent"`) so they stop appearing in
+`questions`/digest and can't be double-processed if the matching pipeline later revisits them.
+
+Not yet deployed or committed to a PR — no Alembic migration, canary-swap path applies once
+committed.
+
 ## Known agent issues (for slides and backlog)
 
 Offers a Disk-cleanup preview instead of refusing an unavailable operation (R13-D4, 2 of 3

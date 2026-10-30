@@ -90,6 +90,21 @@ class Settings(BaseSettings):
         default="Europe/Moscow",
         validation_alias=AliasChoices("recording_filename_timezone", "RECORDING_FILENAME_TIMEZONE"),
     )
+    filename_timestamp_tolerance_hours: int = Field(
+        default=12,
+        ge=1,
+        le=72,
+        validation_alias=AliasChoices(
+            "filename_timestamp_tolerance_hours", "FILENAME_TIMESTAMP_TOLERANCE_HOURS"
+        ),
+        description=(
+            "Max hours between a recording's filename-encoded start and disk_created_at before "
+            "InterviewMatcher refuses to trust the filename time and raises "
+            "FILENAME_TIMESTAMP_INCONSISTENT. Real Telemost recordings observed 6-8h of normal "
+            "Yandex.Disk processing lag; keep this above that with margin, not at the raw max, "
+            "so a genuine mislabeled/stale file (seen once at ~26h) still gets caught."
+        ),
+    )
     summary_local_time: str = Field(
         default="18:00",
         pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
