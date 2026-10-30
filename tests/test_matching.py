@@ -78,10 +78,22 @@ def test_filename_parser_rejects_unsupported_shapes(filename: str) -> None:
         parse_recording_filename(filename, "UTC")
 
 
-def test_title_normalization_is_only_nfkc_casefold_and_whitespace() -> None:
+def test_title_normalization_is_nfkc_casefold_whitespace_and_slash_lookalikes() -> None:
     assert normalize_title("  Ａbc\t Иван  ") == "abc иван"
     assert normalize_title("Meeting-title") != normalize_title("Meeting title")
     assert normalize_title("Иван") != normalize_title("Ivan")
+
+
+def test_title_normalization_folds_slash_lookalikes_to_ascii_slash() -> None:
+    """Regression: a recruiter's renamed Disk filename used `╱` (BOX DRAWINGS LIGHT
+    DIAGONAL) where the real calendar event title has an ASCII `/` -- NFKC alone does not
+    fold these, so the exact-title-match gate silently rejected a real, time-compatible
+    event (confirmed live against production data, 7 recordings, all within 5 minutes of
+    their real event)."""
+    ascii_title = "Иван Михно // Синхронизация с СТО"
+    for lookalike in ("╱", "⁄", "∕", "⧸", "／"):
+        confusable_title = ascii_title.replace("/", lookalike)
+        assert normalize_title(confusable_title) == normalize_title(ascii_title)
 
 
 def test_unique_exact_title_time_and_calink_auto_match() -> None:
@@ -93,6 +105,27 @@ def test_unique_exact_title_time_and_calink_auto_match() -> None:
 
     assert result.confidence == 0.90
     assert result.manual_review_required is False
+
+
+def test_exact_title_match_tolerates_slash_lookalike_in_filename() -> None:
+    """Regression for live prod data: a recording's filename title used `╱╱`
+    (confirmed OS/app auto-substitution for a forbidden `/`) while the real calendar event
+    kept the ASCII `//`. Before the fix this entered zero candidates (NO_COMPATIBLE_EVENT)
+    despite the event starting 3 minutes away. With only time_overlap as a signal (no
+    calink/name/interview-keyword marker on this plain Telemost event) it correctly stays
+    LOW_CONFIDENCE rather than auto-matching -- but the event must now be found and offered
+    as the candidate to confirm, instead of the system claiming none exists at all."""
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    calendar_title = "Иван Михно // Синхронизация с СТО"
+    filename_title = calendar_title.replace("/", "╱")
+    result = InterviewMatcher(Settings(recording_filename_timezone="UTC")).score(
+        recording(filename_title, start),
+        [event(start=start, summary=calendar_title, description="")],
+    )
+
+    assert result.reason == ManualReviewReason.LOW_CONFIDENCE
+    assert len(result.candidates) == 1
+    assert result.candidates[0].event_summary == calendar_title
 
 
 def test_reported_non_recruiting_title_cannot_match_other_event() -> None:
@@ -168,6 +201,30 @@ def test_timestamp_inconsistency_and_low_confidence_fail_closed() -> None:
             [event(start=start, summary=title, description="")],
         ).reason
         == ManualReviewReason.LOW_CONFIDENCE
+    )
+
+
+def test_filename_timestamp_tolerance_absorbs_real_telemost_processing_lag() -> None:
+    """Real Telemost recordings observed 6h14m-8h14m of lag between the filename-encoded
+    start and disk_created_at -- normal Yandex.Disk processing delay, not a mislabeled file
+    (see swarm-report, Lilia's prod data 2026-10-27..29). The default 12h tolerance must
+    absorb that lag and let matching proceed, while a genuine day-plus anomaly (the existing
+    test above, and one real case observed at ~26h) still fails closed."""
+    start = datetime(2026, 7, 15, 8, 54, 11, tzinfo=UTC)
+    title = "Team sync"
+    normal_lag = recording(title, start)
+    normal_lag.disk_created_at = start + timedelta(hours=8, minutes=14)
+    matcher = InterviewMatcher(Settings(recording_filename_timezone="UTC"))
+
+    result = matcher.score(normal_lag, [event(start=start, summary=title)])
+
+    assert result.reason != ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
+
+    just_over_tolerance = recording(title, start)
+    just_over_tolerance.disk_created_at = start + timedelta(hours=12, minutes=5)
+
+    assert matcher.score(just_over_tolerance, [event(start=start, summary=title)]).reason == (
+        ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT
     )
 
 

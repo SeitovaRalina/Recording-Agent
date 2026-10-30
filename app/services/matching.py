@@ -114,8 +114,25 @@ class MatchResult:
     candidates: tuple[MatchCandidate, ...] = ()
 
 
+# Visually confusable slash-like characters observed replacing "/" in recruiter-renamed
+# filenames -- likely an OS/app auto-substitution, since "/" is forbidden in filenames on
+# some platforms. NFKC does not fold any of these to ASCII "/" (verified: they are not
+# canonically/compatibility equivalent), so without this map an exact title match silently
+# fails and the event never enters the matching pool at all (not low-confidence -- a hard
+# NO_COMPATIBLE_EVENT), even when the real calendar event's start is minutes away.
+_SLASH_LOOKALIKES = str.maketrans(
+    {
+        "╱": "/",  # ╱ BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT
+        "⁄": "/",  # ⁄ FRACTION SLASH
+        "∕": "/",  # ∕ DIVISION SLASH
+        "⧸": "/",  # ⧸ BIG SOLIDUS
+        "／": "/",  # ／ FULLWIDTH SOLIDUS
+    }
+)
+
+
 def normalize_title(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = unicodedata.normalize("NFKC", value.translate(_SLASH_LOOKALIKES)).casefold()
     return " ".join(normalized.split())
 
 
@@ -188,7 +205,8 @@ class InterviewMatcher:
             return self._manual(ManualReviewReason.FILENAME_INVALID)
         if recording.disk_created_at is not None:
             disk_created_at = self._utc(recording.disk_created_at)
-            if abs((disk_created_at - parsed.start_utc).total_seconds()) > 6 * 60 * 60:
+            tolerance = self._settings.filename_timestamp_tolerance_hours * 60 * 60
+            if abs((disk_created_at - parsed.start_utc).total_seconds()) > tolerance:
                 return self._manual(ManualReviewReason.FILENAME_TIMESTAMP_INCONSISTENT)
 
         compatible_by_key: dict[tuple[object, str, str | None], ParsedVEVENT] = {}
